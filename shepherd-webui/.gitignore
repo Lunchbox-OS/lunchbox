@@ -1,8 +1,0 @@
-node_modules/
-dist/*
-!dist/.gitkeep
-dist-standalone/
-.cache/
-# Built by `shepherd build config-wasm` (wasm-pack) from
-# crates/shepherd-config-wasm. Generated, not source.
-src/config/wasm/

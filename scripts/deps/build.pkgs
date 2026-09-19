@@ -1,4 +1,4 @@
-# Build-time system packages for shepherd-launcher
+# Build-time system packages for Lunchbox
 # These are required to compile the Rust code
 # One package per line, comments start with #
 
@@ -46,11 +46,11 @@ clang
 llvm-20-dev
 libpolly-20-dev
 
-# libmpv (used by shepherd-media for in-process media playback)
+# libmpv (used by lunchbox-media for in-process media playback)
 libmpv-dev
 
 # D-Bus client library (required by bluer, the BLE transport in
-# shepherd-ble; bluer talks to BlueZ over the system bus).
+# lunchbox-ble; bluer talks to BlueZ over the system bus).
 libdbus-1-dev
 
 # Required for rustup

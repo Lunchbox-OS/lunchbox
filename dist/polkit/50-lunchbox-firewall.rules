@@ -1,0 +1,20 @@
+// Polkit rule for lunchbox-firewall-helper.
+//
+// Grants the action `com.lunchboxos.firewall.apply-process` (declared in
+// /usr/share/polkit-1/actions/com.lunchboxos.firewall.policy) without a password
+// prompt to members of the unix group `lunchbox-firewall`.
+//
+// Install path: /etc/polkit-1/rules.d/50-lunchbox-firewall.rules
+//
+// Setup notes:
+//   1. Create the group:   sudo groupadd --system lunchbox-firewall
+//   2. Add the kiosk user: sudo usermod -aG lunchbox-firewall <user>
+//   3. The user must log out and back in for the supplementary group to take
+//      effect, OR lunchboxd must be restarted from a fresh session.
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "com.lunchboxos.firewall.apply-process" &&
+        subject.isInGroup("lunchbox-firewall")) {
+        return polkit.Result.YES;
+    }
+});

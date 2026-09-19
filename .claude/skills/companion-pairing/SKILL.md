@@ -1,11 +1,11 @@
 ---
 name: companion-pairing
 description: >-
-  Pair the Shepherd Companion Android app with a shepherd device over BLE, and
+  Pair the Lunchbox Companion Android app with a Lunchbox device over BLE, and
   verify the result on both sides — the flow no unit test can reach (Numeric
   Comparison, bonding, claim, reconnect, re-pair after factory reset). Use
-  whenever you change `ShepherdConnection`, `BondManager`, the pairing UI, or
-  anything in `crates/shepherd-ble`, and whenever you need to confirm a pairing
+  whenever you change `DeviceConnection`, `BondManager`, the pairing UI, or
+  anything in `crates/lunchbox-ble`, and whenever you need to confirm a pairing
   or reconnect bug end-to-end. Drives a USB-attached phone over adb against the
   headless dev session, so it works over SSH with no graphical login.
 ---
@@ -15,7 +15,7 @@ description: >-
 Pairing is the part of the stack unit tests cannot touch: Numeric
 Comparison, OS-level bonding, the `claim` RPC, and the encrypted-link
 reconnect all live in the Android and BlueZ stacks. Every regression
-this project has shipped in `ShepherdConnection`/`BondManager` was a
+this project has shipped in `DeviceConnection`/`BondManager` was a
 mechanism error invisible in the Kotlin — implicit bonding, lazy
 encryption, a queue outrunning its reader. **Changes to those files need
 a pass through this skill before they land.**
@@ -114,7 +114,7 @@ export ANDROID_SERIAL=63251JEA305665   # the Pixel
 ```
 
 `SHOTDIR` is shared, so give each phone its own when driving both in one
-session (`SHOTDIR=/tmp/shepherd-pairing/moto`) or the second run
+session (`SHOTDIR=/tmp/lunchbox-pairing/moto`) or the second run
 overwrites the first's `result.png`.
 
 The two phones are deliberately unalike — different Android versions,
@@ -134,7 +134,7 @@ check whether the other phone is holding the link before anything else:**
 ```sh
 busctl --system get-property org.bluez /org/bluez/hci2/dev_<peer> \
   org.bluez.Device1 Connected
-adb -s <other-phone> shell am force-stop com.armeafamily.shepherd.companion
+adb -s <other-phone> shell am force-stop com.lunchboxos.companion
 ```
 
 The device is back on air a few seconds after the peer drops. This makes
@@ -231,7 +231,7 @@ Three consequences when driving the Motorola:
   ```
 
 Verified end-to-end on 2026-09-07: install, permission gate, and a scan
-that lists `shepherd` at the pinned adapter address. Pairing itself has
+that lists `lunchbox` at the pinned adapter address. Pairing itself has
 *not* been exercised from this phone — the "Android asks twice" consent
 ordering and the notification mechanics below are Pixel/SDK 37
 observations and should be re-derived here rather than assumed.
@@ -247,7 +247,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 If that fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, a release-signed
 build is already installed and the only way past it is
-`adb uninstall com.armeafamily.shepherd.companion`. **That erases the
+`adb uninstall com.lunchboxos.companion`. **That erases the
 app's data, including admin records and claim tokens for real devices** —
 confirm with the owner first; the token is not recoverable.
 
@@ -256,21 +256,21 @@ dialog:
 
 ```sh
 for p in BLUETOOTH_SCAN BLUETOOTH_CONNECT POST_NOTIFICATIONS; do
-  adb shell pm grant com.armeafamily.shepherd.companion android.permission.$p
+  adb shell pm grant com.lunchboxos.companion android.permission.$p
 done
 ```
 
 ## The loop
 
 ```sh
-./scripts/shepherd dev headless          # device side (see the headless-dev skill)
-adb shell am start -n com.armeafamily.shepherd.companion/.MainActivity
+./scripts/lunchbox dev headless          # device side (see the headless-dev skill)
+adb shell am start -n com.lunchboxos.companion/.MainActivity
 ./.claude/skills/companion-pairing/pair.sh tap "Pair a device"
 DEVICE=8C:68:8B:41:02:DC ./.claude/skills/companion-pairing/pair.sh run
 ```
 
-`DEVICE` picks the scan row. Leave it unset for the plain `shepherd`
-label; set it to the serving controller's address when a second shepherd
+`DEVICE` picks the scan row. Leave it unset for the plain `lunchbox`
+label; set it to the serving controller's address when a second Lunchbox
 is in range (see the two-radios gotcha below) — the app prints the
 address under each row, so this is the only way to tell them apart.
 
@@ -291,7 +291,7 @@ a phone bond showing `LE:Y` with `EncryptionStatus{keySize=16`.
 Before a run, clear the notification shade — see the shade-reflow gotcha
 below.
 
-Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
+Screenshots land in `$SHOTDIR` (default `/tmp/lunchbox-pairing`) — Read
 `result.png` to actually see the end state.
 
 ## What to exercise
@@ -307,7 +307,7 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
 - **Re-pair after factory reset** — `touch dev-runtime/data/.factory-reset-ble`
   and restart the session. (That path is the dev stack's, which runs with
   `--no-state-custodian`. On an installed device the sentinel is the *device's*
-  and lives at `/var/lib/shepherdd/admin/.factory-reset-ble` — issue #157.) The device returns to unclaimed and drops its
+  and lives at `/var/lib/lunchboxd/admin/.factory-reset-ble` — issue #157.) The device returns to unclaimed and drops its
   bond; the app should show "Bond lost — re-pair needed", and `Re-pair`
   leads back to the scan list (not straight into pairing).
 
@@ -361,7 +361,7 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
 
   ```
   BluetoothBondStateMachine: sendPairingRequestIntent: ACTION_PAIRING_REQUEST … variant=3
-  BluetoothPairingService: Show pairing notification for  (shepherd-26.04)
+  BluetoothPairingService: Show pairing notification for  (lunchbox-26.04)
   ```
 
   …and `cmd notification list` showed no such notification. That combination —
@@ -425,14 +425,14 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   networks but leaves cellular alone). Clearing the Bluetooth package's
   storage is *not* a safe reset — prefer the settings reset if you need
   to clear phone-side Bluetooth state at all.
-- **Two shepherds in range look identical in the app.** The advertised
-  name is capped at 8 bytes, so every device is just `shepherd` and
+- **Two lunchboxs in range look identical in the app.** The advertised
+  name is capped at 8 bytes, so every device is just `lunchbox` and
   `pair.sh`'s label match taps whichever the scan listed first — which may
   be a *different machine on the desk*, and then nothing works and the
   daemon log stays silent because it was never involved. The app prints
   each row's controller address; pass it as `DEVICE=`. `bluetoothctl scan
   le` from the host's other radio enumerates who is actually advertising.
-- **With two radios present, shepherdd serves whichever BlueZ lists
+- **With two radios present, lunchboxd serves whichever BlueZ lists
   first** — not the one you meant, and not necessarily the one the phone
   is bonded to. Symptom: the app sits on "Connecting…" forever while the
   daemon logs `BLE management advertising started` and looks perfectly

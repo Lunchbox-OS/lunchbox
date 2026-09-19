@@ -1,6 +1,6 @@
 # Books
 
-`shepherdd` runs reading activities through [Okular][okular], KDE's document
+`lunchboxd` runs reading activities through [Okular][okular], KDE's document
 viewer, with `type = "ebook"` entries. One entry is one book, and opening it
 puts the child back on the page they stopped on.
 
@@ -10,10 +10,10 @@ dedicated kind exists for two reasons, and neither is cosmetic:
 - **The child stays in the book.** Okular's defaults offer a file dialog over
   the whole filesystem, a print dialog with a write path, a settings dialog and
   a menubar. All of it is closed off, using KDE's own Kiosk framework rather
-  than anything shepherd patches.
+  than anything Lunchbox patches.
 - **The page is remembered.** Okular writes its reading position only when its
   window closes cleanly, and it installs no `SIGTERM` handler at all — so a
-  signal-only stop loses the place every time. shepherd asks the compositor to
+  signal-only stop loses the place every time. Lunchbox asks the compositor to
   close the window first, and only then signals.
 
 **No books are included, and none can be.** Supply your own, DRM-free. A book
@@ -26,7 +26,7 @@ point of the store.
 ## Installing
 
 ```sh
-sudo shepherd-admin apps install okular
+sudo lunchbox-admin apps install okular
 ```
 
 That installs three packages, and the second is the one people miss:
@@ -37,7 +37,7 @@ That installs three packages, and the second is the one people miss:
 | `okular-extra-backends` | **EPUB**, DjVu, Markdown and TIFF. Packaged separately from Okular, so without it a reading activity opens PDFs and refuses novels. |
 | `fonts-noto-core` | Provides `Noto Serif`, the default reading font. |
 
-If the reader or a format's backend is missing, shepherd says so as an entry
+If the reader or a format's backend is missing, Lunchbox says so as an entry
 diagnostic (`EbookReaderMissing`) rather than leaving the child to find out.
 
 ## Configuring an activity
@@ -71,7 +71,7 @@ default = "deny"
 | `kiosk` | `true` | `false` unlocks the reader's own menus, file dialog and settings. For an admin looking at what Okular does unrestricted — not for a child. |
 | `viewer` | `okular` | The only reader wired up. |
 | `command` | the viewer's name | An absolute path, or a different binary. |
-| `args`, `env` | — | Appended after what shepherd derives; `env` is layered over the generated `XDG_*` variables. |
+| `args`, `env` | — | Appended after what Lunchbox derives; `env` is layered over the generated `XDG_*` variables. |
 
 ### Which layout
 
@@ -102,11 +102,11 @@ the view. Turning a page is bound to keys (`Page Down`, `Space`, arrows), to
 the scroll wheel at the top or bottom of a page (`wheelEvent`), and to nothing
 else. A touchscreen produces none of those.
 
-**So shepherd puts the page buttons in the HUD.** A reading session adds a
+**So Lunchbox puts the page buttons in the HUD.** A reading session adds a
 `‹` and a `›` at the far left of the HUD bar, before the activity's name — the
 opposite end from the reset and end-session buttons, so the two controls used on
 every page never share an edge with the two that end the session. They are
-shepherd's own surface — on the overlay layer, above the activity, and outside
+Lunchbox's own surface — on the overlay layer, above the activity, and outside
 anything the reader's own restrictions could take away — and pressing one
 synthesizes the `Page Up` / `Page Down` the reader is already listening for,
 through the same `/dev/uinput` device the input-compat bridges use.
@@ -137,7 +137,7 @@ everywhere else.
 
 The buttons need `/dev/uinput` to be writable by the session user — the same
 access the touch and gamepad bridges need. Where it is not, and the device has
-no keyboard or gamepad either, shepherd raises the `EbookNoPageTurn` diagnostic
+no keyboard or gamepad either, Lunchbox raises the `EbookNoPageTurn` diagnostic
 rather than leaving a child on page one; it names both fixes (the uinput access,
 or `layout = "scroll"`).
 
@@ -173,7 +173,7 @@ laid out, and the reader only scales them.
 
 Okular keeps a per-document record in
 `<state>/ebook/<entry-id>/data/okular/docdata/<size>.<name>.xml`, and restores
-the viewport from it on the next open. shepherd never writes those files.
+the viewport from it on the next open. Lunchbox never writes those files.
 
 Two things follow.
 
@@ -227,7 +227,7 @@ The admin's own `~/.config` is never touched — which also means a child's
 reading never appears in an admin's recent-files list, and an admin's Okular
 settings are not something a child can reach.
 
-## What shepherd generates, and what it leaves alone
+## What Lunchbox generates, and what it leaves alone
 
 Every file under `config/` is re-rendered **before each launch**. Okular rewrites its own configuration when it exits, so
 a one-time seed would decay; re-rendering means the restrictions hold across
@@ -271,7 +271,7 @@ Hidden=true`, and a local XMLGUI document declaring `hidden="true"`, whether
 minimal or a full copy of Okular's own with a version stamp beating it.
 
 What does work is Okular's **own full-screen mode**, which hides the menubar and
-the toolbar together. shepherd asks for it in the generated `okularrc`:
+the toolbar together. Lunchbox asks for it in the generated `okularrc`:
 
 ```ini
 [Desktop Entry][$i]
@@ -280,7 +280,7 @@ shouldShowMenuBarComingFromFullScreen=false
 shouldShowToolBarComingFromFullScreen=false
 ```
 
-The second and third lines are the half that makes it stick. shepherd's
+The second and third lines are the half that makes it stick. Lunchbox's
 compositor refuses the fullscreen surface state — that is what keeps the HUD
 visible — so Okular leaves the mode again immediately, and on the way out it
 restores exactly what those keys say, which is nothing. The window keeps its
@@ -293,7 +293,7 @@ restriction on it puts the toolbar back.
 
 ### What is left
 
-The book, and shepherd's HUD above it. Okular still draws a hairline frame
+The book, and Lunchbox's HUD above it. Okular still draws a hairline frame
 around each page, which has no setting and reads as a page edge anyway.
 
 ## What this is not
@@ -310,7 +310,7 @@ Two known gaps, both benign on a kiosk:
   nothing to drag from: no file manager, no second application.
 - **`[KDE URL Restrictions]`** does not bound what Okular opens. Okular never
   calls `KAuthorized` itself — the coverage above comes entirely from
-  `KActionCollection` — so that group constrains KIO callers only, and shepherd
+  `KActionCollection` — so that group constrains KIO callers only, and Lunchbox
   does not rely on it.
 
 ## Reading as a reward
@@ -351,10 +351,10 @@ page reliably at the end of a session.
 ## Troubleshooting
 
 **"The document could not be opened" on an EPUB.** `okular-extra-backends` is
-not installed. `sudo shepherd-admin apps install okular`.
+not installed. `sudo lunchbox-admin apps install okular`.
 
 **The child is back at page one.** The reading position is written on a clean
-close. Check that the session ended through shepherd (the HUD, a time limit, or
+close. Check that the session ended through Lunchbox (the HUD, a time limit, or
 `stop`) rather than the process being killed — and that the entry is
 `type = "ebook"`, since a `type = "process"` Okular gets no polite close.
 

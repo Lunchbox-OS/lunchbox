@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "shepherd-companion"
+rootProject.name = "lunchbox-companion"
 include(":app")

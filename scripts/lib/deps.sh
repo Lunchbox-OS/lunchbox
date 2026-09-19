@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dependency management for shepherd-launcher
+# Dependency management for Lunchbox
 # Provides functions to read, union, and install package sets
 
 # Get the directory containing this script
@@ -9,12 +9,12 @@ DEPS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$DEPS_LIB_DIR/common.sh"
 # yt-dlp install/upgrade lives in the shared admin lib so `deps install run` and
-# `shepherd-admin yt-dlp install` share one implementation.
+# `lunchbox-admin yt-dlp install` share one implementation.
 # shellcheck source=admin.sh
 source "$DEPS_LIB_DIR/admin.sh"
 
 # For arch_to_triple: `deps install cross` adds the same Rust target that
-# `shepherd build --arch` will ask for, and the two must agree.
+# `lunchbox build --arch` will ask for, and the two must agree.
 # shellcheck source=build.sh
 source "$DEPS_LIB_DIR/build.sh"
 
@@ -47,9 +47,9 @@ BPF_LINKER_VERSION="0.10.3"
 # Gradle project (companion-android/) targets; bump together.
 ANDROID_SDK_ROOT="/opt/android-sdk"
 ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-# The NDK is required for the shepherd-media-android cdylib, which cargo-ndk
+# The NDK is required for the lunchbox-media-android cdylib, which cargo-ndk
 # cross-compiles for aarch64-linux-android. Keep this in sync with the version
-# the crate is validated against (see crates/shepherd-media-android/README.md);
+# the crate is validated against (see crates/lunchbox-media-android/README.md);
 # sdkmanager installs it under $ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION, which
 # is what cargo-ndk finds via ANDROID_NDK_HOME.
 ANDROID_NDK_VERSION="27.2.12479018"
@@ -62,7 +62,7 @@ ANDROID_NDK_VERSION="27.2.12479018"
 # clang/sysroot, so bump it deliberately, alongside the NDK.
 CARGO_NDK_VERSION="4.1.2"
 
-# wasm-pack builds crates/shepherd-config-wasm into the browser artifact the
+# wasm-pack builds crates/lunchbox-config-wasm into the browser artifact the
 # web config editor loads. Pinned for the same reason as the tools above: an
 # unpinned install silently adopts whatever upstream published last, and the
 # generated JS glue has to match the `wasm-bindgen` version the crate compiles
@@ -77,7 +77,7 @@ CARGO_NDK_VERSION="4.1.2"
 WASM_PACK_VERSION="0.13.1"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
-# Rust targets cargo-ndk cross-compiles the shepherd-media-android cdylib for:
+# Rust targets cargo-ndk cross-compiles the lunchbox-media-android cdylib for:
 # arm64-v8a (aarch64) and armeabi-v7a (armv7). Installed alongside cargo-ndk in
 # the android set so the CI image bakes them in.
 ANDROID_RUST_TARGETS=(
@@ -154,8 +154,8 @@ install_lint_components() {
 
 # Install the BPF authoring toolchain: nightly Rust (for `-Zbuild-std`),
 # rust-src (so the BPF crate can build core for bpfel-unknown-none), and
-# `bpf-linker` (which crates/shepherd-firewall-bpf uses to emit the
-# cgroup_skb program object embedded into shepherd-firewall-helper).
+# `bpf-linker` (which crates/lunchbox-firewall-bpf uses to emit the
+# cgroup_skb program object embedded into lunchbox-firewall-helper).
 # Idempotent: each step skips if already satisfied.
 install_bpf_toolchain() {
     # Make sure rustup/cargo are on PATH if install_rust just placed them.
@@ -249,7 +249,7 @@ is_android_sdk_installed() {
 
 # Download the command-line tools and use sdkmanager to install the SDK
 # components the companion-android app builds against, plus the NDK the
-# shepherd-media-android cdylib cross-compiles with. Idempotent: skips
+# lunchbox-media-android cdylib cross-compiles with. Idempotent: skips
 # the cmdline-tools download when already extracted and re-runs
 # sdkmanager (which no-ops for already-installed packages).
 #
@@ -308,17 +308,17 @@ install_android_sdk() {
 }
 
 # Install cargo-ndk + the Android Rust targets used to cross-compile the
-# shepherd-media-android cdylib. Part of the `android` set so the Android CI
+# lunchbox-media-android cdylib. Part of the `android` set so the Android CI
 # image (built FROM the base image, which already has Rust) bakes them in — the
 # release/CI jobs then don't install cargo-ndk at runtime.
 #
 # Requires Rust: skipped with a note when cargo is absent, so `deps install
 # android` still works standalone for the Kotlin-only companion app. On a host
-# that builds shepherd-media-android, run `deps install build` first.
+# that builds lunchbox-media-android, run `deps install build` first.
 install_cargo_ndk() {
     if ! command_exists cargo; then
         warn "cargo not found; skipping cargo-ndk + Android Rust targets."
-        warn "Run 'shepherd deps install build' first to build shepherd-media-android."
+        warn "Run 'lunchbox deps install build' first to build lunchbox-media-android."
         return 0
     fi
 
@@ -552,7 +552,7 @@ _deps_enable_foreign_arch() {
 
     info "Adding a $DEPS_PORTS_URI entry for $arch..."
     maybe_sudo tee "$ports_file" >/dev/null <<EOF
-# Added by \`shepherd deps install cross --arch $arch\`: the configured mirror
+# Added by \`lunchbox deps install cross --arch $arch\`: the configured mirror
 # does not carry $arch, so its packages come from Ubuntu's ports mirror.
 Types: deb
 URIs: $DEPS_PORTS_URI
@@ -606,7 +606,7 @@ can have one or the other, not both. Options:
   * Cross-compile in a container instead, and keep this host native. That is
     what CI does; see .ci/Dockerfile.cross.
   * Accept the trade and pass --allow-remove. Restore the native set afterwards
-    with: shepherd deps install build"
+    with: lunchbox deps install build"
 }
 
 # Read a package file, stripping comments and empty lines
@@ -651,7 +651,7 @@ get_packages() {
             ;;
         dev)
             # Union of build + run + test + agent + dev extras, deduplicated.
-            # `agent` is included so a dev checkout can drive `shepherd dev
+            # `agent` is included so a dev checkout can drive `lunchbox dev
             # headless` (grim/wtype/jq) out of the box.
             {
                 read_package_file "$DEPS_DIR/build.pkgs"
@@ -686,7 +686,7 @@ _deps_parse_args() {
                 shift
                 ;;
             *)
-                die "Unknown deps option: $1 (try: shepherd deps help)"
+                die "Unknown deps option: $1 (try: lunchbox deps help)"
                 ;;
         esac
     done
@@ -694,7 +694,7 @@ _deps_parse_args() {
     # The cross set is the only one that is per-architecture, and the only
     # architecture worth cross-compiling for is one that is not the host's.
     if [[ "$DEPS_SET" == "cross" ]]; then
-        [[ -n "$DEPS_ARCH" ]] || die "Usage: shepherd deps <cmd> cross --arch <debian-arch>"
+        [[ -n "$DEPS_ARCH" ]] || die "Usage: lunchbox deps <cmd> cross --arch <debian-arch>"
         if [[ "$DEPS_ARCH" == "$(dpkg --print-architecture)" ]]; then
             die "$DEPS_ARCH is this host's own architecture; build for it natively instead"
         fi
@@ -707,7 +707,7 @@ deps_print() {
     _deps_parse_args "$@"
     
     if [[ -z "$DEPS_SET" ]]; then
-        die "Usage: shepherd deps print <build|run|cross|dev>"
+        die "Usage: lunchbox deps print <build|run|cross|dev>"
     fi
     
     get_packages "$DEPS_SET" "$DEPS_ARCH"
@@ -720,7 +720,7 @@ deps_install() {
     local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps install <build|run|cross|dev>"
+        die "Usage: lunchbox deps install <build|run|cross|dev>"
     fi
     
     check_ubuntu_version
@@ -757,7 +757,7 @@ deps_install() {
     maybe_sudo apt-get install -y $packages
     
     # For build and dev sets, also install Rust + the BPF authoring
-    # toolchain (needed by crates/shepherd-firewall-bpf).
+    # toolchain (needed by crates/lunchbox-firewall-bpf).
     if [[ "$set_name" == "build" ]] || [[ "$set_name" == "dev" ]]; then
         install_rust
         install_bpf_toolchain
@@ -770,7 +770,7 @@ deps_install() {
         install_lint_components
     fi
 
-    # For run and dev sets, add shepherd-media's non-apt dependencies: yt-dlp in
+    # For run and dev sets, add lunchbox-media's non-apt dependencies: yt-dlp in
     # its virtualenv, and the VA-API drivers for this host's GPU. Neither can
     # live in run.pkgs — that file is installed as one unconditional apt
     # transaction, while the right VA driver depends on the hardware and yt-dlp
@@ -780,7 +780,7 @@ deps_install() {
     fi
 
     # The cross set needs rustc's own std for the target, which apt cannot
-    # provide. `shepherd build --arch` derives the same triple.
+    # provide. `lunchbox build --arch` derives the same triple.
     if [[ "$set_name" == "cross" ]]; then
         source "$HOME/.cargo/env" 2>/dev/null || true
         local triple
@@ -806,7 +806,7 @@ deps_check() {
     local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps check <build|run|cross|dev>"
+        die "Usage: lunchbox deps check <build|run|cross|dev>"
     fi
     
     local packages
@@ -830,7 +830,7 @@ deps_check() {
     # For run and dev sets, also check yt-dlp.
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_ytdlp_installed; then
-            warn "yt-dlp is not installed (run: shepherd deps install run)"
+            warn "yt-dlp is not installed (run: lunchbox deps install run)"
             return 1
         fi
     fi
@@ -841,7 +841,7 @@ deps_check() {
         local component
         for component in clippy rustfmt; do
             if ! rustup component list --installed 2>/dev/null | grep -q "^$component"; then
-                warn "$component is not installed (run: shepherd deps install dev)"
+                warn "$component is not installed (run: lunchbox deps install dev)"
                 return 1
             fi
         done
@@ -853,7 +853,7 @@ deps_check() {
         triple="$(arch_to_triple "$DEPS_ARCH")"
         if command_exists rustup \
             && ! rustup target list --installed 2>/dev/null | grep -qx -- "$triple"; then
-            warn "The $triple Rust target is not installed (run: shepherd deps install cross --arch $DEPS_ARCH)"
+            warn "The $triple Rust target is not installed (run: lunchbox deps install cross --arch $DEPS_ARCH)"
             return 1
         fi
     fi
@@ -861,11 +861,11 @@ deps_check() {
     # For the android set, also check the SDK and (when Rust is present) cargo-ndk.
     if [[ "$set_name" == "android" ]]; then
         if ! is_android_sdk_installed; then
-            warn "Android SDK is not installed (run: shepherd deps install android)"
+            warn "Android SDK is not installed (run: lunchbox deps install android)"
             return 1
         fi
         if command_exists cargo && ! command_exists cargo-ndk; then
-            warn "cargo-ndk is not installed (run: shepherd deps install android)"
+            warn "cargo-ndk is not installed (run: lunchbox deps install android)"
             return 1
         fi
     fi
@@ -896,7 +896,7 @@ deps_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd deps <command> <set>
+Usage: lunchbox deps <command> <set>
 
 Commands:
     print   <set>    Print packages in the set (one per line)
@@ -906,12 +906,12 @@ Commands:
 Package sets:
     build    Build-time dependencies (+ Rust via rustup)
     run      Runtime dependencies only
-    test     Extra packages needed for the shepherd-e2e harness
+    test     Extra packages needed for the lunchbox-e2e harness
     android  JDK + Android SDK + NDK for the companion-android and
-             shepherd-media-android apps
-    agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
+             lunchbox-media-android apps
+    agent    Headless-dev tooling for 'lunchbox dev headless' (grim/wtype/jq)
     cross    Cross-compilation toolchain and the target architecture's half of
-             the build set. Needs --arch <debian-arch>; see 'shepherd build --arch'.
+             the build set. Needs --arch <debian-arch>; see 'lunchbox build --arch'.
              Refuses to run if it would uninstall the native build set (the two
              are not always co-installable); --allow-remove overrides, and is
              what the CI cross image passes.
@@ -922,15 +922,15 @@ Note: The 'build' and 'dev' sets automatically install Rust via rustup.
       downloads the Android SDK + NDK into /opt/android-sdk.
 
 Examples:
-    shepherd deps print build
-    shepherd deps install dev
-    shepherd deps install android
-    shepherd deps install cross --arch arm64
-    shepherd deps check run
+    lunchbox deps print build
+    lunchbox deps install dev
+    lunchbox deps install android
+    lunchbox deps install cross --arch arm64
+    lunchbox deps check run
 EOF
             ;;
         *)
-            die "Unknown deps command: $subcmd (try: shepherd deps help)"
+            die "Unknown deps command: $subcmd (try: lunchbox deps help)"
             ;;
     esac
 }

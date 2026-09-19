@@ -1,0 +1,23 @@
+[package]
+name = "lunchbox-stated"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custodian for lunchbox's policy and state files, at a uid activities do not have (issue #157)"
+
+[dependencies]
+lunchbox-ipc = { workspace = true }
+lunchbox-state-proto = { workspace = true }
+lunchbox-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+lunchbox-util = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+nix = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+zbus = { workspace = true }
+futures-util = { workspace = true }
+notify = { workspace = true }

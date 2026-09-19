@@ -1,4 +1,4 @@
-# Android CI image for shepherd-launcher.
+# Android CI image for Lunchbox.
 #
 # Layers the JDK + Android SDK on top of the base CI image (.ci/Dockerfile)
 # so the companion-android Gradle jobs get a ready SDK without every
@@ -19,20 +19,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install the JDK + unzip (android.pkgs) and download the Android SDK
 # into /opt/android-sdk via the project's own installer, so the image
-# stays in lockstep with `./scripts/shepherd deps install android` on a
+# stays in lockstep with `./scripts/lunchbox deps install android` on a
 # host. curl (used to fetch the cmdline-tools) is already present from
 # the base image's build deps. Re-copy scripts so this layer reflects
 # the current checkout rather than whatever the base image baked.
-COPY scripts /opt/shepherd-deps/scripts
-WORKDIR /opt/shepherd-deps
-RUN ./scripts/shepherd deps install android && \
+COPY scripts /opt/lunchbox-deps/scripts
+WORKDIR /opt/lunchbox-deps
+RUN ./scripts/lunchbox deps install android && \
     rm -rf /var/lib/apt/lists/*
 
 # AGP and the Gradle jobs resolve the SDK from this (local.properties is
 # gitignored and absent in CI). Matches where the installer drops it.
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 
-# The NDK cargo-ndk cross-compiles the shepherd-media-android cdylib with.
+# The NDK cargo-ndk cross-compiles the lunchbox-media-android cdylib with.
 # Set explicitly (rather than relying on cargo-ndk's auto-detect heuristic) so
 # the build never depends on it and no job has to compute the path. cargo-ndk
 # itself + the Android Rust targets are baked in by `deps install android`

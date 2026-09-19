@@ -6,16 +6,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<EOF
-admin - Administrative wrapper for shepherd
+admin - Administrative wrapper for lunchbox
 
 Usage: admin <command> [options]
 
 This is a convenience wrapper. All commands are equivalent to:
-    shepherd install ...
-    shepherd harden ...
+    lunchbox install ...
+    lunchbox harden ...
 
 Commands:
-    install <subcommand>    Install shepherd components
+    install <subcommand>    Install lunchbox components
     harden <subcommand>     Manage user hardening
 
 Examples:
@@ -23,13 +23,13 @@ Examples:
     admin harden apply --user kiosk
     admin harden revert --user kiosk
 
-Run 'shepherd install help' or 'shepherd harden help' for details.
+Run 'lunchbox install help' or 'lunchbox harden help' for details.
 EOF
 }
 
 case "${1:-}" in
     install|harden)
-        exec "$SCRIPT_DIR/shepherd" "$@"
+        exec "$SCRIPT_DIR/lunchbox" "$@"
         ;;
     -h|--help|help|"")
         usage

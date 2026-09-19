@@ -1,7 +1,7 @@
-# Cross-compilation dependencies for shepherd-launcher.
+# Cross-compilation dependencies for Lunchbox.
 #
 # Unlike the other sets, this one is parameterised: `@ARCH@` is replaced with
-# the Debian architecture being built *for* (see `shepherd deps install cross
+# the Debian architecture being built *for* (see `lunchbox deps install cross
 # --arch ARCH`). Lines ending in `:@ARCH@` are the target architecture's halves
 # of build.pkgs' library set, installed alongside — not instead of — the host's
 # own, which Ubuntu's multiarch support makes co-installable.
@@ -46,8 +46,8 @@ libgirepository1.0-dev:@ARCH@
 # Layer shell for HUD overlay
 libgtk4-layer-shell-dev:@ARCH@
 
-# libmpv (used by shepherd-media for in-process media playback)
+# libmpv (used by lunchbox-media for in-process media playback)
 libmpv-dev:@ARCH@
 
-# D-Bus client library (bluer -> libdbus-sys, the BLE transport in shepherd-ble)
+# D-Bus client library (bluer -> libdbus-sys, the BLE transport in lunchbox-ble)
 libdbus-1-dev:@ARCH@

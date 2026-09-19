@@ -1,25 +1,25 @@
-# Clippy configuration for shepherd-launcher
+# Clippy configuration for Lunchbox
 #
 # This file configures clippy lints for the workspace.
 
 # Disallow direct usage of Local::now() to ensure mock time is used consistently.
-# Use shepherd_util::now() instead, which respects the SHEPHERD_MOCK_TIME env var
+# Use lunchbox_util::now() instead, which respects the LUNCHBOX_MOCK_TIME env var
 # in debug builds.
 disallowed-methods = [
-    { path = "chrono::Local::now", reason = "Use shepherd_util::now() instead to support mock time in debug builds" },
+    { path = "chrono::Local::now", reason = "Use lunchbox_util::now() instead to support mock time in debug builds" },
 
     # Naming a helper binary lets `$PATH` decide which one runs, and on a device
     # `$PATH` is chosen by the kiosk user: GDM's PAM stack reads
     # `~/.pam_environment`, which every activity can write (issue #144). A
-    # substituted helper runs as a direct child of shepherdd, in shepherdd's own
+    # substituted helper runs as a direct child of lunchboxd, in lunchboxd's own
     # cgroup, which the management socket accepts as `Admin`.
     #
-    # `shepherd_host_linux::helpers::command` (and `tokio_command`) resolve the
+    # `lunchbox_host_linux::helpers::command` (and `tokio_command`) resolve the
     # name against a compiled-in list of root-owned directories first. Spawning
-    # something that is *not* a shepherd-chosen helper -- an activity's own
+    # something that is *not* a lunchbox-chosen helper -- an activity's own
     # command from `config.toml`, a test's stub, the pkexec'd firewall helper
     # whose environment polkit replaces -- is a deliberate exception and takes
     # an `#[allow(clippy::disallowed_methods)]` with a comment saying which.
-    { path = "std::process::Command::new", reason = "Use shepherd_host_linux::helpers::command() so $PATH cannot choose the binary (issue #144)" },
-    { path = "tokio::process::Command::new", reason = "Use shepherd_host_linux::helpers::tokio_command() so $PATH cannot choose the binary (issue #144)" },
+    { path = "std::process::Command::new", reason = "Use lunchbox_host_linux::helpers::command() so $PATH cannot choose the binary (issue #144)" },
+    { path = "tokio::process::Command::new", reason = "Use lunchbox_host_linux::helpers::tokio_command() so $PATH cannot choose the binary (issue #144)" },
 ]

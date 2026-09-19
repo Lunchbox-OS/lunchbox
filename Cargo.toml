@@ -1,121 +1,121 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/shepherd-util",
-    "crates/shepherd-api",
-    "crates/shepherd-host-api",
-    "crates/shepherd-config",
-    "crates/shepherd-firewall-helper",
-    "crates/shepherd-store",
-    "crates/shepherd-core",
-    "crates/shepherd-host-linux",
-    "crates/shepherd-ipc",
-    "crates/shepherd-management",
-    "crates/shepherd-management-macros",
-    "crates/shepherd-http",
-    "crates/shepherd-ble",
-    "crates/shepherdd",
-    "crates/shepherd-state-proto",
-    "crates/shepherd-stated",
-    "crates/shepherd-launcher-ui",
-    "crates/shepherd-hud",
-    "crates/shepherd-pairing-display",
-    "crates/shepherd-lock",
-    "crates/shepherd-e2e",
-    "crates/shepherd-media-core",
-    "crates/shepherd-media-app",
-    "crates/shepherd-media-cache",
-    "crates/shepherd-media-ui",
-    "crates/shepherd-media-android",
-    "crates/shepherd-media",
-    "crates/shepherd-bridge",
-    "crates/shepherd-touch-bridge",
-    "crates/shepherd-tablet-bridge",
-    "crates/shepherd-gamepad-bridge",
-    "crates/shepherd-wire-codegen",
-    "crates/shepherd-config-wasm",
+    "crates/lunchbox-util",
+    "crates/lunchbox-api",
+    "crates/lunchbox-host-api",
+    "crates/lunchbox-config",
+    "crates/lunchbox-firewall-helper",
+    "crates/lunchbox-store",
+    "crates/lunchbox-core",
+    "crates/lunchbox-host-linux",
+    "crates/lunchbox-ipc",
+    "crates/lunchbox-management",
+    "crates/lunchbox-management-macros",
+    "crates/lunchbox-http",
+    "crates/lunchbox-ble",
+    "crates/lunchboxd",
+    "crates/lunchbox-state-proto",
+    "crates/lunchbox-stated",
+    "crates/lunchbox-launcher-ui",
+    "crates/lunchbox-hud",
+    "crates/lunchbox-pairing-display",
+    "crates/lunchbox-lock",
+    "crates/lunchbox-e2e",
+    "crates/lunchbox-media-core",
+    "crates/lunchbox-media-app",
+    "crates/lunchbox-media-cache",
+    "crates/lunchbox-media-ui",
+    "crates/lunchbox-media-android",
+    "crates/lunchbox-media",
+    "crates/lunchbox-bridge",
+    "crates/lunchbox-touch-bridge",
+    "crates/lunchbox-tablet-bridge",
+    "crates/lunchbox-gamepad-bridge",
+    "crates/lunchbox-wire-codegen",
+    "crates/lunchbox-config-wasm",
 ]
 # Everything except the codegen and wasm crates. `cargo build` at the repo root
-# must not build shepherd-wire-codegen, because doing so would unify its
-# `schema` feature into shepherd-api and compile schemars into shepherdd and
-# the launcher; shepherd-config-wasm is out for the same reason, so a plain
+# must not build lunchbox-wire-codegen, because doing so would unify its
+# `schema` feature into lunchbox-api and compile schemars into lunchboxd and
+# the launcher; lunchbox-config-wasm is out for the same reason, so a plain
 # build never reaches wasm-bindgen. Use `-p <crate>` (or `--workspace`, as the
 # tests do) to reach either deliberately.
 default-members = [
-    "crates/shepherd-util",
-    "crates/shepherd-api",
-    "crates/shepherd-host-api",
-    "crates/shepherd-config",
-    "crates/shepherd-firewall-helper",
-    "crates/shepherd-store",
-    "crates/shepherd-core",
-    "crates/shepherd-host-linux",
-    "crates/shepherd-ipc",
-    "crates/shepherd-management",
-    "crates/shepherd-management-macros",
-    "crates/shepherd-http",
-    "crates/shepherd-ble",
-    "crates/shepherdd",
-    "crates/shepherd-state-proto",
-    "crates/shepherd-stated",
-    "crates/shepherd-launcher-ui",
-    "crates/shepherd-hud",
-    "crates/shepherd-pairing-display",
-    "crates/shepherd-lock",
-    "crates/shepherd-e2e",
-    "crates/shepherd-media-core",
-    "crates/shepherd-media-app",
-    "crates/shepherd-media-cache",
-    "crates/shepherd-media-ui",
-    "crates/shepherd-media-android",
-    "crates/shepherd-media",
-    "crates/shepherd-bridge",
-    "crates/shepherd-touch-bridge",
-    "crates/shepherd-tablet-bridge",
-    "crates/shepherd-gamepad-bridge",
+    "crates/lunchbox-util",
+    "crates/lunchbox-api",
+    "crates/lunchbox-host-api",
+    "crates/lunchbox-config",
+    "crates/lunchbox-firewall-helper",
+    "crates/lunchbox-store",
+    "crates/lunchbox-core",
+    "crates/lunchbox-host-linux",
+    "crates/lunchbox-ipc",
+    "crates/lunchbox-management",
+    "crates/lunchbox-management-macros",
+    "crates/lunchbox-http",
+    "crates/lunchbox-ble",
+    "crates/lunchboxd",
+    "crates/lunchbox-state-proto",
+    "crates/lunchbox-stated",
+    "crates/lunchbox-launcher-ui",
+    "crates/lunchbox-hud",
+    "crates/lunchbox-pairing-display",
+    "crates/lunchbox-lock",
+    "crates/lunchbox-e2e",
+    "crates/lunchbox-media-core",
+    "crates/lunchbox-media-app",
+    "crates/lunchbox-media-cache",
+    "crates/lunchbox-media-ui",
+    "crates/lunchbox-media-android",
+    "crates/lunchbox-media",
+    "crates/lunchbox-bridge",
+    "crates/lunchbox-touch-bridge",
+    "crates/lunchbox-tablet-bridge",
+    "crates/lunchbox-gamepad-bridge",
 ]
-# shepherd-firewall-bpf targets bpfel-unknown-none on nightly and is built
-# separately by shepherd-firewall-helper's build.rs (via aya-build). Excluded
+# lunchbox-firewall-bpf targets bpfel-unknown-none on nightly and is built
+# separately by lunchbox-firewall-helper's build.rs (via aya-build). Excluded
 # so `cargo build` doesn't try to compile it for the host target.
-exclude = ["crates/shepherd-firewall-bpf"]
+exclude = ["crates/lunchbox-firewall-bpf"]
 
 [workspace.package]
 # Canonical version lives in the repo-root VERSION file; Cargo can't read it at
-# parse time, so this literal is written by `shepherd version set` and verified
-# by `shepherd version check` (run in CI). Don't hand-edit — bump via the tool.
+# parse time, so this literal is written by `lunchbox version set` and verified
+# by `lunchbox version check` (run in CI). Don't hand-edit — bump via the tool.
 version = "0.5.1"
 edition = "2024"
 license = "GPL-3.0"
 authors = ["Albert Armea"]
-repository = "https://github.com/aarmea/shepherd-launcher"
+repository = "https://github.com/aarmea/lunchbox"
 
 [workspace.dependencies]
 # Internal crates
-shepherd-util = { path = "crates/shepherd-util" }
-shepherd-api = { path = "crates/shepherd-api" }
-shepherd-host-api = { path = "crates/shepherd-host-api" }
-shepherd-config = { path = "crates/shepherd-config" }
-shepherd-store = { path = "crates/shepherd-store" }
-shepherd-core = { path = "crates/shepherd-core" }
-shepherd-host-linux = { path = "crates/shepherd-host-linux" }
-shepherd-ipc = { path = "crates/shepherd-ipc" }
-shepherd-state-proto = { path = "crates/shepherd-state-proto" }
-shepherd-stated = { path = "crates/shepherd-stated" }
-shepherd-management = { path = "crates/shepherd-management" }
-shepherd-management-macros = { path = "crates/shepherd-management-macros" }
-shepherd-http = { path = "crates/shepherd-http" }
-shepherd-ble = { path = "crates/shepherd-ble" }
-shepherd-bridge = { path = "crates/shepherd-bridge" }
-shepherd-wire-codegen = { path = "crates/shepherd-wire-codegen" }
-shepherd-config-wasm = { path = "crates/shepherd-config-wasm" }
-shepherd-lock = { path = "crates/shepherd-lock" }
+lunchbox-util = { path = "crates/lunchbox-util" }
+lunchbox-api = { path = "crates/lunchbox-api" }
+lunchbox-host-api = { path = "crates/lunchbox-host-api" }
+lunchbox-config = { path = "crates/lunchbox-config" }
+lunchbox-store = { path = "crates/lunchbox-store" }
+lunchbox-core = { path = "crates/lunchbox-core" }
+lunchbox-host-linux = { path = "crates/lunchbox-host-linux" }
+lunchbox-ipc = { path = "crates/lunchbox-ipc" }
+lunchbox-state-proto = { path = "crates/lunchbox-state-proto" }
+lunchbox-stated = { path = "crates/lunchbox-stated" }
+lunchbox-management = { path = "crates/lunchbox-management" }
+lunchbox-management-macros = { path = "crates/lunchbox-management-macros" }
+lunchbox-http = { path = "crates/lunchbox-http" }
+lunchbox-ble = { path = "crates/lunchbox-ble" }
+lunchbox-bridge = { path = "crates/lunchbox-bridge" }
+lunchbox-wire-codegen = { path = "crates/lunchbox-wire-codegen" }
+lunchbox-config-wasm = { path = "crates/lunchbox-config-wasm" }
+lunchbox-lock = { path = "crates/lunchbox-lock" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 # JSON Schema for the wire types, from which the companion's Kotlin
-# mirrors are generated (see crates/shepherd-management/src/bin/rpc_codegen.rs).
+# mirrors are generated (see crates/lunchbox-management/src/bin/rpc_codegen.rs).
 schemars = { version = "1", features = ["chrono04", "uuid1"] }
 
 # Async runtime
@@ -135,7 +135,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # The `log` feature makes `tracing` emit `log` records when no tracing
 # Subscriber is installed, so the Android binaries — which set up
 # `android_logger` rather than `tracing-subscriber` — still see events from
-# shared crates (e.g. shepherd-media-core reporting the chosen hwdec).
+# shared crates (e.g. lunchbox-media-core reporting the chosen hwdec).
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # The bare `log` facade, for crates shared with the Android build that only need
@@ -168,7 +168,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # `v4_10` unlocks `gtk_widget_get_color`, which the HUD's analog clock face
 # needs to draw itself in the colour CSS resolved for it rather than carrying a
 # second copy of the palette (issue #171). The feature only gates which
-# bindings are compiled; shepherd already requires Ubuntu 26.04 (GTK 4.18+),
+# bindings are compiled; lunchbox already requires Ubuntu 26.04 (GTK 4.18+),
 # well past the 4.10 it asks for, so it cannot raise the bar.
 gtk4 = { version = "0.9", features = ["v4_10"] }
 gtk4-layer-shell = "0.4"

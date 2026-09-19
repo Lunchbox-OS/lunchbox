@@ -1,0 +1,30 @@
+[package]
+name = "lunchbox-hud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GTK4 HUD overlay for lunchboxd - always-visible status bar"
+
+[[bin]]
+name = "lunchbox-hud"
+path = "src/main.rs"
+
+[dependencies]
+lunchbox-api = { workspace = true }
+lunchbox-bridge = { workspace = true }
+lunchbox-ipc = { workspace = true }
+lunchbox-util = { workspace = true }
+
+gtk4 = { workspace = true }
+gtk4-layer-shell = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[features]
+default = []

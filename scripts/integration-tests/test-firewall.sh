@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Manual end-to-end firewall enforcement test.
 #
-# Drives `cargo test -p shepherd-e2e --test firewall_real`, which boots a
-# real shepherdd, launches an activity through the privileged
-# shepherd-firewall-helper, and verifies the BPF address filter is actually
+# Drives `cargo test -p lunchbox-e2e --test firewall_real`, which boots a
+# real lunchboxd, launches an activity through the privileged
+# lunchbox-firewall-helper, and verifies the BPF address filter is actually
 # enforced (loopback reachable; an external host blocked).
 #
 # Prerequisites on the host:
-#   - shepherd-firewall-helper installed at /usr/libexec/shepherd-firewall-helper
-#   - The invoking user a member of the shepherd-firewall group
+#   - lunchbox-firewall-helper installed at /usr/libexec/lunchbox-firewall-helper
+#   - The invoking user a member of the lunchbox-firewall group
 #   - polkit running and the rule loaded
 #   - Outbound connectivity to the deny target (Google DNS, 8.8.8.8:53)
-#   - The shepherd-e2e runtime deps (sway, dbus-daemon, etc.)
+#   - The lunchbox-e2e runtime deps (sway, dbus-daemon, etc.)
 #
 # If any of those is missing the underlying cargo test prints a clear
 # `[SKIP]` line and exits 0; this orchestrator pre-checks the same things
@@ -27,9 +27,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
-POLKIT_ACTION="org.shepherd.firewall.apply-process"
-DENY_TARGET="${SHEPHERD_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
+HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
+POLKIT_ACTION="com.lunchboxos.firewall.apply-process"
+DENY_TARGET="${LUNCHBOX_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -52,7 +52,7 @@ echo "[orchestrator] Verifying preconditions..."
 if ! pkcheck --action-id "$POLKIT_ACTION" --process $$ >/dev/null 2>&1; then
     fail "polkit denies $POLKIT_ACTION for this user.
        Run sudo ./scripts/integration-tests/setup-firewall-dev.sh and re-login
-       so the shepherd-firewall group membership takes effect."
+       so the lunchbox-firewall group membership takes effect."
 fi
 
 echo "[orchestrator] Pre-flight: verifying deny target $DENY_TARGET is reachable from outside the firewall..."
@@ -62,14 +62,14 @@ if ! timeout 3 bash -c "exec 3<>/dev/tcp/$deny_host/$deny_port" 2>/dev/null; the
     fail "deny target $DENY_TARGET is not reachable from outside the firewall.
        The activity's deny check would pass for the wrong reason (no internet
        vs. firewall blocked). Either fix connectivity or set
-       SHEPHERD_INTEGRATION_DENY_TARGET to a host:port that IS reachable here
+       LUNCHBOX_INTEGRATION_DENY_TARGET to a host:port that IS reachable here
        but is OUTSIDE the entry's allow list."
 fi
 exec 3<&- || true
 
-echo "[orchestrator] Building shepherd binaries..."
-./scripts/shepherd build
+echo "[orchestrator] Building lunchbox binaries..."
+./scripts/lunchbox build
 
-echo "[orchestrator] Running cargo test -p shepherd-e2e --test firewall_real..."
-exec cargo test -p shepherd-e2e --test firewall_real -- \
+echo "[orchestrator] Running cargo test -p lunchbox-e2e --test firewall_real..."
+exec cargo test -p lunchbox-e2e --test firewall_real -- \
     --include-ignored --test-threads=1 --nocapture

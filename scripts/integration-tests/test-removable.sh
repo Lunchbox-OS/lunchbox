@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The file routes against a real FAT drive.
 #
-# Drives `cargo test -p shepherd-http --test files_removable`, which talks to
-# whatever is mounted at /media/shepherd-fat. Every other test in that crate
+# Drives `cargo test -p lunchbox-http --test files_removable`, which talks to
+# whatever is mounted at /media/lunchbox-fat. Every other test in that crate
 # runs on a tempdir -- that is, on ext4 -- and three bugs lived in the gap
 # between what the protocol assumes and what FAT actually promises:
 # two-second timestamps, a capacity under the free-space floor, and a small
@@ -21,8 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-MOUNT="${SHEPHERD_TEST_FAT_MOUNT:-/media/shepherd-fat}"
-MOUNT_RO="${SHEPHERD_TEST_FAT_MOUNT_RO:-/media/shepherd-fat-ro}"
+MOUNT="${LUNCHBOX_TEST_FAT_MOUNT:-/media/lunchbox-fat}"
+MOUNT_RO="${LUNCHBOX_TEST_FAT_MOUNT_RO:-/media/lunchbox-fat-ro}"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -51,5 +51,5 @@ echo
 
 # --test-threads=1 because the tests share one drive, and one of them waits out
 # a two-second timestamp tick that the others would otherwise disturb.
-exec cargo test -p shepherd-http --test files_removable -- \
+exec cargo test -p lunchbox-http --test files_removable -- \
     --include-ignored --test-threads=1 --nocapture

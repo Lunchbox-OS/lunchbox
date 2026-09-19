@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Common utilities for shepherd scripts
+# Common utilities for lunchbox scripts
 # Logging, error handling, and sudo helpers
 
 set -euo pipefail
@@ -83,29 +83,29 @@ get_repo_root() {
     (cd "$script_dir/../.." && pwd)
 }
 
-# Directory holding shepherd's data files (the example configs). A source
+# Directory holding lunchbox's data files (the example configs). A source
 # checkout keeps them at the repo root; a packaged install (the .deb, driving
-# shepherd-admin) exports SHEPHERD_DATA_DIR=/usr/share/shepherd. Admin tasks that
+# lunchbox-admin) exports LUNCHBOX_DATA_DIR=/usr/share/lunchbox. Admin tasks that
 # read a data file use this instead of get_repo_root so they work in both
 # layouts — get_repo_root is meaningless once the scripts live under /usr/lib.
 get_data_dir() {
-    if [[ -n "${SHEPHERD_DATA_DIR:-}" ]]; then
-        printf '%s\n' "$SHEPHERD_DATA_DIR"
+    if [[ -n "${LUNCHBOX_DATA_DIR:-}" ]]; then
+        printf '%s\n' "$LUNCHBOX_DATA_DIR"
     else
         get_repo_root
     fi
 }
 
-# Verify we're in the shepherd repository
+# Verify we're in the lunchbox repository
 verify_repo() {
     local repo_root
     repo_root="$(get_repo_root)"
     if [[ ! -f "$repo_root/Cargo.toml" ]]; then
-        die "Not in shepherd repository (Cargo.toml not found at $repo_root)"
+        die "Not in lunchbox repository (Cargo.toml not found at $repo_root)"
     fi
     # Check it's the right project
-    if ! grep -q 'shepherd-launcher-ui' "$repo_root/Cargo.toml" 2>/dev/null; then
-        die "This doesn't appear to be the shepherd-launcher repository"
+    if ! grep -q 'lunchbox-launcher-ui' "$repo_root/Cargo.toml" 2>/dev/null; then
+        die "This doesn't appear to be the Lunchbox repository"
     fi
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish .deb file(s) to Forgejo's Debian package registry, so users can
-# `apt update && apt install shepherd-launcher` and get `apt upgrade` on future
+# `apt update && apt install lunchbox` and get `apt upgrade` on future
 # releases. This is complementary to upload-release-asset.sh: the release still
 # carries the .deb + .sha256 as an offline/manual download; this adds the hosted
 # apt-repository path.
@@ -16,7 +16,7 @@
 # See docs/ai/history/2026-07-19 002 forgejo-apt-repository.md for the design.
 #
 # Reads from the environment (set by the workflow):
-#   SERVER_URL     e.g. https://git.armeafamily.com
+#   SERVER_URL     e.g. https://apt.lunchbox-os.com
 #   OWNER          package owner (github.repository_owner) — packages are owned
 #                  at the user/org level, not per-repo
 #   PACKAGE_TOKEN  token with the write:package scope

@@ -4,7 +4,7 @@
          only needs to be a no-action-bar splash background. Parented to
          the framework DeviceDefault theme so we avoid a dependency on the
          com.google.android.material XML theme library. -->
-    <style name="Theme.ShepherdCompanion" parent="@android:style/Theme.DeviceDefault.DayNight">
+    <style name="Theme.LunchboxCompanion" parent="@android:style/Theme.DeviceDefault.DayNight">
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>

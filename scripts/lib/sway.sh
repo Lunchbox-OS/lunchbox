@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sway compositor helpers for shepherd-launcher
+# Sway compositor helpers for Lunchbox
 # Handles nested sway execution for development and production
 
 # Get the directory containing this script
@@ -19,7 +19,7 @@ SWAY_PID=""
 # Default directories
 DEFAULT_DEV_RUNTIME="./dev-runtime"
 DEFAULT_DATA_DIR="$DEFAULT_DEV_RUNTIME/data"
-DEFAULT_SOCKET_PATH="$DEFAULT_DEV_RUNTIME/shepherd.sock"
+DEFAULT_SOCKET_PATH="$DEFAULT_DEV_RUNTIME/lunchbox.sock"
 
 # Remove leftover wayland-N / sway-ipc.<uid>.<pid>.sock files in
 # $XDG_RUNTIME_DIR whose owner is no longer running. A new nested sway picks
@@ -76,15 +76,15 @@ sway_cleanup() {
         kill -KILL "$SWAY_PID" 2>/dev/null || true
     fi
 
-    # Explicitly kill any shepherd processes that might have escaped
-    pkill -x "shepherdd" 2>/dev/null || true
-    pkill -x "shepherd-launcher" 2>/dev/null || true
-    pkill -x "shepherd-hud" 2>/dev/null || true
-    pkill -x "shepherd-media" 2>/dev/null || true
+    # Explicitly kill any lunchbox processes that might have escaped
+    pkill -x "lunchboxd" 2>/dev/null || true
+    pkill -x "lunchbox-launcher" 2>/dev/null || true
+    pkill -x "lunchbox-hud" 2>/dev/null || true
+    pkill -x "lunchbox-media" 2>/dev/null || true
 
     # Remove socket
-    if [[ -n "${SHEPHERD_SOCKET:-}" ]]; then
-        rm -f "$SHEPHERD_SOCKET"
+    if [[ -n "${LUNCHBOX_SOCKET:-}" ]]; then
+        rm -f "$LUNCHBOX_SOCKET"
     fi
 
     # Sweep any wayland/sway-ipc sockets the kill above didn't unlink.
@@ -96,14 +96,14 @@ sway_cleanup() {
 sway_kill_existing() {
     info "Cleaning up any existing dev instances..."
     kill_matching "sway -c.*sway.conf"
-    pkill -x "shepherdd" 2>/dev/null || true
-    pkill -x "shepherd-launcher" 2>/dev/null || true
-    pkill -x "shepherd-hud" 2>/dev/null || true
-    pkill -x "shepherd-media" 2>/dev/null || true
+    pkill -x "lunchboxd" 2>/dev/null || true
+    pkill -x "lunchbox-launcher" 2>/dev/null || true
+    pkill -x "lunchbox-hud" 2>/dev/null || true
+    pkill -x "lunchbox-media" 2>/dev/null || true
 
-    # Remove stale shepherdd IPC socket
-    if [[ -n "${SHEPHERD_SOCKET:-}" ]] && [[ -e "$SHEPHERD_SOCKET" ]]; then
-        rm -f "$SHEPHERD_SOCKET"
+    # Remove stale lunchboxd IPC socket
+    if [[ -n "${LUNCHBOX_SOCKET:-}" ]] && [[ -e "$LUNCHBOX_SOCKET" ]]; then
+        rm -f "$LUNCHBOX_SOCKET"
     fi
 
     # Self-heal from prior unclean exits (orphaned wayland-N / sway-ipc
@@ -115,7 +115,7 @@ sway_kill_existing() {
     sleep 0.5
 }
 
-# Set up environment for shepherd binaries
+# Set up environment for lunchbox binaries
 sway_setup_env() {
     local data_dir="${1:-$DEFAULT_DATA_DIR}"
     local socket_path="${2:-$DEFAULT_SOCKET_PATH}"
@@ -124,14 +124,14 @@ sway_setup_env() {
     mkdir -p "$data_dir"
 
     # Export environment variables
-    export SHEPHERD_SOCKET="$socket_path"
-    export SHEPHERD_DATA_DIR="$data_dir"
+    export LUNCHBOX_SOCKET="$socket_path"
+    export LUNCHBOX_DATA_DIR="$data_dir"
 
-    # Make the debug binaries findable on PATH so shepherdd can spawn
-    # activities that reference them by name (e.g. `shepherd-media`).
+    # Make the debug binaries findable on PATH so lunchboxd can spawn
+    # activities that reference them by name (e.g. `lunchbox-media`).
     # `config.example.toml` uses bare command names so the same config works
-    # both in dev and after `shepherd install bins`. Without this, shepherdd
-    # exec()s shepherd-media and gets ENOENT.
+    # both in dev and after `lunchbox install bins`. Without this, lunchboxd
+    # exec()s lunchbox-media and gets ENOENT.
     local repo_root
     repo_root="$(get_repo_root)"
     local debug_bin_dir="$repo_root/target/debug"
@@ -197,11 +197,11 @@ sway_start_nested() {
     wait "$SWAY_PID"
 }
 
-# Ensure the example shepherd-media library is in place at the path
-# `config.example.toml` references (`~/.config/shepherd/movies.toml`).
+# Ensure the example lunchbox-media library is in place at the path
+# `config.example.toml` references (`~/.config/lunchbox/movies.toml`).
 #
-# `./run-dev` boots shepherdd against the in-repo `config.example.toml`, which
-# uses `~/.config/shepherd/movies.toml` for its media entries. shepherdd
+# `./run-dev` boots lunchboxd against the in-repo `config.example.toml`, which
+# uses `~/.config/lunchbox/movies.toml` for its media entries. lunchboxd
 # expands `~` to the dev user's $HOME at exec time, so without setup that
 # path is missing and the media activities fail to launch. We mirror what
 # `install_config` does on the install path: drop the example library on
@@ -215,7 +215,7 @@ sway_ensure_dev_media_library() {
         return 0
     fi
 
-    local user_config_dir="$HOME/.config/shepherd"
+    local user_config_dir="$HOME/.config/lunchbox"
     local dst_library="$user_config_dir/movies.toml"
 
     if [[ -f "$dst_library" ]]; then
@@ -242,7 +242,7 @@ sway_dev_run() {
     sway_kill_existing
 
     # Build debug binaries
-    info "Building shepherd binaries..."
+    info "Building lunchbox binaries..."
     build_cargo false
 
     # Make sure the library file referenced from config.example.toml exists.

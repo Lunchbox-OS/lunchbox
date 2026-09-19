@@ -1,0 +1,45 @@
+# F-Droid metadata for the lunchbox-companion Android app.
+#
+# Consumed by `fdroid update` — see dist/fdroid/README.md for who runs it and
+# when. Deliberately carries NO version fields: fdroidserver reads versionCode
+# and versionName out of the APK, so the repo-root VERSION file stays the single
+# source of truth.
+
+Categories:
+  - System
+
+License: GPL-3.0-only
+AuthorName: Albert Armea
+WebSite: https://lunchbox-os.com
+SourceCode: https://github.com/aarmea/lunchbox
+IssueTracker: https://github.com/aarmea/lunchbox/issues
+
+Name: Lunchbox Companion
+Summary: Manage Lunchbox kiosk devices over Bluetooth LE
+
+Description: |-
+  The parent-facing admin app for Lunchbox, a child-friendly,
+  parent-guided desktop environment for Wayland.
+
+  Pairs with a device over Bluetooth LE using Numeric Comparison, claims it
+  (single admin, trust-on-first-use), and then drives the full management RPC
+  catalog over the bonded GATT link — no network, no account, no cloud.
+
+  From the app you can:
+
+  * see what is running now and end a session
+  * grant, extend, or revoke time
+  * manage activities, groups, and per-activity availability
+  * set bedtime and availability windows
+  * manage tokens and grouped time limits
+
+  Requires a device running Lunchbox; it has no use on its own.
+
+# Pin the release signing certificate. `fdroid update` refuses to publish an APK
+# signed with anything else, and --delete-unknown removes it from the repo. This
+# is the control that makes automated republishing of release assets safe: it is
+# what stops an APK signed with a different key from reaching a family device as
+# an in-place upgrade. Obtain with:
+#     apksigner verify --print-certs FILE.apk | grep 'SHA-256 digest'
+AllowedAPKSigningKeys:
+  - b96abc13004bb75dd4caa412714035e9ce172bf4cb125ea1228163f68636041e

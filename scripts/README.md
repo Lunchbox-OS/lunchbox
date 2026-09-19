@@ -1,71 +1,71 @@
-# Shepherd Scripts System
+# Lunchbox Scripts System
 
-This directory contains the unified script system for shepherd-launcher.
+This directory contains the unified script system for Lunchbox.
 
 ## Quick Reference
 
 ```sh
 # Main entry point
-./shepherd --help
+./lunchbox --help
 
 # Dependencies
-./shepherd deps print build|run|dev
-./shepherd deps install build|run|dev
+./lunchbox deps print build|run|dev
+./lunchbox deps install build|run|dev
 
 # Building
-./shepherd build [--release]
+./lunchbox build [--release]
 
 # Cross-compiling for another architecture (see "Cross-compiling" below)
-./shepherd deps install cross --arch arm64
-./shepherd build --arch arm64
-./shepherd package deb --arch arm64
+./lunchbox deps install cross --arch arm64
+./lunchbox build --arch arm64
+./lunchbox package deb --arch arm64
 
 # Configuration
-./shepherd config validate [path]
+./lunchbox config validate [path]
 
 # Development
-./shepherd dev run                  # nested sway (needs a graphical login session)
+./lunchbox dev run                  # nested sway (needs a graphical login session)
 
 # Headless, agent/SSH-drivable session (no login session, no GPU)
-./shepherd deps install agent       # grim + wtype + jq
-./shepherd dev headless [--config PATH] [--user NAME] [--time "..."] [--size WxH]
-./shepherd dev shot [out.png]       # screenshot the virtual output
-./shepherd dev tree                 # window-tree summary (app_id/focus)
-./shepherd dev key Down / type "x" / click X Y   # inject input
-./shepherd dev stop
+./lunchbox deps install agent       # grim + wtype + jq
+./lunchbox dev headless [--config PATH] [--user NAME] [--time "..."] [--size WxH]
+./lunchbox dev shot [out.png]       # screenshot the virtual output
+./lunchbox dev tree                 # window-tree summary (app_id/focus)
+./lunchbox dev key Down / type "x" / click X Y   # inject input
+./lunchbox dev stop
 
 # Installation
-./shepherd install all --user USER [--prefix PREFIX]
-./shepherd install bins [--prefix PREFIX]
-./shepherd install config --user USER
+./lunchbox install all --user USER [--prefix PREFIX]
+./lunchbox install bins [--prefix PREFIX]
+./lunchbox install config --user USER
 
 # Hardening
-./shepherd harden apply --user USER
-./shepherd harden revert --user USER
+./lunchbox harden apply --user USER
+./lunchbox harden revert --user USER
 
 # Packaging
-./shepherd package deb
+./lunchbox package deb
 
 # Post-install admin tasks (shared with the .deb, where they run as the
-# installed `shepherd-admin` CLI without a source tree)
-./shepherd setup-user USER          # deploy config + add group memberships
-./shepherd apps install steam|chrome|retroarch
-./shepherd deps install run         # (includes yt-dlp)  ==  shepherd-admin yt-dlp install
+# installed `lunchbox-admin` CLI without a source tree)
+./lunchbox setup-user USER          # deploy config + add group memberships
+./lunchbox apps install steam|chrome|retroarch
+./lunchbox deps install run         # (includes yt-dlp)  ==  lunchbox-admin yt-dlp install
 ```
 
 These admin tasks live in `lib/admin.sh` and are exposed by **both**
-`./scripts/shepherd` (from source) and `scripts/shepherd-admin` (a slim
-entrypoint the `.deb` installs as `/usr/bin/shepherd-admin`). See
+`./scripts/lunchbox` (from source) and `scripts/lunchbox-admin` (a slim
+entrypoint the `.deb` installs as `/usr/bin/lunchbox-admin`). See
 [docs/INSTALL.md](../docs/INSTALL.md).
 
 ## Structure
 
 ```
 scripts/
-├── shepherd           # Main CLI dispatcher (build/dev/install/package + admin)
-├── shepherd-admin     # Slim admin CLI shipped in the .deb (no source tree)
-├── dev                # Wrapper → shepherd dev run
-├── admin              # Wrapper → shepherd install/harden
+├── lunchbox           # Main CLI dispatcher (build/dev/install/package + admin)
+├── lunchbox-admin     # Slim admin CLI shipped in the .deb (no source tree)
+├── dev                # Wrapper → lunchbox dev run
+├── admin              # Wrapper → lunchbox install/harden
 ├── lib/               # Shared libraries
 │   ├── common.sh      # Logging, error handling, sudo, get_data_dir
 │   ├── deps.sh        # Dependency management
@@ -77,7 +77,7 @@ scripts/
 │   ├── harden.sh      # User hardening/unhardening
 │   ├── bluetooth.sh   # BLE admin (clear/unpair)
 │   ├── version.sh     # Canonical VERSION sync
-│   └── package.sh     # .deb packaging (stages install.sh + shepherd-admin)
+│   └── package.sh     # .deb packaging (stages install.sh + lunchbox-admin)
 └── deps/              # Package lists
     ├── build.pkgs     # Build-time dependencies
     ├── run.pkgs       # Runtime dependencies
@@ -98,8 +98,8 @@ scripts/
 
 ```sh
 # First time setup (installs system packages + Rust via rustup)
-./shepherd deps install dev
-./shepherd dev run
+./lunchbox deps install dev
+./lunchbox dev run
 
 # Or use the convenience wrapper
 ./run-dev
@@ -109,34 +109,34 @@ scripts/
 
 ```sh
 # Install only build dependencies (includes Rust via rustup)
-./shepherd deps install build
+./lunchbox deps install build
 
 # Build release binaries
-./shepherd build --release
+./lunchbox build --release
 ```
 
 ### For Production Deployment
 
 ```sh
 # On a runtime-only system
-sudo ./shepherd deps install run
-./shepherd build --release
-sudo ./shepherd install all --user kiosk --prefix /usr
+sudo ./lunchbox deps install run
+./lunchbox build --release
+sudo ./lunchbox install all --user kiosk --prefix /usr
 
 # Optional: lock down the kiosk user
-sudo ./shepherd harden apply --user kiosk
+sudo ./lunchbox harden apply --user kiosk
 ```
 
 ### For Package Maintainers
 
 ```sh
 # Print package lists for your distro
-./shepherd deps print build > build-deps.txt
-./shepherd deps print run > runtime-deps.txt
+./lunchbox deps print build > build-deps.txt
+./lunchbox deps print run > runtime-deps.txt
 
 # Install with custom prefix and DESTDIR
 make -j$(nproc)  # or equivalent
-sudo DESTDIR=/tmp/staging ./shepherd install bins --prefix /usr
+sudo DESTDIR=/tmp/staging ./lunchbox install bins --prefix /usr
 ```
 
 ## Dependency Sets
@@ -154,9 +154,9 @@ The dev set is computed as the union of all three package lists, automatically d
 packaging:
 
 ```sh
-./shepherd deps install cross --arch arm64   # one-time, ~1.5-2.5 GB
-./shepherd build --arch arm64                # -> target/aarch64-unknown-linux-gnu/debug
-./shepherd package deb --arch arm64          # -> dist/pkg/..._arm64.deb
+./lunchbox deps install cross --arch arm64   # one-time, ~1.5-2.5 GB
+./lunchbox build --arch arm64                # -> target/aarch64-unknown-linux-gnu/debug
+./lunchbox package deb --arch arm64          # -> dist/pkg/..._arm64.deb
 ```
 
 Notes:
@@ -180,9 +180,9 @@ Notes:
   or the firewall BPF suites runs on the target architecture. Those need a
   native host.
 - Do **not** cross-compile by exporting `CARGO_BUILD_TARGET`. It would override
-  `crates/shepherd-firewall-bpf`'s own target and try to build the eBPF program
-  for the host triple. `shepherd build` passes `--target` on the command line
-  instead, and `shepherd-firewall-helper`'s build script strips the variable.
+  `crates/lunchbox-firewall-bpf`'s own target and try to build the eBPF program
+  for the host triple. `lunchbox build` passes `--target` on the command line
+  instead, and `lunchbox-firewall-helper`'s build script strips the variable.
 
 ## Hardening
 
@@ -190,16 +190,16 @@ The hardening system makes reversible changes to restrict a user to kiosk mode:
 
 ```sh
 # Apply hardening
-sudo ./shepherd harden apply --user kiosk
+sudo ./lunchbox harden apply --user kiosk
 
 # Check status
-sudo ./shepherd harden status --user kiosk
+sudo ./lunchbox harden status --user kiosk
 
 # Revert all changes
-sudo ./shepherd harden revert --user kiosk
+sudo ./lunchbox harden revert --user kiosk
 ```
 
-All changes are tracked in `/var/lib/shepherdd/hardening/<user>/` for rollback.
+All changes are tracked in `/var/lib/lunchboxd/hardening/<user>/` for rollback.
 
 Applied restrictions:
 - SSH access denied

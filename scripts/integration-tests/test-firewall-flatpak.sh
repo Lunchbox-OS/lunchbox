@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Manual end-to-end firewall enforcement test for Flatpak entries.
 #
-# Builds a tiny "org.shepherd.firewall.Probe" flatpak from this repo with
+# Builds a tiny "com.lunchboxos.firewall.Probe" flatpak from this repo with
 # flatpak-builder, installs it user-scoped, then drives `cargo test
-# -p shepherd-e2e --test firewall_real_flatpak`. Same shape as
+# -p lunchbox-e2e --test firewall_real_flatpak`. Same shape as
 # test-firewall-snap.sh but for the flatpak path of
 # `apply_firewall_to_existing_scope`.
 #
 # Prerequisites:
-#   - shepherd-firewall-helper installed (run setup-firewall-dev.sh)
-#   - The user a member of the shepherd-firewall group
+#   - lunchbox-firewall-helper installed (run setup-firewall-dev.sh)
+#   - The user a member of the lunchbox-firewall group
 #   - polkit rule loaded
 #   - flatpak + flatpak-builder + a working flathub remote
 #   - org.freedesktop.{Platform,Sdk}//24.08 installed:
@@ -23,10 +23,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
-POLKIT_ACTION="org.shepherd.firewall.apply-process"
-DENY_TARGET="${SHEPHERD_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
-APP_ID="org.shepherd.firewall.Probe"
+HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
+POLKIT_ACTION="com.lunchboxos.firewall.apply-process"
+DENY_TARGET="${LUNCHBOX_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
+APP_ID="com.lunchboxos.firewall.Probe"
 RUNTIME_VERSION="24.08"
 
 fail() {
@@ -62,13 +62,13 @@ echo "[orchestrator] Pre-flight: $DENY_TARGET reachable from outside firewall...
 deny_host="${DENY_TARGET%:*}"
 deny_port="${DENY_TARGET##*:}"
 if ! timeout 3 bash -c "exec 3<>/dev/tcp/$deny_host/$deny_port" 2>/dev/null; then
-    fail "deny target $DENY_TARGET unreachable. Set SHEPHERD_INTEGRATION_DENY_TARGET to something reachable but outside the entry's allow list."
+    fail "deny target $DENY_TARGET unreachable. Set LUNCHBOX_INTEGRATION_DENY_TARGET to something reachable but outside the entry's allow list."
 fi
 exec 3<&- || true
 
 # ----- Stage the flatpak build dir -----------------------------------------
-BUILD_DIR="$(mktemp -d /tmp/shepherd-fw-flatpak.XXXXXX)"
-PROBE_LOG_DIR="$(mktemp -d /tmp/shepherd-fw-flatpak-log.XXXXXX)"
+BUILD_DIR="$(mktemp -d /tmp/lunchbox-fw-flatpak.XXXXXX)"
+PROBE_LOG_DIR="$(mktemp -d /tmp/lunchbox-fw-flatpak-log.XXXXXX)"
 chmod 0777 "$PROBE_LOG_DIR"
 
 cleanup() {
@@ -105,12 +105,12 @@ EOF
 echo "[orchestrator] Building flatpak via flatpak-builder..."
 ( cd "$BUILD_DIR" && flatpak-builder --user --install --force-clean build-tree "$APP_ID.yaml" ) 2>&1 | tail -3
 
-echo "[orchestrator] Building shepherd binaries..."
-./scripts/shepherd build
+echo "[orchestrator] Building lunchbox binaries..."
+./scripts/lunchbox build
 
 echo "[orchestrator] Running cargo test..."
-SHEPHERD_FIREWALL_PROBE_LOG="$PROBE_LOG_DIR/probe.log" \
-SHEPHERD_FIREWALL_PROBE_DENY="$DENY_TARGET" \
-SHEPHERD_FIREWALL_PROBE_FLATPAK="$APP_ID" \
-    cargo test -p shepherd-e2e --test firewall_real_flatpak -- \
+LUNCHBOX_FIREWALL_PROBE_LOG="$PROBE_LOG_DIR/probe.log" \
+LUNCHBOX_FIREWALL_PROBE_DENY="$DENY_TARGET" \
+LUNCHBOX_FIREWALL_PROBE_FLATPAK="$APP_ID" \
+    cargo test -p lunchbox-e2e --test firewall_real_flatpak -- \
     --include-ignored --test-threads=1 --nocapture

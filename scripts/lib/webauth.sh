@@ -18,7 +18,7 @@
 # Where the credential store lives on a device with the state custodian. On a
 # dev checkout it is the daemon's data directory instead, and `--store` names it.
 webauth_default_store() {
-    echo "$STATED_ADMIN_DIR/$SHEPHERD_WEB_AUTH_FILE"
+    echo "$STATED_ADMIN_DIR/$LUNCHBOX_WEB_AUTH_FILE"
 }
 
 webauth_reset() {
@@ -36,7 +36,7 @@ webauth_reset() {
                 shift
                 ;;
             *)
-                die "Unknown option: $1 (try: shepherd web-auth help)"
+                die "Unknown option: $1 (try: lunchbox web-auth help)"
                 ;;
         esac
     done
@@ -52,7 +52,7 @@ webauth_reset() {
 
     if [[ ! -f "$store" ]]; then
         warn "No credential store at $store — this device already has no web password."
-        info "It will mint a setup code the next time shepherdd starts."
+        info "It will mint a setup code the next time lunchboxd starts."
         return 0
     fi
 
@@ -66,7 +66,7 @@ webauth_reset() {
 
     rm -f "$store"
     success "Removed $store"
-    info "Restart shepherdd. A new setup code appears on the device's screen and in the journal."
+    info "Restart lunchboxd. A new setup code appears on the device's screen and in the journal."
 }
 
 webauth_main() {
@@ -79,7 +79,7 @@ webauth_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd web-auth <command> [options]
+Usage: lunchbox web-auth <command> [options]
 
 Commands:
     reset     Forget the web management password and every signed-in browser,
@@ -93,16 +93,16 @@ Options for 'reset':
     --store PATH    Where the credential store is (default:
                     $(webauth_default_store) on a device with the state
                     custodian; on a dev checkout it is
-                    dev-runtime/data/$SHEPHERD_WEB_AUTH_FILE).
+                    dev-runtime/data/$LUNCHBOX_WEB_AUTH_FILE).
     --force         Don't ask.
 
 Examples:
-    sudo shepherd web-auth reset
-    shepherd web-auth reset --store dev-runtime/data/$SHEPHERD_WEB_AUTH_FILE
+    sudo lunchbox web-auth reset
+    lunchbox web-auth reset --store dev-runtime/data/$LUNCHBOX_WEB_AUTH_FILE
 EOF
             ;;
         *)
-            die "Unknown web-auth command: $subcmd (try: shepherd web-auth help)"
+            die "Unknown web-auth command: $subcmd (try: lunchbox web-auth help)"
             ;;
     esac
 }

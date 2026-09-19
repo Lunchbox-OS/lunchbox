@@ -1,0 +1,17 @@
+[package]
+name = "lunchbox-host-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host adapter trait interfaces for lunchboxd platform integration"
+
+[dependencies]
+lunchbox-util = { workspace = true }
+lunchbox-api = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+serde_json = { workspace = true }

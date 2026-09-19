@@ -8,7 +8,7 @@
 # this lexical check is what covers them:
 #
 #   1. The shipped scripts' runtime behaviour on a device. scripts/lib/*.sh and
-#      shepherd-admin are installed by the .deb and run on the target machine;
+#      lunchbox-admin are installed by the .deb and run on the target machine;
 #      CI only stages them. A `/usr/lib/x86_64-linux-gnu/...` path in admin.sh
 #      would pass every job and break on an arm64 device.
 #   2. The default (no --arch) path. Every job passes --arch on an amd64 runner.
@@ -28,9 +28,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 # The architecture-neutral surface: the unified script system, its shared libs
-# (which also ship inside the .deb as the packaged shepherd-admin CLI), the
+# (which also ship inside the .deb as the packaged lunchbox-admin CLI), the
 # dependency manifests, and the CI helper scripts.
-files=(scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin run-dev)
+files=(scripts/lunchbox scripts/lunchbox-admin scripts/dev scripts/admin run-dev)
 while IFS= read -r f; do files+=("$f"); done < <(
     ls scripts/lib/*.sh scripts/ci/*.sh scripts/deps/*.pkgs 2>/dev/null
 )

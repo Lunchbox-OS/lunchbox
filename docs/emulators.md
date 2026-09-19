@@ -1,6 +1,6 @@
 # Emulated games
 
-`shepherdd` runs emulated games through [RetroArch][retroarch], the libretro
+`lunchboxd` runs emulated games through [RetroArch][retroarch], the libretro
 frontend, with `type = "retroarch"` entries. Compared with launching RetroArch
 as a plain `type = "process"` activity, the dedicated kind exists to make an
 emulator behave like every other supervised activity:
@@ -11,7 +11,7 @@ emulator behave like every other supervised activity:
 - **The in-game save survives**, including a crash or a forced kill.
 - **The child stays in the game**: RetroArch's own menu, file browser, and
   settings are locked.
-- **Each activity keeps its own saves**, under a directory shepherd owns.
+- **Each activity keeps its own saves**, under a directory Lunchbox owns.
 
 **No games are included, and none can be.** Supply your own content, and only
 content you have the right to. This document uses a freely licensed homebrew
@@ -22,9 +22,9 @@ test ROM for its examples.
 ## Installing
 
 ```sh
-sudo shepherd-admin apps install retroarch            # RetroArch + the mgba core
-sudo shepherd-admin apps install retroarch mgba nestopia snes9x
-shepherd-admin apps install retroarch help            # list the available cores
+sudo lunchbox-admin apps install retroarch            # RetroArch + the mgba core
+sudo lunchbox-admin apps install retroarch mgba nestopia snes9x
+lunchbox-admin apps install retroarch help            # list the available cores
 ```
 
 Cores are named the way an entry's `core =` field names them (`mgba`, not the
@@ -36,7 +36,7 @@ disk disagrees. It often does: `libretro-genesisplusgx` ships
 `genesis_plus_gx_libretro.so`, `libretro-mupen64plus-next` ships
 `mupen64plus_next_libretro.so`, and the Beetle cores are libretro's forks of
 Mednafen and keep that name (`libretro-beetle-psx` →
-`mednafen_psx_hw_libretro.so`). shepherd matches against the files actually
+`mednafen_psx_hw_libretro.so`). Lunchbox matches against the files actually
 present, ignoring `-` versus `_`, and knows the Beetle aliases — so
 `core = "beetle-psx"` and `core = "mednafen_psx_hw"` both work.
 
@@ -66,7 +66,7 @@ Saturn, or arcade. Those are packaged only by the libretro team's PPA, which
 `--ppa` opts into:
 
 ```sh
-sudo shepherd-admin apps install retroarch --ppa mupen64plus-next dolphin
+sudo lunchbox-admin apps install retroarch --ppa mupen64plus-next dolphin
 ```
 
 It is opt-in because a PPA is a third-party apt source for the **whole
@@ -138,13 +138,13 @@ other kind.
 | `reset` | `true` | Show the HUD's reset button. |
 | `kiosk` | `true` | Lock RetroArch's own menu. |
 | `command` | `retroarch` | The RetroArch binary. |
-| `args` | `[]` | Extra arguments, appended after the ones shepherd derives, so they win. |
+| `args` | `[]` | Extra arguments, appended after the ones Lunchbox derives, so they win. |
 | `env` | `{}` | Extra environment variables. |
 
 `content` is strict about relative paths on purpose: a bare `Games/game.gba`
 would be resolved against the *daemon's* working directory, not the operator's,
 and would fail at launch with a confusing error rather than at config
-validation. `shepherd config validate` rejects it up front.
+validation. `lunchbox config validate` rejects it up front.
 
 Compressed content works — RetroArch reads `.zip` and `.7z` directly — but the
 uncompressed file is easier to reason about when checking what a save belongs
@@ -156,7 +156,7 @@ Two different things are called "saving", and they are not interchangeable.
 
 **The in-game save** (SRAM / battery save, `.srm`) is the one the game itself
 writes — what a child means by "my save". RetroArch flushes it when content
-unloads, and shepherd additionally sets `autosave_interval = 10`, so it is
+unloads, and Lunchbox additionally sets `autosave_interval = 10`, so it is
 written every ten seconds of play. A crash, a power cut, or a forced kill costs
 seconds, not an afternoon.
 
@@ -165,7 +165,7 @@ seconds, not an afternoon.
 opening restores it. This is what makes an emulator behave like the rest of the
 kiosk: a session that ends at a time limit picks up exactly where it stopped.
 
-Both depend on RetroArch exiting cleanly, so shepherd gives these sessions a
+Both depend on RetroArch exiting cleanly, so Lunchbox gives these sessions a
 15-second graceful-stop window instead of the usual 5 — long enough to unload
 the core and write both kinds of save on slow storage.
 
@@ -192,7 +192,7 @@ less useful — every launch is already a fresh boot — but it still works as a
 The two kinds of save live in two different places, on purpose.
 
 **The in-game save stays where RetroArch puts it** — normally
-`~/.config/retroarch/saves/<Core>/<content>.srm`. Shepherd does not relocate
+`~/.config/retroarch/saves/<Core>/<content>.srm`. Lunchbox does not relocate
 it, so one game has one save whether it was launched from here or from a
 desktop session, and a save made before the entry existed is found without any
 migration. Back it up by copying `~/.config/retroarch/saves/`, the same
@@ -216,11 +216,11 @@ and falls back to the path above — so look in both places. With
 `service.capture_child_output` on, that `Redirecting save file to` line names
 the exact path for the session you are looking at.
 
-**The resume state is shepherd's**, since nothing outside a supervised session
+**The resume state is Lunchbox's**, since nothing outside a supervised session
 produces one:
 
 ```
-~/.local/share/shepherdd/retroarch/pokemon-firered/
+~/.local/share/lunchboxd/retroarch/pokemon-firered/
 ├── append.cfg              # generated on every launch; see below
 └── states/mGBA/…state.auto # the resume state (+ .png thumbnail)
 ```
@@ -238,18 +238,18 @@ To reset an activity from the admin side rather than the HUD, delete its
 > RetroArch's default save location, and so does this one, so the child's
 > existing save carries over untouched.
 
-## What shepherd generates, and what it leaves alone
+## What Lunchbox generates, and what it leaves alone
 
-Before each launch shepherd writes `append.cfg` and passes it to RetroArch with
+Before each launch Lunchbox writes `append.cfg` and passes it to RetroArch with
 `--appendconfig`. **Your `~/.config/retroarch/retroarch.cfg` is never edited**
 — cores, controller bindings, shaders and everything else you set up in
-RetroArch stay yours, and shepherd's settings apply only to activities it
+RetroArch stay yours, and Lunchbox's settings apply only to activities it
 launches.
 
 That last guarantee takes an explicit setting to hold: RetroArch's
 `config_save_on_exit` defaults to *true*, so a clean exit would otherwise write
 its entire live settings block — including everything appended — back into your
-config, making shepherd's per-activity choices permanent and global. The
+config, making Lunchbox's per-activity choices permanent and global. The
 generated fragment turns it off for the run.
 
 The fragment sets, and only sets:
@@ -265,15 +265,15 @@ The fragment sets, and only sets:
 | `video_context_driver = "wayland"` | Take the native Wayland path rather than whatever auto-detection lands on, so the picture is the panel's own pixel grid instead of an upscaled XWayland one. A preference, not a demand: RetroArch falls back to its usual search if Wayland will not initialize, and the Vulkan path keeps its own ordering (its drivers are named `vk_wayland`). |
 | `kiosk_mode_enable` | Lock the menu (from `kiosk`). |
 
-Shepherd does *not* isolate RetroArch's playlists, history, or runtime logs —
+Lunchbox does *not* isolate RetroArch's playlists, history, or runtime logs —
 those still live under `~/.config/retroarch/`. Nothing there affects a
 supervised session; it is worth knowing if you expected the activity to leave
 no trace at all.
 
-### Settings you make outside shepherd carry in
+### Settings you make outside Lunchbox carry in
 
 Configure RetroArch however you like from a normal desktop session — bind your
-controllers, pick a video driver, set per-core options — and shepherd picks it
+controllers, pick a video driver, set per-core options — and Lunchbox picks it
 all up. Every launch loads your `~/.config/retroarch/retroarch.cfg` first and
 appends its fragment on top:
 
@@ -282,22 +282,22 @@ appends its fragment on top:
 [INFO] [Config] Appending config: "…/append.cfg".
 ```
 
-Only the settings in the table above are shepherd's; everything else is yours.
+Only the settings in the table above are Lunchbox's; everything else is yours.
 Controller autoconfig profiles (`autoconfig/`), input remaps (`remaps/`) and
 per-core options (`retroarch-core-options.cfg`, the `.opt` files) are separate
-files shepherd never touches. Traffic is one-way — `config_save_on_exit =
+files Lunchbox never touches. Traffic is one-way — `config_save_on_exit =
 "false"` means a supervised session cannot write back into your config, so
-shepherd's per-activity choices never become your global ones.
+Lunchbox's per-activity choices never become your global ones.
 
-### …and per-core overrides beat shepherd
+### …and per-core overrides beat Lunchbox
 
 One sharp edge. RetroArch applies **overrides** —
 `~/.config/retroarch/config/<Core>/<Core>.cfg`, and the per-content-directory
 and per-game files beside it — *after* `--appendconfig`, so an override that
-names one of shepherd's settings wins.
+names one of Lunchbox's settings wins.
 
 Mostly that is what you want: overrides are how per-core video and input tuning
-carries into a session. But for the nine settings shepherd relies on it is a
+carries into a session. But for the nine settings Lunchbox relies on it is a
 footgun, and two of them fail quietly:
 
 - `kiosk_mode_enable = "false"` unlocks RetroArch's menu inside a supervised
@@ -309,26 +309,26 @@ The rest are `config_save_on_exit`, `savestate_directory`,
 `autosave_interval`, `pause_nonactive`, `video_fullscreen` and
 `video_context_driver`.
 
-shepherd checks for this at every launch and warns, naming the file and the
+Lunchbox checks for this at every launch and warns, naming the file and the
 keys:
 
 ```
-WARN shepherd_host_linux::retroarch: RetroArch override sets settings shepherd
+WARN lunchbox_host_linux::retroarch: RetroArch override sets settings Lunchbox
 relies on; RetroArch applies overrides after --appendconfig, so these win …
 override_file=~/.config/retroarch/config/mGBA/mGBA.cfg
 settings=savestate_auto_save, kiosk_mode_enable
 ```
 
-It is a warning, not an error: your overrides are yours, and shepherd will not
+It is a warning, not an error: your overrides are yours, and Lunchbox will not
 silently discard them. Remove those keys from the override file to hand the
 settings back.
 
 ### The network command interface is not enabled
 
-RetroArch can expose a UDP control port (`network_cmd_enable`), and shepherd
+RetroArch can expose a UDP control port (`network_cmd_enable`), and Lunchbox
 deliberately does not use it. It binds to all interfaces, cannot be restricted
 to localhost, and has no authentication — anyone on the network could quit a
-child's game or load different content into it. Everything shepherd needs
+child's game or load different content into it. Everything Lunchbox needs
 (including the reset button) is done without it.
 
 The "cannot be restricted" half is upstream's to fix, and it has been asked:
@@ -342,7 +342,7 @@ of the network out of the picture.
 
 ## Full core catalog
 
-Every core installable through `shepherd-admin apps install retroarch`, with
+Every core installable through `lunchbox-admin apps install retroarch`, with
 the value to put in `core =`. "In Ubuntu? yes" means no `--ppa` needed.
 
 Built from the packages themselves — `dpkg -c` over every `libretro-*` in both
@@ -459,7 +459,7 @@ package descriptions, because the two disagree often enough to matter.
   selects the hardware one (`mednafen_psx_hw`); use `core = "mednafen_psx"` for
   the software renderer.
 
-**Some names differ from the shared object on disk** and shepherd translates
+**Some names differ from the shared object on disk** and Lunchbox translates
 them, so the name you install is the name you configure: the ten `beetle-*`
 cores are libretro's Mednafen forks (`beetle-saturn` → `mednafen_saturn`),
 `lrps2` → `pcsx2`, and `np2` → `nekop2`.
@@ -495,7 +495,7 @@ curl -fL -o ~/Games/retroarch/gba-tests-arm.gba \
 
 Point an entry's `content` at it with `core = "mgba"`. (It reports a failed
 test number — that is the ROM grading the *emulator core*, not a problem with
-shepherd.) [Homebrew Hub][hh] collects freely distributable homebrew for
+lunchbox.) [Homebrew Hub][hh] collects freely distributable homebrew for
 several systems if you want an actual game to test with.
 
 [gba-tests]: https://github.com/jsmolka/gba-tests
@@ -508,7 +508,7 @@ verbose about all of this, and `args = ["--verbose"]` makes it more so.
 
 **The activity exits immediately.** Usually the core or the content could not
 be loaded. `[Core] Loading dynamic libretro core from: …` names the core path
-shepherd resolved. A core that isn't there gives
+Lunchbox resolved. A core that isn't there gives
 
 ```
 [WARN] --libretro argument "…" is not a file, core name or directory. Ignoring.
@@ -516,18 +516,18 @@ shepherd resolved. A core that isn't there gives
 Fatal error received in: "init_libretro_symbols()"
 ```
 
-You should not have to read a log to find this out: shepherd checks every
+You should not have to read a log to find this out: Lunchbox checks every
 RetroArch entry's core *and* its content on its diagnostic sweep, and reports
 what is missing against the activity, in the admin UIs and on the phone — a
-missing core with the `shepherd-admin` command that installs it, missing content
+missing core with the `lunchbox-admin` command that installs it, missing content
 with the path it looked for. An entry broken both ways says so once for each.
 The conditions clear on the next sweep once the file is there — no restart, so
 a ROM on removable media comes and goes with the drive.
 
 A core named with `core =` that resolves nowhere is reported but not certain:
-shepherd passes the bare filename on to RetroArch, which resolves it against its
+Lunchbox passes the bare filename on to RetroArch, which resolves it against its
 own configured `libretro_directory`, so this can also mean "installed somewhere
-shepherd does not search" — set `core_path` to the absolute path in that case. A
+Lunchbox does not search" — set `core_path` to the absolute path in that case. A
 `core_path` that is not a file is reported as the plain error it is.
 
 **Progress is lost between sessions.** Look for
@@ -561,7 +561,7 @@ swaymsg -t get_tree | jq -r '.. | objects | select(.pid) | "\(.name)\t\(.shell)"
 
 `xdg_shell` is Wayland. `xwayland` means something beat the fragment to it —
 almost certainly a per-core or per-game override setting `video_context_driver`
-(see above; shepherd warns about exactly this), or a `video_driver` in your own
+(see above; Lunchbox warns about exactly this), or a `video_driver` in your own
 `retroarch.cfg` that does its own windowing, such as `sdl2`. Fix that rather
 than reaching for a compositor-wide scale override.
 
@@ -574,4 +574,4 @@ than reaching for a compositor-wide scale override.
   its config keys, its save-state naming — which is why the entry kind is
   `retroarch` rather than a vague `emulator`. A future kind can sit beside it.
 - **Netplay, achievements, shaders, per-core options.** Configure them in
-  RetroArch itself; shepherd only appends the settings listed above.
+  RetroArch itself; Lunchbox only appends the settings listed above.

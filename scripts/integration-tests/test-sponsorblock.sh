@@ -2,7 +2,7 @@
 # SponsorBlock on-the-wire test (issue #159).
 #
 # Answers the one question the unit tests cannot: what does the player actually
-# send? Two arms, both driving the real `shepherd-media` inside the headless dev
+# send? Two arms, both driving the real `lunchbox-media` inside the headless dev
 # session, both traced with `strace -e trace=connect`:
 #
 #   off  -- no `--sponsorblock-categories`, the default. No connection may be
@@ -19,13 +19,13 @@
 # whose submissions still exist, which is not a property this repo controls. See
 # `docs/ai/history/2026-09-03 001 sponsorblock-scope.md` for that measurement.
 #
-# Do not tear the dev session down from another shell while this runs: shepherdd
+# Do not tear the dev session down from another shell while this runs: lunchboxd
 # kills every `sleep` the user owns on its way out, including this script's, and
 # the script then dies silently mid-arm. See the headless-dev skill's gotchas.
 #
 # Prerequisites:
 #   - strace, python3
-#   - the headless dev session's dependencies (`shepherd deps install agent`)
+#   - the headless dev session's dependencies (`lunchbox deps install agent`)
 #   - a network (the "off" arm still plays a YouTube video, which is the point:
 #     it proves the silence is about SponsorBlock and not about being offline)
 
@@ -45,14 +45,14 @@ command -v python3 >/dev/null 2>&1 || fail "python3 not found on PATH"
 
 WORK="$(mktemp -d)"
 PORT="${SPONSORBLOCK_TEST_PORT:-8391}"
-CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/shepherd/media/sponsorblock"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/lunchbox/media/sponsorblock"
 STARTED_SESSION=0
 LISTENER=""
 
 cleanup() {
     [[ -n "$LISTENER" ]] && kill "$LISTENER" 2>/dev/null || true
-    pkill -x shepherd-media 2>/dev/null || true
-    [[ "$STARTED_SESSION" == 1 ]] && ./scripts/shepherd dev stop >/dev/null 2>&1 || true
+    pkill -x lunchbox-media 2>/dev/null || true
+    [[ "$STARTED_SESSION" == 1 ]] && ./scripts/lunchbox dev stop >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -104,12 +104,12 @@ mapfile -t SB_IPS < <(getent ahosts sponsor.ajay.app | awk '{print $1}' | sort -
 [[ ${#SB_IPS[@]} -gt 0 ]] || fail "could not resolve sponsor.ajay.app (no network?)"
 echo "[test] sponsor.ajay.app resolves to: ${SB_IPS[*]}"
 
-echo "[test] Building shepherd-media..."
-cargo build -p shepherd-media
+echo "[test] Building lunchbox-media..."
+cargo build -p lunchbox-media
 
 if [[ ! -f dev-runtime/headless/session.env ]]; then
     echo "[test] Booting the headless session..."
-    ./scripts/shepherd dev headless --no-build >/dev/null || fail "could not boot the headless session"
+    ./scripts/lunchbox dev headless --no-build >/dev/null || fail "could not boot the headless session"
     STARTED_SESSION=1
 fi
 set -a
@@ -126,11 +126,11 @@ sleep 1
 # starts, has landed either way.
 arm() {
     local label="$1"; shift
-    pkill -x shepherd-media 2>/dev/null || true
+    pkill -x lunchbox-media 2>/dev/null || true
     sleep 3
     rm -rf "$CACHE"   # no cached bucket may stand in for a fetch
     strace -f -qq -e trace=connect -o "$WORK/strace-$label.txt" \
-        ./target/debug/shepherd-media --log-level debug "$@" \
+        ./target/debug/lunchbox-media --log-level debug "$@" \
         play --library "$WORK/library.toml" --item item \
         > "$WORK/player-$label.log" 2>&1 &
     # `grep -q ... && break` would trip `set -e` on every iteration that has
@@ -145,7 +145,7 @@ arm() {
     grep -q STARTED_PLAYBACK "$WORK/player-$label.log" \
         || fail "$label: playback never started (see $WORK/player-$label.log)"
     sleep 15
-    pkill -x shepherd-media 2>/dev/null || true
+    pkill -x lunchbox-media 2>/dev/null || true
     sleep 2
 }
 

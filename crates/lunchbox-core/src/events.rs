@@ -1,0 +1,61 @@
+//! Core events emitted by the engine
+
+use chrono::{DateTime, Local};
+use lunchbox_api::{SessionEndReason, WarningSeverity};
+use lunchbox_util::{EntryId, SessionId};
+use std::time::Duration;
+
+/// Events emitted by the core engine
+#[derive(Debug, Clone)]
+pub enum CoreEvent {
+    /// Session started successfully
+    SessionStarted {
+        session_id: SessionId,
+        entry_id: EntryId,
+        label: String,
+        /// Deadline for session. None means unlimited.
+        deadline: Option<DateTime<Local>>,
+        /// Whether the HUD should confirm before its "X" button ends this
+        /// session (issue #78).
+        confirm_on_close: bool,
+        /// Whether the HUD should offer a reset button for this session.
+        can_reset: bool,
+        /// Whether the HUD should offer page-turn buttons (issue #160).
+        can_turn_pages: bool,
+    },
+
+    /// The set of available entries has changed (e.g., due to time window boundaries)
+    AvailabilitySetChanged,
+
+    /// Warning threshold reached
+    Warning {
+        session_id: SessionId,
+        threshold_seconds: u64,
+        time_remaining: Duration,
+        severity: WarningSeverity,
+        message: Option<String>,
+    },
+
+    /// Session is expiring (termination initiated)
+    ExpireDue { session_id: SessionId },
+
+    /// Session has ended
+    SessionEnded {
+        session_id: SessionId,
+        entry_id: EntryId,
+        reason: SessionEndReason,
+        duration: Duration,
+    },
+
+    /// Entry availability changed
+    EntryAvailabilityChanged { entry_id: EntryId, enabled: bool },
+
+    /// Policy was reloaded
+    PolicyReloaded { entry_count: usize },
+
+    /// The device entered or left administrator mode (issue #154).
+    AdminModeChanged { active: bool },
+
+    /// The screen was locked or unlocked (issue #154).
+    LockChanged { locked: bool },
+}

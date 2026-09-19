@@ -1,4 +1,4 @@
-# Developer-only packages for shepherd-launcher
+# Developer-only packages for Lunchbox
 # These are extras useful during development
 # The full dev set is: build.pkgs + run.pkgs + dev.pkgs
 # One package per line, comments start with #

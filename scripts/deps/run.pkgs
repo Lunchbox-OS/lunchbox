@@ -1,4 +1,4 @@
-# Runtime system packages for shepherd-launcher
+# Runtime system packages for Lunchbox
 # These are required to run the compiled binaries
 # One package per line, comments start with #
 
@@ -10,7 +10,7 @@ swayidle
 xdg-desktop-portal-wlr
 
 # Output mirroring for external monitor / docking support (issue #87). sway
-# cannot mirror outputs from config, so shepherdd drives `wl-mirror` (a
+# cannot mirror outputs from config, so lunchboxd drives `wl-mirror` (a
 # screencopy client) to clone the primary panel onto a docked display. Audio
 # routing while docked uses `pw-dump`/`wpctl` from PipeWire/WirePlumber, which
 # the volume control already depends on.
@@ -22,22 +22,22 @@ libadwaita-1-0
 libgtk4-layer-shell0
 libudev1
 
-# mpv runtime (libmpv2 is linked dynamically by shepherd-media; mpv brings in
+# mpv runtime (libmpv2 is linked dynamically by lunchbox-media; mpv brings in
 # both the binary and the .so).
 #
 # mpv also needs a libva driver to decode video on the GPU, and neither depends
 # on nor recommends one. Which driver is right depends on the GPU, so they are
-# not listed here — `shepherd deps install run` picks them from the detected
+# not listed here — `lunchbox deps install run` picks them from the detected
 # hardware via install_media_deps in scripts/lib/admin.sh (also reachable as
-# `shepherd-admin va-api install`).
+# `lunchbox-admin va-api install`).
 mpv
 
 # Python venv support — needed to create the yt-dlp virtualenv.
-# yt-dlp itself is installed via pip into /opt/shepherd/ytdlp-venv so it
+# yt-dlp itself is installed via pip into /opt/lunchbox/ytdlp-venv so it
 # stays up-to-date independent of the Ubuntu package archive.
 python3-venv
 
-# Screen brightness control — used by shepherdd's brightness adapter to
+# Screen brightness control — used by lunchboxd's brightness adapter to
 # write `/sys/class/backlight/<dev>/brightness` from an unprivileged user.
 # Apt installs udev rules that grant the `video` group write access, which
 # is the only supported path; a direct sysfs write would silently fail in
@@ -46,5 +46,5 @@ python3-venv
 brightnessctl
 
 # Bluetooth stack — BlueZ provides the bluetoothd D-Bus service the
-# BLE management transport (shepherd-ble) talks to via the bluer crate.
+# BLE management transport (lunchbox-ble) talks to via the bluer crate.
 bluez

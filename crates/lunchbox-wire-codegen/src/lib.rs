@@ -1,0 +1,16 @@
+//! Client-mirror generation for the lunchboxd wire protocol.
+//!
+//! Lives in its own leaf crate for two reasons. It sits above `lunchbox-ble`
+//! in the dependency graph, so it can describe the BLE claim types alongside
+//! the management payloads — a generator inside `lunchbox-management` could
+//! not, since `lunchbox-ble` depends on it. And being outside the workspace's
+//! `default-members` keeps `schemars` out of the binaries that ship.
+
+pub mod config_defaults;
+pub mod config_schema;
+pub mod editor_schema;
+pub mod kind_defaults;
+pub mod kotlin_types;
+pub mod rust_types;
+pub mod ts_types;
+pub mod wire_schema;

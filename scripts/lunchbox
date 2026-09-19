@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# Lunchbox CLI - Main entrypoint for Lunchbox tooling
+# Provides unified interface for build, development, installation, and hardening
+
+set -euo pipefail
+
+# Get the directory containing this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$SCRIPT_DIR/lib"
+
+# Source shared libraries
+# shellcheck source=lib/common.sh
+source "$LIB_DIR/common.sh"
+# shellcheck source=lib/admin.sh
+source "$LIB_DIR/admin.sh"
+# shellcheck source=lib/deps.sh
+source "$LIB_DIR/deps.sh"
+# shellcheck source=lib/build.sh
+source "$LIB_DIR/build.sh"
+# shellcheck source=lib/sway.sh
+source "$LIB_DIR/sway.sh"
+# shellcheck source=lib/headless.sh
+source "$LIB_DIR/headless.sh"
+# shellcheck source=lib/install.sh
+source "$LIB_DIR/install.sh"
+# shellcheck source=lib/harden.sh
+source "$LIB_DIR/harden.sh"
+# shellcheck source=lib/config.sh
+source "$LIB_DIR/config.sh"
+# shellcheck source=lib/webauth.sh
+source "$LIB_DIR/webauth.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$LIB_DIR/bluetooth.sh"
+# shellcheck source=lib/version.sh
+source "$LIB_DIR/version.sh"
+# shellcheck source=lib/package.sh
+source "$LIB_DIR/package.sh"
+
+# Version: read from the canonical repo-root VERSION file (see lib/version.sh).
+VERSION="$(version_read)"
+
+# Print usage information
+usage() {
+    cat <<EOF
+lunchbox - Unified tooling for Lunchbox
+
+Usage: lunchbox <command> [subcommand] [options]
+
+Commands:
+    deps        Manage system dependencies
+    build       Build lunchbox binaries
+    config      Configuration validation
+    dev         Development commands
+    install     Install lunchbox to the system
+    uninstall   Remove installed lunchbox binaries and system files
+    harden      User hardening for kiosk mode
+    bluetooth   Bluetooth admin operations (clear bonds, etc.)
+    web-auth    Web management sign-in (reset a forgotten password)
+    version     Show or bump the project version
+    package     Build distributable packages (.deb, F-Droid repo)
+    apps        Install activity backends (steam via snap, chrome via Flathub,
+                retroarch) or the Android apps (companion/media) onto an
+                attached device
+    power-key   Map the power button to suspend instead of shutdown
+    setup-user  Deploy config + add a user to lunchbox's groups
+
+Note: the post-install admin tasks (setup-user, apps, power-key, harden,
+bluetooth, media-deps, va-api, yt-dlp) are also available on an installed
+system as 'lunchbox-admin', which the .deb ships without needing this source
+tree.
+
+Development:
+    lunchbox deps install dev     Install all development dependencies
+    lunchbox build                Build debug binaries
+    lunchbox dev run              Build and run in nested sway
+    lunchbox dev webui            Hot-reloading web UI / config editor
+
+CI/Build:
+    lunchbox deps install build   Install build-only dependencies
+    lunchbox build --release      Build release binaries
+    lunchbox package deb          Build the Debian package (host architecture)
+    lunchbox package fdroid       Validate dist/fdroid metadata against APKs
+
+Runtime:
+    lunchbox deps install run     Install runtime dependencies only
+
+Installation:
+    lunchbox install all --user USER          Full installation
+    lunchbox install bins --prefix /usr       Install binaries only
+    lunchbox install config --user USER       Deploy user config
+    lunchbox uninstall bins                    Remove installed binaries
+    lunchbox uninstall all                     Remove all system files
+
+Hardening:
+    lunchbox harden apply --user USER         Apply kiosk restrictions
+    lunchbox harden revert --user USER        Remove restrictions
+
+Bluetooth:
+    lunchbox bluetooth clear --user USER      Unpair + clear admin record
+                                              for a logged-out user
+
+Android apps (built from this checkout, installed over adb):
+    lunchbox apps install companion           Lunchbox Companion (admin app)
+    lunchbox apps install media               Lunchbox Media (player)
+
+Configuration:
+    lunchbox config validate                  Validate installed config
+    lunchbox config validate <path>           Validate a specific file
+
+Version:
+    lunchbox version                          Show the current version
+    lunchbox version set <X.Y.Z>              Bump the version everywhere
+    lunchbox version check                    Verify version literals match
+
+Options:
+    -h, --help      Show this help message
+    -V, --version   Show version
+
+Run 'lunchbox <command> help' for detailed command information.
+EOF
+}
+
+# Main entry point
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        deps)
+            deps_main "$@"
+            ;;
+        build)
+            build_main "$@"
+            ;;
+        config)
+            config_main "$@"
+            ;;
+        dev)
+            local subcmd="${1:-}"
+            shift || true
+            case "$subcmd" in
+                run)
+                    sway_dev_run "$@"
+                    ;;
+                webui)
+                    dev_webui "$@"
+                    ;;
+                headless|shot|tree|key|type|click|stop)
+                    # Headless, agent-drivable session (see lib/headless.sh).
+                    headless_dev_dispatch "$subcmd" "$@"
+                    ;;
+                ""|help|-h|--help)
+                    cat <<EOF
+Usage: lunchbox dev <command>
+
+Commands:
+    run         Build and run lunchbox in a NESTED sway session
+                (needs a graphical login session — for local, interactive dev)
+
+    webui       Serve the web UI with hot reload (foreground; Ctrl-C to stop):
+        webui                   Management UI, proxying /api to localhost:8080
+        webui --standalone      Config editor only, the way a static host
+                                serves it — needs no daemon
+        webui --wasm            Rebuild the config editor's wasm validator
+                                first (built automatically when missing)
+        Anything after -- goes to rsbuild, e.g. -- --port 3001
+
+    headless    Start a detached HEADLESS session (no login session, no GPU)
+                that an agent or SSH user can screenshot and drive:
+        headless [--config PATH] [--user NAME] [--size WxH] [--time "..."]
+                 [--gpu] [--no-build] [--harden-ipc]
+        shot [out.png]      Screenshot the virtual output
+        tree [raw]          Dump the window tree (app_id/focus/fullscreen)
+        key <keysym>...     Inject keystroke(s), e.g. Down Return
+        type <text>         Type literal text
+        click <x> <y> [btn] Move + click the virtual pointer
+        stop                Tear the session down
+
+Examples:
+    lunchbox dev run
+    lunchbox dev webui --standalone
+    lunchbox dev headless --time "2025-12-25 21:00:00"
+    lunchbox dev shot /tmp/home.png && lunchbox dev stop
+EOF
+                    ;;
+                *)
+                    die "Unknown dev command: $subcmd (try: lunchbox dev help)"
+                    ;;
+            esac
+            ;;
+        install)
+            install_main "$@"
+            ;;
+        uninstall)
+            uninstall_main "$@"
+            ;;
+        harden)
+            harden_main "$@"
+            ;;
+        bluetooth)
+            bluetooth_main "$@"
+            ;;
+        web-auth)
+            webauth_main "$@"
+            ;;
+        version)
+            version_main "$@"
+            ;;
+        package)
+            package_main "$@"
+            ;;
+        apps)
+            apps_main "$@"
+            ;;
+        power-key)
+            power_key_main "$@"
+            ;;
+        setup-user)
+            setup_user "$@"
+            ;;
+        -h|--help|help|"")
+            usage
+            ;;
+        -V|--version)
+            echo "lunchbox $VERSION"
+            ;;
+        *)
+            error "Unknown command: $cmd"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+# Run main with all arguments -- unless this file is being sourced, which
+# scripts/ci/check-default-arch.sh does to drive the real `package deb` with its
+# build and install steps stubbed out.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

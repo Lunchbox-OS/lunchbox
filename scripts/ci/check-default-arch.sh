@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Prove `shepherd package deb` targets the *host* when no --arch is given.
+# Prove `lunchbox package deb` targets the *host* when no --arch is given.
 #
 # Every CI and release job passes --arch explicitly, and the runner is amd64,
 # so the default path -- the one a developer or a device takes with a plain
-# `shepherd package deb` -- never runs in CI. A hardcoded `amd64` there passes
+# `lunchbox package deb` -- never runs in CI. A hardcoded `amd64` there passes
 # every build and package job: the amd64 leg's host is amd64 anyway, and the
 # arm64 leg overrides it. On an arm64 host that same line turns an unqualified
 # `package deb` into a cross build towards amd64, and the result is internally
@@ -67,15 +67,15 @@ check_case() {
 
     if ! (
         export PATH="$work/bin:$PATH" FAKE_HOST_ARCH="$host"
-        unset SHEPHERD_CARGO_TARGET CARGO_BUILD_TARGET
-        # shellcheck source=../shepherd
-        source "$repo_root/scripts/shepherd"
+        unset LUNCHBOX_CARGO_TARGET CARGO_BUILD_TARGET
+        # shellcheck source=../lunchbox
+        source "$repo_root/scripts/lunchbox"
         # These override the real functions; package_deb calls them, which
         # the linter cannot see through the `source` above. Both codes are
         # needed: the 0.9 linter in CI (Debian bookworm) reports this as
         # SC2317, and 0.10 onwards reports it as SC2329 instead.
         # shellcheck disable=SC2317,SC2329
-        build_cargo() { printf '%s' "${SHEPHERD_CARGO_TARGET:-}" > "$triple_file"; }
+        build_cargo() { printf '%s' "${LUNCHBOX_CARGO_TARGET:-}" > "$triple_file"; }
         # shellcheck disable=SC2317,SC2329
         install_system() { :; }
         # shellcheck disable=SC2317,SC2329
@@ -125,7 +125,7 @@ done
 if [[ $status -ne 0 ]]; then
     cat >&2 <<'MSG'
 
-`shepherd package deb` must default to the host architecture, and an --arch
+`lunchbox package deb` must default to the host architecture, and an --arch
 naming the host must stay a native build. Derive the host at runtime with
 `dpkg --print-architecture` rather than naming an architecture.
 MSG

@@ -1,0 +1,82 @@
+{
+  "_comment": [
+    "The wire shape of every patch operation, pinned from both sides.",
+    "",
+    "The editor's TypeScript builds these objects (lunchbox-webui/src/config/doc/patches.ts)",
+    "and this crate's serde deserializes them. Nothing else checks that the two agree:",
+    "the Rust tests construct Patch values directly, the TypeScript never leaves the browser,",
+    "and a renamed serde tag would leave both suites green while the editor broke at runtime.",
+    "",
+    "So both sides assert against this file. patches.test.ts checks its builders produce",
+    "exactly these objects; patch_contract.rs checks each one deserializes and does what it says.",
+    "Change the vocabulary and one of the two fails."
+  ],
+  "set_integer": {
+    "op": "set",
+    "path": "service.default_max_run_seconds",
+    "value": 1800
+  },
+  "set_string": {
+    "op": "set",
+    "path": "entries[id=a].label",
+    "value": "Renamed"
+  },
+  "set_boolean": {
+    "op": "set",
+    "path": "entries[id=a].disabled",
+    "value": true
+  },
+  "set_float": {
+    "op": "set",
+    "path": "entries[id=a].tokens.earn_ratio",
+    "value": 0.5
+  },
+  "set_array": {
+    "op": "set",
+    "path": "entries[id=a].requires_input",
+    "value": ["keyboard", "mouse"]
+  },
+  "set_object": {
+    "op": "set",
+    "path": "entries[id=a].kind",
+    "value": { "type": "flatpak", "app_id": "org.kde.krita" }
+  },
+  "set_nested_index": {
+    "op": "set",
+    "path": "entries[id=a].availability.windows[0].start",
+    "value": "07:30"
+  },
+  "unset_key": {
+    "op": "unset",
+    "path": "entries[id=a].icon"
+  },
+  "unset_array_element": {
+    "op": "unset",
+    "path": "entries[id=a].availability.windows[0]"
+  },
+  "unset_by_id": {
+    "op": "unset",
+    "path": "entries[id=a]"
+  },
+  "insert_append": {
+    "op": "insert",
+    "path": "entries",
+    "value": {
+      "id": "added",
+      "label": "Added",
+      "kind": { "type": "process", "command": "/bin/true" }
+    }
+  },
+  "insert_at_index": {
+    "op": "insert",
+    "path": "entries[id=a].availability.windows",
+    "index": 0,
+    "value": { "days": "weekends", "start": "10:00", "end": "12:00" }
+  },
+  "move_within_array": {
+    "op": "move",
+    "path": "entries[id=a].warnings",
+    "from": 0,
+    "to": 1
+  }
+}

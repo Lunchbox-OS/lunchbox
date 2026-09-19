@@ -1,0 +1,25 @@
+[package]
+name = "lunchbox-media-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "On-disk video cache for lunchbox-media: keying, download worker, and LRU eviction, shared between the player and lunchboxd"
+
+[dependencies]
+# Library/source types and the yt-dlp extractor args playback uses. No libmpv:
+# a cache never decodes anything, and lunchboxd must not link mpv to prefetch.
+lunchbox-media-core = { path = "../lunchbox-media-core", default-features = false }
+# The LRU eviction policy, shared with the Android poster/video caches.
+lunchbox-media-app = { path = "../lunchbox-media-app" }
+
+filetime = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
+sha2 = "0.10"
+tracing = { workspace = true }
+url = "2.5"
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# lunchbox-admin - post-install admin tasks for Lunchbox.
+#
+# A slim, repo-independent companion to `scripts/lunchbox`. It exposes the admin
+# operations that are useful on an installed system — per-user setup, yt-dlp,
+# activity-backend installs, Bluetooth reset, kiosk hardening — and works both
+# from a source checkout (scripts/lunchbox-admin) and from the .deb, which ships
+# it as /usr/bin/lunchbox-admin with its libs under /usr/lib/lunchbox/lib.
+#
+# Everything here shares implementations with `scripts/lunchbox` via scripts/lib
+# (see admin.sh); this tool just omits the build/package/dev machinery that
+# needs a source tree.
+
+set -euo pipefail
+
+# Resolve our real location (following the /usr/bin symlink) so we can find our
+# libs whether we live at scripts/ or /usr/lib/lunchbox/. In both layouts the
+# libs sit in a sibling `lib/` directory.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+LIB_DIR="$SELF_DIR/lib"
+
+# Data files (example configs) live at the repo root in a source checkout and
+# under /usr/share/lunchbox when packaged. Detect via the repo Cargo.toml one
+# level up from scripts/; export LUNCHBOX_DATA_DIR so get_data_dir resolves the
+# right place without relying on get_repo_root (which is meaningless under /usr).
+# An explicit LUNCHBOX_DATA_DIR in the environment wins (testing / odd layouts).
+if [[ -z "${LUNCHBOX_DATA_DIR:-}" ]]; then
+    if [[ -f "$SELF_DIR/../Cargo.toml" ]]; then
+        LUNCHBOX_DATA_DIR="$(cd "$SELF_DIR/.." && pwd)"
+    else
+        LUNCHBOX_DATA_DIR="/usr/share/lunchbox"
+    fi
+fi
+export LUNCHBOX_DATA_DIR
+
+# shellcheck source=lib/common.sh
+source "$LIB_DIR/common.sh"
+# install.sh provides install_config / install_user_groups / add_user_to_groups
+# / FIREWALL_GROUP that admin.sh's setup_user calls. (It sources build.sh, whose
+# functions are unused here but harmless.)
+# shellcheck source=lib/install.sh
+source "$LIB_DIR/install.sh"
+# shellcheck source=lib/harden.sh
+source "$LIB_DIR/harden.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$LIB_DIR/bluetooth.sh"
+# shellcheck source=lib/admin.sh
+source "$LIB_DIR/admin.sh"
+
+VERSION="unknown"
+if [[ -f "$(get_data_dir)/VERSION" ]]; then
+    VERSION="$(head -n1 "$(get_data_dir)/VERSION" | tr -d '[:space:]')"
+fi
+
+usage() {
+    cat <<EOF
+lunchbox-admin - post-install admin tasks for Lunchbox
+
+Usage: lunchbox-admin <command> [options]
+
+Commands:
+    setup-user USER   Deploy the example config, set up the state custodian for
+                      USER (its directory, their existing state, its socket) and
+                      add USER to the groups lunchbox needs
+                      (input/video/bluetooth/lunchbox-firewall)
+    policy USER       Install a policy from a file, validated first. The one
+      --source PATH   lunchboxd reads lives with the state custodian, so this is
+                      how a packaged device changes what it allows
+    migrate-state USER
+                      Move USER's existing state under the state custodian. Part
+                      of setup-user; run it alone on a device that gained the
+                      custodian after its state was already there
+    restore-state     Stop the custodian and move every user's state back to
+                      their home directory. Run this BEFORE downgrading to a
+                      release without the custodian, or the older build starts
+                      from an empty database and an unclaimed device
+    media-deps <cmd>  Install everything lunchbox-media needs: va-api + yt-dlp
+    va-api <cmd>      Install/detect VA-API drivers for hardware video decoding
+    yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
+    apps install APP  Install an activity backend (steam via snap, chrome via
+                      Flathub, retroarch) or an Android app (companion/media)
+                      onto an attached phone or TV stick over adb
+    power-key <cmd>   Map the power button to suspend instead of shutdown
+    harden <cmd>      Apply/revert/status kiosk hardening for a user
+    bluetooth clear   Force-unpair the device's BLE admin and reset to unclaimed
+
+Options:
+    -h, --help        Show this help
+    -V, --version     Show version
+
+Run 'lunchbox-admin <command> help' for detailed command information.
+
+Examples:
+    sudo lunchbox-admin setup-user kiosk
+    sudo lunchbox-admin policy kiosk --source ./new-config.toml
+    sudo lunchbox-admin restore-state            # before downgrading
+    sudo lunchbox-admin media-deps install
+    lunchbox-admin va-api detect
+    sudo lunchbox-admin yt-dlp install
+    sudo lunchbox-admin apps install steam
+    sudo lunchbox-admin apps install retroarch mgba
+    lunchbox-admin apps install companion        # no sudo: adb keys are per-user
+    sudo lunchbox-admin harden apply --user kiosk
+    sudo lunchbox-admin bluetooth clear          # --user only without a custodian
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        setup-user)
+            setup_user "$@"
+            ;;
+        # The three per-device operations issue #157 added. Their implementation
+        # is shared with `scripts/lunchbox`, which is not shipped -- so without
+        # these a packaged device could enable the custodian and then neither
+        # set a policy through it, populate it, nor get back out.
+        policy)
+            admin_policy "$@"
+            ;;
+        migrate-state)
+            admin_migrate_state "$@"
+            ;;
+        restore-state)
+            admin_restore_state "$@"
+            ;;
+        media-deps|media)
+            media_deps_main "$@"
+            ;;
+        va-api|vaapi)
+            va_api_main "$@"
+            ;;
+        yt-dlp|ytdlp)
+            ytdlp_main "$@"
+            ;;
+        apps)
+            apps_main "$@"
+            ;;
+        power-key)
+            power_key_main "$@"
+            ;;
+        harden)
+            harden_main "$@"
+            ;;
+        bluetooth)
+            bluetooth_main "$@"
+            ;;
+        -h|--help|help|"")
+            usage
+            ;;
+        -V|--version)
+            echo "lunchbox-admin $VERSION"
+            ;;
+        *)
+            error "Unknown command: $cmd"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

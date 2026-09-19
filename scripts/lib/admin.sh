@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Shared post-install admin tasks for shepherd-launcher.
+# Shared post-install admin tasks for Lunchbox.
 #
 # These operations are useful *after* the software is installed, and they are
 # deliberately repo-independent: they perform pure system actions (pip into a
 # venv, flatpak installs, per-user config/group setup) with no reference to the
 # source tree. That lets the same code back both entrypoints:
 #
-#   * scripts/shepherd            — the from-source dev/admin CLI
-#   * scripts/shepherd-admin      — a slim entrypoint shipped in the .deb as
-#                                   /usr/bin/shepherd-admin
+#   * scripts/lunchbox            — the from-source dev/admin CLI
+#   * scripts/lunchbox-admin      — a slim entrypoint shipped in the .deb as
+#                                   /usr/bin/lunchbox-admin
 #
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -31,9 +31,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 
 # yt-dlp virtualenv location and the symlink placed on PATH. The venv is owned
 # by root and lives outside /usr so apt can never silently downgrade or remove
-# yt-dlp. (Formerly in deps.sh; moved here so `shepherd deps install run` and
-# `shepherd-admin yt-dlp install` share one implementation.)
-YTDLP_VENV="/opt/shepherd/ytdlp-venv"
+# yt-dlp. (Formerly in deps.sh; moved here so `lunchbox deps install run` and
+# `lunchbox-admin yt-dlp install` share one implementation.)
+YTDLP_VENV="/opt/lunchbox/ytdlp-venv"
 YTDLP_LINK="/usr/local/bin/yt-dlp"
 
 # Check whether yt-dlp is available on PATH (covers both the venv symlink and
@@ -67,7 +67,7 @@ install_ytdlp() {
     # Install or upgrade yt-dlp inside the venv.
     maybe_sudo "$YTDLP_VENV/bin/pip" install --quiet --upgrade yt-dlp
 
-    # Symlink the venv binary onto PATH so shepherd-media (and anything else)
+    # Symlink the venv binary onto PATH so lunchbox-media (and anything else)
     # can find it as plain `yt-dlp`.
     maybe_sudo ln -sf "$YTDLP_VENV/bin/yt-dlp" "$YTDLP_LINK"
 
@@ -78,7 +78,7 @@ install_ytdlp() {
     fi
 }
 
-# Dispatch for `shepherd-admin yt-dlp <install>`.
+# Dispatch for `lunchbox-admin yt-dlp <install>`.
 ytdlp_main() {
     local subcmd="${1:-install}"
     shift || true
@@ -88,7 +88,7 @@ ytdlp_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd-admin yt-dlp install
+Usage: lunchbox-admin yt-dlp install
 
 Installs (or upgrades) yt-dlp into a virtualenv at $YTDLP_VENV and links it onto
 PATH as $YTDLP_LINK. Needed only for YouTube media libraries; local mpv playback
@@ -96,7 +96,7 @@ does not use it. Re-run periodically to keep yt-dlp current.
 EOF
             ;;
         *)
-            die "Unknown yt-dlp command: $subcmd (try: shepherd-admin yt-dlp help)"
+            die "Unknown yt-dlp command: $subcmd (try: lunchbox-admin yt-dlp help)"
             ;;
     esac
 }
@@ -106,21 +106,21 @@ EOF
 # ---------------------------------------------------------------------------
 #
 # libva dispatches to a per-vendor `<name>_drv_video.so`. With none installed,
-# mpv's `hwdec` auto-detection finds nothing and shepherd-media decodes every frame
+# mpv's `hwdec` auto-detection finds nothing and lunchbox-media decodes every frame
 # on the CPU — roughly 6x the CPU for 1080p30 on an Intel HD 4000 (issue #115).
 # Ubuntu's `mpv` package neither depends on nor recommends a driver, so a fresh
 # install usually has none.
 #
 # Which driver is the right one depends on the GPU, so the packages are chosen
 # from the hardware present rather than installed blanket-fashion. Whether the
-# chosen driver actually loads at playback time is reported by shepherd-media
+# chosen driver actually loads at playback time is reported by lunchbox-media
 # itself, which observes mpv's `hwdec-current` and warns when video ends up on
 # the CPU.
 
 # Root of the sysfs tree the GPU inventory is read from. Overridable so the
 # detection can be exercised against a fixture tree without the matching
 # hardware — see `va-api detect`.
-SHEPHERD_SYSFS_ROOT="${SHEPHERD_SYSFS_ROOT:-/sys}"
+LUNCHBOX_SYSFS_ROOT="${LUNCHBOX_SYSFS_ROOT:-/sys}"
 
 # Directories libva loads drivers from.
 VA_DRIVER_DIRS=(/usr/lib/*/dri /usr/lib/dri)
@@ -134,7 +134,7 @@ VA_DRIVER_DIRS=(/usr/lib/*/dri /usr/lib/dri)
 va_detect_gpus() {
     local dev vendor class driver found=0
 
-    for dev in "$SHEPHERD_SYSFS_ROOT"/bus/pci/devices/*; do
+    for dev in "$LUNCHBOX_SYSFS_ROOT"/bus/pci/devices/*; do
         [[ -r "$dev/class" && -r "$dev/vendor" ]] || continue
         class="$(<"$dev/class")"
         # Display controllers only: PCI base class 0x03.
@@ -168,7 +168,7 @@ va_detect_gpus() {
     [[ "$found" -eq 1 ]] && return 0
 
     # No PCI display controller: fall back to whatever DRM devices exist.
-    for dev in "$SHEPHERD_SYSFS_ROOT"/class/drm/card*; do
+    for dev in "$LUNCHBOX_SYSFS_ROOT"/class/drm/card*; do
         [[ -L "$dev/device/driver" ]] || continue
         driver="$(basename "$(readlink "$dev/device/driver")")"
         case "$driver" in
@@ -282,7 +282,7 @@ va_api_detect() {
     mapfile -t packages < <(va_resolve_packages)
 
     if [[ ${#gpus[@]} -eq 0 ]]; then
-        warn "No GPU found under $SHEPHERD_SYSFS_ROOT"
+        warn "No GPU found under $LUNCHBOX_SYSFS_ROOT"
         return 0
     fi
 
@@ -322,13 +322,13 @@ install_va_api_drivers() {
 
     info "Installing VA-API drivers for hardware video decoding: ${packages[*]}"
     if ! maybe_sudo apt-get install -y "${packages[@]}"; then
-        warn "VA-API driver install failed; shepherd-media will decode video on the CPU"
+        warn "VA-API driver install failed; lunchbox-media will decode video on the CPU"
         return 0
     fi
     success "VA-API drivers installed: ${packages[*]}"
 }
 
-# Dispatch for `shepherd-admin va-api <install|detect>`.
+# Dispatch for `lunchbox-admin va-api <install|detect>`.
 va_api_main() {
     local subcmd="${1:-install}"
     shift || true
@@ -341,22 +341,22 @@ va_api_main() {
             ;;
         "" | help | -h | --help)
             cat <<'EOF'
-Usage: shepherd-admin va-api <install|detect>
+Usage: lunchbox-admin va-api <install|detect>
 
     install   Install the VA-API drivers this host's graphics hardware needs
     detect    Show the detected hardware and the packages it would install
 
-shepherd-media decodes video on the GPU through mpv's VA-API support, which
+lunchbox-media decodes video on the GPU through mpv's VA-API support, which
 needs a libva driver for your graphics hardware. Ubuntu's mpv package does not
 pull one in, so without this every frame is decoded on the CPU.
 
-The driver in use is reported in shepherd-media's log at the start of each
+The driver in use is reported in lunchbox-media's log at the start of each
 video ("mpv is decoding video with vaapi (zero-copy)", or a warning when it
 ends up on the CPU).
 EOF
             ;;
         *)
-            die "Unknown va-api command: $subcmd (try: shepherd-admin va-api help)"
+            die "Unknown va-api command: $subcmd (try: lunchbox-admin va-api help)"
             ;;
     esac
 }
@@ -365,7 +365,7 @@ EOF
 # Media dependencies
 # ---------------------------------------------------------------------------
 
-# Everything shepherd-media needs beyond the apt packages in run.pkgs: a VA-API
+# Everything lunchbox-media needs beyond the apt packages in run.pkgs: a VA-API
 # driver for its hardware decoding, and yt-dlp for YouTube libraries. Both are
 # kept out of run.pkgs — the drivers because the right ones depend on the
 # hardware, yt-dlp because the archived build goes stale — so this is the one
@@ -375,7 +375,7 @@ install_media_deps() {
     install_ytdlp
 }
 
-# Dispatch for `shepherd-admin media-deps <install>`.
+# Dispatch for `lunchbox-admin media-deps <install>`.
 media_deps_main() {
     local subcmd="${1:-install}"
     shift || true
@@ -385,31 +385,31 @@ media_deps_main() {
             ;;
         "" | help | -h | --help)
             cat <<'EOF'
-Usage: shepherd-admin media-deps install
+Usage: lunchbox-admin media-deps install
 
-Installs everything shepherd-media needs that apt cannot cover on its own:
+Installs everything lunchbox-media needs that apt cannot cover on its own:
 
     va-api    VA-API drivers matched to this host's graphics hardware,
               without which video is decoded on the CPU
     yt-dlp    into a virtualenv, for YouTube media libraries
 
-Equivalent to running 'shepherd-admin va-api install' and
-'shepherd-admin yt-dlp install'. Re-run periodically to keep yt-dlp current.
+Equivalent to running 'lunchbox-admin va-api install' and
+'lunchbox-admin yt-dlp install'. Re-run periodically to keep yt-dlp current.
 EOF
             ;;
         *)
-            die "Unknown media-deps command: $subcmd (try: shepherd-admin media-deps help)"
+            die "Unknown media-deps command: $subcmd (try: lunchbox-admin media-deps help)"
             ;;
     esac
 }
 
 # ---------------------------------------------------------------------------
-# Android apps (Shepherd Companion + Shepherd Media)
+# Android apps (Lunchbox Companion + Lunchbox Media)
 # ---------------------------------------------------------------------------
 #
-# Both apps run on a phone, tablet, or Fire TV rather than on the shepherd
+# Both apps run on a phone, tablet, or Fire TV rather than on the lunchbox
 # device, so "installing" one means obtaining an APK and pushing it over adb to
-# the attached Android device. Where the APK comes from follows how shepherd
+# the attached Android device. Where the APK comes from follows how lunchbox
 # itself was installed:
 #
 #   * source checkout  — built from the app's own Gradle project, exactly as
@@ -426,13 +426,13 @@ EOF
 
 # The Forgejo project whose releases carry the APKs. Overridable so a fork or a
 # staging server can be pointed at without editing this file.
-SHEPHERD_FORGE_URL="${SHEPHERD_FORGE_URL:-https://git.armeafamily.com/albert/shepherd-launcher}"
+LUNCHBOX_FORGE_URL="${LUNCHBOX_FORGE_URL:-https://github.com/aarmea/lunchbox}"
 
 # Downloaded release APKs are cached here so a re-run does not re-fetch. Per
 # user rather than system-wide, because this command deliberately does not want
 # root: adb authorises devices against the *invoking user's* ~/.android key, so
 # running it under sudo is how you get a phone that reports `unauthorized`.
-ANDROID_APK_CACHE="${SHEPHERD_APK_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/shepherd/apk}"
+ANDROID_APK_CACHE="${LUNCHBOX_APK_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/lunchbox/apk}"
 
 # Per-app metadata, keyed by the name `apps install` takes. Sets:
 #   ANDROID_APP_DIR       Gradle project, relative to the repo root
@@ -445,15 +445,15 @@ android_app_meta() {
     case "${1:-}" in
         companion)
             ANDROID_APP_DIR="companion-android"
-            ANDROID_APP_ARTIFACT="shepherd-companion"
-            ANDROID_APP_PACKAGE="com.armeafamily.shepherd.companion"
-            ANDROID_APP_LABEL="Shepherd Companion"
+            ANDROID_APP_ARTIFACT="lunchbox-companion"
+            ANDROID_APP_PACKAGE="com.lunchboxos.companion"
+            ANDROID_APP_LABEL="Lunchbox Companion"
             ;;
         media)
-            ANDROID_APP_DIR="crates/shepherd-media-android/android"
-            ANDROID_APP_ARTIFACT="shepherd-media"
-            ANDROID_APP_PACKAGE="com.armeafamily.shepherd.media"
-            ANDROID_APP_LABEL="Shepherd Media"
+            ANDROID_APP_DIR="crates/lunchbox-media-android/android"
+            ANDROID_APP_ARTIFACT="lunchbox-media"
+            ANDROID_APP_PACKAGE="com.lunchboxos.media"
+            ANDROID_APP_LABEL="Lunchbox Media"
             ;;
         *)
             return 1
@@ -462,7 +462,7 @@ android_app_meta() {
 }
 
 # True when these libs are running out of a source checkout rather than the
-# .deb's /usr/lib/shepherd/lib. This is what decides build-vs-download: a
+# .deb's /usr/lib/lunchbox/lib. This is what decides build-vs-download: a
 # checkout has the Gradle projects, a packaged install has only the VERSION file
 # naming the release to fetch.
 is_source_checkout() {
@@ -472,7 +472,7 @@ is_source_checkout() {
 }
 
 # The version an unqualified download asks for: the canonical VERSION shipped
-# beside these scripts (repo root from source, /usr/share/shepherd when
+# beside these scripts (repo root from source, /usr/share/lunchbox when
 # packaged). Kept separate from version.sh's version_read, which resolves
 # through get_repo_root and so is meaningless under /usr.
 installed_version() {
@@ -563,10 +563,10 @@ android_build_apk() {
     [[ -x "$gradle_dir/gradlew" ]] || die "No Gradle project at $gradle_dir"
 
     # Gradle finds the SDK via ANDROID_SDK_ROOT or local.properties; point it at
-    # the location `shepherd deps install android` uses when neither is set.
+    # the location `lunchbox deps install android` uses when neither is set.
     local sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/opt/android-sdk}}"
     if [[ ! -d "$sdk" && ! -f "$gradle_dir/local.properties" ]]; then
-        die "Android SDK not found at $sdk; run 'shepherd deps install android' (or set ANDROID_SDK_ROOT)"
+        die "Android SDK not found at $sdk; run 'lunchbox deps install android' (or set ANDROID_SDK_ROOT)"
     fi
 
     # The media app is a NativeActivity whose Gradle build cross-compiles a Rust
@@ -574,12 +574,12 @@ android_build_apk() {
     # missing here rather than letting Gradle fail deep inside the Exec task.
     if [[ "$app" == "media" ]]; then
         cargo ndk --version >/dev/null 2>&1 \
-            || die "cargo-ndk not installed (the media APK cross-compiles a Rust cdylib); run 'shepherd deps install android'"
+            || die "cargo-ndk not installed (the media APK cross-compiles a Rust cdylib); run 'lunchbox deps install android'"
         if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
             # sdkmanager installs under $sdk/ndk/<version>; take the newest.
             local ndk
             ndk="$(find "$sdk/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -n1)"
-            [[ -n "$ndk" ]] || die "No NDK under $sdk/ndk; run 'shepherd deps install android' (or set ANDROID_NDK_HOME)"
+            [[ -n "$ndk" ]] || die "No NDK under $sdk/ndk; run 'lunchbox deps install android' (or set ANDROID_NDK_HOME)"
             export ANDROID_NDK_HOME="$ndk"
             info "Using ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
         fi
@@ -611,7 +611,7 @@ android_download_apk() {
 
     local name url dest
     name="${ANDROID_APP_ARTIFACT}_${version}.apk"
-    url="$SHEPHERD_FORGE_URL/releases/download/v${version}/${name}"
+    url="$LUNCHBOX_FORGE_URL/releases/download/v${version}/${name}"
     dest="$ANDROID_APK_CACHE/$name"
 
     ensure_dir "$ANDROID_APK_CACHE" 0755
@@ -623,7 +623,7 @@ android_download_apk() {
         return 0
     fi
 
-    info "Downloading $name from $SHEPHERD_FORGE_URL (release v$version)..."
+    info "Downloading $name from $LUNCHBOX_FORGE_URL (release v$version)..."
     if ! curl -fSL --proto '=https' --tlsv1.2 -o "$dest.part" "$url"; then
         rm -f "$dest.part"
         error "Could not download $url"
@@ -707,7 +707,7 @@ android_app_install() {
 
     local adb
     adb="$(find_adb)" \
-        || die "adb not found. Install it with: apt install adb (or 'shepherd deps install android' for the full SDK)"
+        || die "adb not found. Install it with: apt install adb (or 'lunchbox deps install android' for the full SDK)"
 
     # Pick the target before building or downloading: a missing phone is the
     # likeliest failure, and it should not cost a Gradle run to discover.
@@ -736,7 +736,7 @@ android_app_install() {
         info "Open $ANDROID_APP_LABEL and add a library from Settings."
     fi
     info "For a phone that should keep itself updated, install from the F-Droid repository instead"
-    info "(https://git.armeafamily.com/fdroid/repo — see docs/INSTALL.md)."
+    info "(https://lunchbox-os.com/fdroid/repo — see docs/INSTALL.md)."
 }
 
 # ---------------------------------------------------------------------------
@@ -751,7 +751,7 @@ FLATHUB_REMOTE_URL="https://flathub.org/repo/flathub.flatpakrepo"
 # user namespaces to be enabled". (A machine that already ran a Flatpak app
 # usually has userns working, which is why Steam "just works" there.)
 USERNS_SYSCTL="kernel.apparmor_restrict_unprivileged_userns"
-USERNS_DROPIN="/etc/sysctl.d/90-shepherd-userns.conf"
+USERNS_DROPIN="/etc/sysctl.d/90-lunchbox-userns.conf"
 
 # Permit unprivileged user namespaces so Steam's (and Flatpak's) sandbox can
 # start. No-op when the kernel lacks the knob (older/non-Ubuntu) or it's already
@@ -772,7 +772,7 @@ ensure_unprivileged_userns() {
     warn "remove $USERNS_DROPIN and reboot to revert."
     ensure_dir "$(dirname "$USERNS_DROPIN")" 0755
     cat > "$USERNS_DROPIN" <<EOF
-# Installed by \`shepherd-admin apps install steam\`.
+# Installed by \`lunchbox-admin apps install steam\`.
 # Steam (like Flatpak) creates an unprivileged user namespace for its sandbox;
 # Ubuntu 23.10+ restricts that by default. Permit it so the sandbox starts.
 $USERNS_SYSCTL=0
@@ -799,7 +799,7 @@ ensure_flathub() {
 
 # libretro cores packaged for Ubuntu, by the short name an entry's `core =`
 # field takes. The package is always `libretro-<name>` and the shared object
-# `<name>_libretro.so`, which is what shepherd's core resolution looks for.
+# `<name>_libretro.so`, which is what lunchbox's core resolution looks for.
 #
 # Deliberately only the distro's own packages: RetroArch's built-in "core
 # downloader" pulls unsigned binaries at runtime, which is not something a
@@ -893,7 +893,7 @@ retroarch_add_ppa() {
 # so there is one spelling to learn — and the naming holds across both the
 # Ubuntu archive and the PPAs, so an entry does not care where its core came
 # from. Everything lands in the multiarch libretro directory, which is on
-# shepherd's core search path.
+# lunchbox's core search path.
 retroarch_install() {
     local -a cores=()
     local ppa_channel=""
@@ -939,7 +939,7 @@ retroarch_install() {
                 die "Unknown core '$core'. Available: $(retroarch_core_names)
 Many more (N64, GameCube/Wii, Saturn, arcade...) are packaged only in the
 libretro PPA, which is opt-in:
-    sudo shepherd-admin apps install retroarch --ppa $core"
+    sudo lunchbox-admin apps install retroarch --ppa $core"
             fi
         done
     fi
@@ -977,7 +977,7 @@ Reference a game with:
     core = "${cores[0]}"
     content = "~/Games/roms/your-game.rom"
 
-The content path must be absolute or start with ~/. shepherd stores each
+The content path must be absolute or start with ~/. lunchbox stores each
 entry's saves and save states under its own directory in the data dir, and
 saves state on close / restores it on open by default.
 
@@ -1023,7 +1023,7 @@ Reference a book with:
     type = "ebook"
     book = "~/Books/the-hobbit.epub"
 
-The book path must be absolute or start with ~/. shepherd generates the
+The book path must be absolute or start with ~/. lunchbox generates the
 reader's whole configuration per entry — the restrictions that keep a child in
 the book, the page-at-a-time view, and the reading font — and re-renders it on
 every launch, so nothing there needs installing or editing by hand.
@@ -1090,10 +1090,10 @@ apps_install() {
 
 apps_usage() {
     cat <<EOF
-Usage: shepherd-admin apps install <steam|chrome|retroarch [core...]|okular>
-       shepherd-admin apps install <companion|media> [options]
+Usage: lunchbox-admin apps install <steam|chrome|retroarch [core...]|okular>
+       lunchbox-admin apps install <companion|media> [options]
 
-Installs a supported activity backend, or one of shepherd's own Android apps,
+Installs a supported activity backend, or one of lunchbox's own Android apps,
 with the packaging each expects (they differ):
 
     steam       Canonical's Steam snap (drives type = "steam" entries). Launch
@@ -1121,8 +1121,8 @@ with the packaging each expects (they differ):
                 Cores in the Ubuntu archive (docs/emulators.md lists the
                 full catalog, including everything --ppa adds):
 $(retroarch_core_table)
-                e.g.  shepherd-admin apps install retroarch mgba nestopia
-                      shepherd-admin apps install retroarch --ppa mupen64plus-next
+                e.g.  lunchbox-admin apps install retroarch mgba nestopia
+                      lunchbox-admin apps install retroarch --ppa mupen64plus-next
 
     okular      Okular, its extra format backends, and the default reading
                 font (drives type = "ebook" entries). The backends matter:
@@ -1130,13 +1130,13 @@ $(retroarch_core_table)
                 without them a reading activity opens PDFs and refuses novels.
                 Installs no books.
 
-    companion   Shepherd Companion, the parent-facing admin app.
-    media       Shepherd Media, the media player for phones/tablets/Fire TV.
+    companion   Lunchbox Companion, the parent-facing admin app.
+    media       Lunchbox Media, the media player for phones/tablets/Fire TV.
 
 Both Android apps are installed onto an attached Android device over adb. The
 APK is built from this checkout's Gradle project when run from source, and
 otherwise downloaded from the release matching the installed version — at
-$SHEPHERD_FORGE_URL — and verified
+$LUNCHBOX_FORGE_URL — and verified
 against its .sha256 sidecar. Run them WITHOUT sudo: adb authorises devices per
 user, so under sudo the device reports 'unauthorized'.
 
@@ -1155,7 +1155,7 @@ development phones.
 EOF
 }
 
-# Dispatch for `shepherd-admin apps <install> ...`.
+# Dispatch for `lunchbox-admin apps <install> ...`.
 apps_main() {
     local subcmd="${1:-}"
     shift || true
@@ -1167,7 +1167,7 @@ apps_main() {
             apps_usage
             ;;
         *)
-            die "Unknown apps command: $subcmd (try: shepherd-admin apps help)"
+            die "Unknown apps command: $subcmd (try: lunchbox-admin apps help)"
             ;;
     esac
 }
@@ -1176,18 +1176,18 @@ apps_main() {
 # Per-user setup (config + group memberships)
 # ---------------------------------------------------------------------------
 
-# Deploy the example config and add the kiosk user to every group shepherd
+# Deploy the example config and add the kiosk user to every group lunchbox
 # needs. This is the packaged equivalent of the from-source
-# `shepherd install config` + `install groups`, plus the shepherd-firewall
+# `lunchbox install config` + `install groups`, plus the lunchbox-firewall
 # membership that `install all` adds via install_firewall. Depends on install.sh
 # being sourced by the entrypoint (install_config, install_user_groups,
-# add_user_to_groups, FIREWALL_GROUP, SHEPHERD_REQUIRED_GROUPS).
-# `shepherd-admin policy USER --source PATH` -- install a policy, validated.
+# add_user_to_groups, FIREWALL_GROUP, LUNCHBOX_REQUIRED_GROUPS).
+# `lunchbox-admin policy USER --source PATH` -- install a policy, validated.
 #
-# The packaged face of `shepherd install policy`. On a device the policy lives
+# The packaged face of `lunchbox install policy`. On a device the policy lives
 # with the state custodian and `sudoedit` is the other way in; this is the one
 # that checks the file first, which matters because an unparseable policy is
-# fatal at shepherdd's *startup* rather than on reload.
+# fatal at lunchboxd's *startup* rather than on reload.
 #
 # `--source` is required here, unlike the from-source command, which defaults to
 # the user's home copy. After migration that path holds a signpost rather than a
@@ -1199,14 +1199,14 @@ admin_policy() {
             --source) source_config="$2"; shift 2 ;;
             -h|--help|help)
                 cat <<'EOF'
-Usage: shepherd-admin policy USER --source PATH
+Usage: lunchbox-admin policy USER --source PATH
 
 Install PATH as USER's policy, validating it first. The state custodian holds
-the policy shepherdd reads; shepherdd reloads within a second.
+the policy lunchboxd reads; lunchboxd reloads within a second.
 
 The other way to change it on a device is to edit the custodian's copy directly:
 
-  sudoedit /var/lib/shepherdd/state/USER/config.toml
+  sudoedit /var/lib/lunchboxd/state/USER/config.toml
 
 That takes effect the same way, but nothing checks it first.
 EOF
@@ -1218,13 +1218,13 @@ EOF
                 ;;
         esac
     done
-    [[ -n "$user" ]] || die "Usage: shepherd-admin policy USER --source PATH"
-    [[ -n "$source_config" ]] || die "shepherd-admin policy needs --source PATH"
+    [[ -n "$user" ]] || die "Usage: lunchbox-admin policy USER --source PATH"
+    [[ -n "$source_config" ]] || die "lunchbox-admin policy needs --source PATH"
 
     install_policy "$user" "$source_config" "true"
 }
 
-# `shepherd-admin migrate-state USER` -- move USER's state under the custodian.
+# `lunchbox-admin migrate-state USER` -- move USER's state under the custodian.
 #
 # `setup-user` does this as part of setting a user up. This is the same step on
 # its own, for a device that gained the custodian after its state was already
@@ -1235,7 +1235,7 @@ admin_migrate_state() {
     local user="${1:-}"
     case "$user" in
         -h|--help|help|"")
-            echo "Usage: shepherd-admin migrate-state USER"
+            echo "Usage: lunchbox-admin migrate-state USER"
             echo
             echo "Move USER's database, BLE admin record and policy under the state"
             echo "custodian, and enable its socket. Safe to re-run."
@@ -1247,20 +1247,20 @@ admin_migrate_state() {
     setup_state_for_user "$user"
 }
 
-# `shepherd-admin restore-state` -- move state back out of the custodian.
+# `lunchbox-admin restore-state` -- move state back out of the custodian.
 #
 # Run before downgrading to a release without the custodian. The migration
-# *moves* the database and the admin record, so an older shepherdd would find an
+# *moves* the database and the admin record, so an older lunchboxd would find an
 # empty home directory, open a fresh database and -- with no `admin.toml` --
 # report itself unclaimed, letting the next phone to pair claim the device.
 #
-# Unlike `shepherd uninstall state --restore-to-home`, this leaves the binary
+# Unlike `lunchbox uninstall state --restore-to-home`, this leaves the binary
 # and units alone: on a packaged device they belong to dpkg, and `apt` is what
 # removes them.
 admin_restore_state() {
     case "${1:-}" in
         -h|--help|help)
-            echo "Usage: shepherd-admin restore-state"
+            echo "Usage: lunchbox-admin restore-state"
             echo
             echo "Stop the state custodian and move every user's state back to their"
             echo "home directory. Run this BEFORE downgrading to a release that has no"
@@ -1286,24 +1286,32 @@ setup_user() {
     done
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd-admin setup-user USER"
+        die "Usage: lunchbox-admin setup-user USER"
     fi
 
     require_root
     validate_user "$user"
 
+    # Before install_config, for the same reason install_all migrates first:
+    # this moves ~/.config/shepherd to ~/.config/lunchbox, and it will not move
+    # onto a directory that already exists. Writing the example config first
+    # would create that directory and strand the user's real one. No-op for a
+    # user who never ran a shepherd build. The package's postinst does the
+    # host-global half; the kiosk user is not known at package time.
+    migrate_user_dirs "$user"
+
     # Config + media library (reads the examples via get_data_dir).
     install_config "$user" ""
 
-    # input/video/bluetooth plus the shepherd-firewall system group that the
+    # input/video/bluetooth plus the lunchbox-firewall system group that the
     # package's postinst (or install_firewall) created.
-    add_user_to_groups "$user" "${SHEPHERD_REQUIRED_GROUPS[@]}" "$FIREWALL_GROUP"
+    add_user_to_groups "$user" "${LUNCHBOX_REQUIRED_GROUPS[@]}" "$FIREWALL_GROUP"
 
     # The state custodian is per-user, so the package cannot set it up: the
     # kiosk user is not known at package time. This does the whole per-user half
     # -- the protected directory, the device's migrated state, and the socket --
     # because on a packaged system there is nowhere else to get it. The `.deb`
-    # ships `shepherd-admin`, which has no `install` verb, so `shepherd install
+    # ships `lunchbox-admin`, which has no `install` verb, so `lunchbox install
     # state --user <user>` is a from-source command only.
     #
     # Enabling the socket alone was the earlier shape, and it was worse than it
@@ -1318,7 +1326,7 @@ setup_user() {
 
     success "Set up $user"
     info "Have $user log out and back in so the new group memberships apply,"
-    info "then pick the \"Shepherd Kiosk\" session at login."
+    info "then pick the \"Lunchbox Kiosk\" session at login."
 }
 
 # ---------------------------------------------------------------------------
@@ -1328,9 +1336,9 @@ setup_user() {
 # systemd-logind drop-in that maps a short press of the hardware power button.
 # The distro default is `poweroff`; a kiosk usually wants `suspend` (tap to
 # sleep). A long press (HandlePowerKeyLongPress, left at the default) still
-# powers off. shepherdd already listens for logind's PrepareForSleep to draw the
+# powers off. lunchboxd already listens for logind's PrepareForSleep to draw the
 # suspend cover, so the device wakes back into the session cleanly.
-POWER_KEY_DROPIN="/etc/systemd/logind.conf.d/10-shepherd-power-key.conf"
+POWER_KEY_DROPIN="/etc/systemd/logind.conf.d/10-lunchbox-power-key.conf"
 
 # Restart logind so a logind.conf change takes effect. Best-effort; on modern
 # systemd active graphical sessions survive the restart.
@@ -1349,7 +1357,7 @@ power_key_suspend() {
     require_root
     ensure_dir "$(dirname "$POWER_KEY_DROPIN")" 0755
     cat > "$POWER_KEY_DROPIN" <<'EOF'
-# Installed by `shepherd-admin power-key suspend`.
+# Installed by `lunchbox-admin power-key suspend`.
 # Tap the hardware power button to suspend instead of powering off. A long press
 # (HandlePowerKeyLongPress, left at the distro default) still powers off.
 [Login]
@@ -1368,24 +1376,24 @@ power_key_default() {
         success "Removed $POWER_KEY_DROPIN; power button reverts to the distro default"
         _reload_logind
     else
-        info "No shepherd power-key override present ($POWER_KEY_DROPIN); nothing to do"
+        info "No lunchbox power-key override present ($POWER_KEY_DROPIN); nothing to do"
     fi
 }
 
 # Show the current override + what logind reports.
 power_key_status() {
     if [[ -f "$POWER_KEY_DROPIN" ]]; then
-        echo "shepherd power-key override: present ($POWER_KEY_DROPIN)"
+        echo "lunchbox power-key override: present ($POWER_KEY_DROPIN)"
         grep -E '^HandlePowerKey' "$POWER_KEY_DROPIN" 2>/dev/null || true
     else
-        echo "shepherd power-key override: not installed (distro default, usually poweroff)"
+        echo "lunchbox power-key override: not installed (distro default, usually poweroff)"
     fi
     if command_exists loginctl; then
         loginctl show-manager -p HandlePowerKey 2>/dev/null || true
     fi
 }
 
-# Dispatch for `shepherd-admin power-key <suspend|default|status>`.
+# Dispatch for `lunchbox-admin power-key <suspend|default|status>`.
 power_key_main() {
     local subcmd="${1:-}"
     shift || true
@@ -1401,7 +1409,7 @@ power_key_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd-admin power-key <suspend|default|status>
+Usage: lunchbox-admin power-key <suspend|default|status>
 
 Configures how a short press of the hardware power button behaves, via a
 systemd-logind drop-in ($POWER_KEY_DROPIN).
@@ -1414,7 +1422,7 @@ Commands:
 EOF
             ;;
         *)
-            die "Unknown power-key command: $subcmd (try: shepherd-admin power-key help)"
+            die "Unknown power-key command: $subcmd (try: lunchbox-admin power-key help)"
             ;;
     esac
 }

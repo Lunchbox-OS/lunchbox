@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Bluetooth admin operations for shepherd-launcher.
+# Bluetooth admin operations for Lunchbox.
 #
 # Currently one subcommand: `clear`, which force-disconnects and unpairs
-# every BLE peer recorded in shepherd's admin record, then deletes the record
+# every BLE peer recorded in lunchbox's admin record, then deletes the record
 # and any factory-reset sentinel so the next kiosk session comes up unclaimed.
 #
 # Since issue #157 that record is the *device's*, not a user's: there is one
@@ -21,7 +21,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # shellcheck source=install.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 
-# Where shepherdd's admin record and factory-reset sentinel live.
+# Where lunchboxd's admin record and factory-reset sentinel live.
 #
 # Two possible homes since issue #157. On a device with the state custodian they
 # are in its shared directory, at a uid the kiosk user does not have; before it,
@@ -29,13 +29,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 # own. `bluetooth_clear` picks between them, and that choice is also what decides
 # whether `--user` was needed -- see the comment there.
 #
-# `<data_dir>/<name>`, where data_dir defaults to ~/.local/share/shepherdd
-# (`APP_DIR = "shepherdd"` in shepherd-util).
-SHEPHERD_DEFAULT_DATA_REL=".local/share/shepherdd"
+# `<data_dir>/<name>`, where data_dir defaults to ~/.local/share/lunchboxd
+# (`APP_DIR = "lunchboxd"` in lunchbox-util).
+LUNCHBOX_DEFAULT_DATA_REL=".local/share/lunchboxd"
 
 # Refuse to operate on a user who currently has an active login
 # session. The whole point of this command is to clean up *after*
-# logout — running it on a live session would race with shepherdd
+# logout — running it on a live session would race with lunchboxd
 # (which holds the admin record open and could rewrite it after the
 # delete) and could yank a phone out from under a parent who's mid-
 # action in the companion app.
@@ -54,7 +54,7 @@ user_has_active_session() {
 
 # Every kiosk user the custodian holds state for.
 #
-# The admin record is the device's, so any of them could have a shepherdd
+# The admin record is the device's, so any of them could have a lunchboxd
 # holding it open -- not just the one named on the command line. Empty on a
 # device without a custodian, where the record really is per-user and the named
 # one is the only session that matters.
@@ -108,7 +108,7 @@ bluetooth_clear_peer() {
     fi
 }
 
-# Main entrypoint for `shepherd bluetooth clear --user USER`.
+# Main entrypoint for `lunchbox bluetooth clear --user USER`.
 #
 # Workflow:
 #   1. Validate user exists.
@@ -143,7 +143,7 @@ bluetooth_clear() {
                 shift
                 ;;
             *)
-                die "Unknown option: $1 (try: shepherd bluetooth help)"
+                die "Unknown option: $1 (try: lunchbox bluetooth help)"
                 ;;
         esac
     done
@@ -161,23 +161,23 @@ bluetooth_clear() {
     if [[ -z "$admin_record" || -z "$sentinel" ]]; then
         if [[ -d "$STATED_ADMIN_DIR" ]]; then
             [[ -n "$admin_record" ]] \
-                || admin_record="$STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE"
+                || admin_record="$STATED_ADMIN_DIR/$LUNCHBOX_ADMIN_RECORD_FILE"
             [[ -n "$sentinel" ]] \
-                || sentinel="$STATED_ADMIN_DIR/$SHEPHERD_RESET_SENTINEL_FILE"
+                || sentinel="$STATED_ADMIN_DIR/$LUNCHBOX_RESET_SENTINEL_FILE"
         else
             [[ -n "$user" ]] || die "This device has no state custodian, so the admin record is one user's rather than the device's; pass --user USER"
             local home
             home="$(get_user_home "$user")"
             [[ -n "$home" ]] || die "Could not determine home directory for '$user'"
             [[ -n "$admin_record" ]] \
-                || admin_record="$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE"
+                || admin_record="$home/$LUNCHBOX_DEFAULT_DATA_REL/$LUNCHBOX_ADMIN_RECORD_FILE"
             [[ -n "$sentinel" ]] \
-                || sentinel="$home/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE"
+                || sentinel="$home/$LUNCHBOX_DEFAULT_DATA_REL/$LUNCHBOX_RESET_SENTINEL_FILE"
         fi
     fi
 
     # The record this deletes is the device's, so the race is with *any* kiosk
-    # user's shepherdd, not only the named one. Checking just `--user` would let
+    # user's lunchboxd, not only the named one. Checking just `--user` would let
     # a second child's live session have the record pulled out from under it --
     # the thing this guard exists to prevent, one user over.
     local busy=()
@@ -188,7 +188,7 @@ bluetooth_clear() {
         busy+=("$candidate")
     done
     if [[ "${#busy[@]}" -gt 0 && "$force" != "true" ]]; then
-        die "Active login session for: ${busy[*]}. shepherd's admin record is the device's, so clearing it races with any running shepherdd; log them out, or pass --force"
+        die "Active login session for: ${busy[*]}. lunchbox's admin record is the device's, so clearing it races with any running lunchboxd; log them out, or pass --force"
     fi
 
     info "Admin record: $admin_record"
@@ -244,11 +244,11 @@ bluetooth_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd bluetooth <command> [options]
+Usage: lunchbox bluetooth <command> [options]
 
 Commands:
     clear     Force-disconnect + unpair the bonded BLE peer and delete
-              shepherd's admin record, so the next session starts unclaimed.
+              lunchbox's admin record, so the next session starts unclaimed.
               With the state custodian that record is the device's, so this
               unclaims it for every kiosk user on the machine.
 
@@ -258,23 +258,23 @@ Options for 'clear':
                             is one user's; with the custodian it is the
                             device's and there is nothing to name.
     --admin-record PATH     Override admin.toml location (default:
-                            $STATED_ADMIN_DIR/$SHEPHERD_ADMIN_RECORD_FILE on a
+                            $STATED_ADMIN_DIR/$LUNCHBOX_ADMIN_RECORD_FILE on a
                             device with the state custodian, else
-                            ~USER/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_ADMIN_RECORD_FILE).
+                            ~USER/$LUNCHBOX_DEFAULT_DATA_REL/$LUNCHBOX_ADMIN_RECORD_FILE).
     --sentinel PATH         Override reset-sentinel location (default:
-                            $STATED_ADMIN_DIR/$SHEPHERD_RESET_SENTINEL_FILE on a
+                            $STATED_ADMIN_DIR/$LUNCHBOX_RESET_SENTINEL_FILE on a
                             device with the state custodian, else
-                            ~USER/$SHEPHERD_DEFAULT_DATA_REL/$SHEPHERD_RESET_SENTINEL_FILE).
+                            ~USER/$LUNCHBOX_DEFAULT_DATA_REL/$LUNCHBOX_RESET_SENTINEL_FILE).
     --force                 Proceed even if the user is currently logged in.
 
 Examples:
-    sudo shepherd bluetooth clear                             # with a custodian
-    sudo shepherd bluetooth clear --user kiosk                # without one
-    sudo shepherd bluetooth clear --force                     # ignore live sessions
+    sudo lunchbox bluetooth clear                             # with a custodian
+    sudo lunchbox bluetooth clear --user kiosk                # without one
+    sudo lunchbox bluetooth clear --force                     # ignore live sessions
 EOF
             ;;
         *)
-            die "Unknown bluetooth command: $subcmd (try: shepherd bluetooth help)"
+            die "Unknown bluetooth command: $subcmd (try: lunchbox bluetooth help)"
             ;;
     esac
 }

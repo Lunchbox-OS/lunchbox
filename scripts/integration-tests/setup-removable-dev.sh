@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mount two loopback FAT images where the file manager looks for removable
-# drives, so `cargo test -p shepherd-http --test files_removable` has something
+# drives, so `cargo test -p lunchbox-http --test files_removable` has something
 # real to talk to.
 #
 # Why images rather than a USB stick: the tests need a drive *smaller than the
@@ -16,9 +16,9 @@
 
 set -euo pipefail
 
-MOUNT="${SHEPHERD_TEST_FAT_MOUNT:-/media/shepherd-fat}"
-MOUNT_RO="${SHEPHERD_TEST_FAT_MOUNT_RO:-/media/shepherd-fat-ro}"
-IMAGE_DIR="${SHEPHERD_TEST_FAT_IMAGE_DIR:-/var/tmp/shepherd-fat}"
+MOUNT="${LUNCHBOX_TEST_FAT_MOUNT:-/media/lunchbox-fat}"
+MOUNT_RO="${LUNCHBOX_TEST_FAT_MOUNT_RO:-/media/lunchbox-fat-ro}"
+IMAGE_DIR="${LUNCHBOX_TEST_FAT_IMAGE_DIR:-/var/tmp/lunchbox-fat}"
 IMAGE="$IMAGE_DIR/removable.img"
 IMAGE_RO="$IMAGE_DIR/removable-ro.img"
 # Small on purpose: under the 2 GiB free_space_floor_bytes default, which is
@@ -66,7 +66,7 @@ for tool in mkfs.vfat mountpoint; do
 done
 
 # Start from nothing, so a half-finished previous run cannot be mistaken for a
-# working one — an *unmounted* /media/shepherd-fat is an ordinary ext4
+# working one — an *unmounted* /media/lunchbox-fat is an ordinary ext4
 # directory that the tests would otherwise happily pass against.
 teardown >/dev/null 2>&1 || true
 
@@ -77,7 +77,7 @@ for img in "$IMAGE" "$IMAGE_RO"; do
     # -F 32 explicitly: mkfs.vfat picks FAT16 for an image this small, and the
     # point is to look like the USB stick a person would actually plug in.
     # -n gives it a label, so `/media/<label>` reads like a real drive.
-    mkfs.vfat -F 32 -n SHEPHERD "$img" >/dev/null
+    mkfs.vfat -F 32 -n LUNCHBOX "$img" >/dev/null
 done
 
 mkdir -p "$MOUNT" "$MOUNT_RO"
