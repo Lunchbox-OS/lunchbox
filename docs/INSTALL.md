@@ -192,6 +192,24 @@ Two Android apps ship alongside the launcher:
   Bluetooth LE and drives the management RPCs. This is the one you want.
 - **Lunchbox Media** — the media player, for phones, tablets, and Fire TV sticks.
 
+> **Coming from Shepherd Companion?** The project was renamed in 2026-09, and
+> with it the apps' package names (`com.armeafamily.shepherd.*` →
+> `com.lunchbox_os.*`). Android treats a new package name as a *different app*,
+> so this is not an upgrade:
+>
+> * Lunchbox Companion installs alongside Shepherd Companion instead of
+>   replacing it, and starts empty — **your paired devices and their claim
+>   tokens do not carry over, and cannot be exported.** You will pair each
+>   device again, which needs physical access to compare the code on its TV.
+> * Uninstall Shepherd Companion **first**. A device stops advertising while
+>   any phone is connected to it, so the old app holding its bond is enough to
+>   keep the new one from ever seeing the device.
+> * If a device still refuses to appear, clear the stale Bluetooth bond on
+>   *both* sides — Settings → the device → Forget on the phone, and
+>   `sudo bluetoothctl remove <phone-address>` on the device. A bond that one
+>   side has and the other does not will fail pairing in a way that looks like
+>   a broken app.
+
 ### From the F-Droid repository (recommended, gives updates)
 
 Install the [F-Droid](https://f-droid.org) client, then add the "Lunchbox

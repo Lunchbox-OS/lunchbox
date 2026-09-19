@@ -154,6 +154,54 @@ installer's to delete.
 | headless session | launcher up and focused as `com.lunchbox-os.launcher` |
 | IPC | `dev-runtime/lunchbox.sock` answers a `launch` RPC |
 | web UI | serves, `<title>Lunchbox</title>` |
+| `.deb` | builds; every shipped path renamed; postinst is valid POSIX sh |
+| BLE pairing | first pairing + reconnect on real hardware (below) |
+
+### Pairing on real hardware
+
+Done with the Pixel 10a and the Realtek dongle, per the `companion-pairing`
+skill, because the app-ID change forces a re-pair and the regenerated Kotlin
+wire types had never been run against the daemon.
+
+Both bonds were cleared first — the host's with `bluetoothctl remove`, the
+phone's through Settings — so this was a genuine first pairing rather than a
+reconnect over a surviving bond:
+
+* Numeric Comparison matched (phone `168563` == device `168563`).
+* Bond came up `LE:Y`, `EncryptionStatus{keySize=16, algorithm=2}`, listed on
+  the phone as **`lunchbox`** (the renamed advertised default).
+* `claim` RPC landed: *First admin claimed the device … device=Pixel 10a*, and
+  `admin.toml` was written.
+* Reconnect after `am force-stop`: RPCs resumed (`service_state`,
+  `list_groups`, `get_volume`, …) and the bounded drain fired —
+  `BLE outbox backlog drained bytes=9770 reads=21`.
+
+That reconnect is the real test of the regenerated mirrors: every one of those
+RPCs decodes Kotlin types rendered from the Rust definitions, so a wire
+mismatch would have failed there rather than in a unit test.
+
+`WindowOwner`'s new spelling agrees on all three sides: Rust `"lunchbox"`,
+Kotlin `LUNCHBOX("lunchbox")`, and the regenerated TS mirror.
+
+### The app-ID rename is not an upgrade
+
+Android keys an install by application ID, so `com.lunchbox_os.companion`
+installs **alongside** `com.armeafamily.shepherd.companion` rather than over
+it — confirmed on both bench phones, which now list both. The consequences are
+the user-visible half of this rename:
+
+* The new app starts with no data: no admin records, **no claim tokens**. Those
+  are not recoverable from the old app, so every companion user re-pairs.
+* The OS bond is per-device, not per-app, so the old bond survives and is
+  attributed to the old package. A device whose host-side bond is then cleared
+  leaves the phone holding a key the device does not — the asymmetric lockout
+  the skill warns about. Clearing *both* sides is the reliable order.
+* The old app stays installed and still holds its bond, and a peripheral stops
+  advertising while any peer is connected — so the old app has to be
+  force-stopped or uninstalled before the new one can see the device at all.
+
+Worth saying plainly in the release notes; it is not something the installer
+migration can fix.
 
 `cargo test` needed `libmpv-dev` installed for amd64 — the box had only the
 arm64 cross variant, so linking failed with `unable to find library -lmpv`.
