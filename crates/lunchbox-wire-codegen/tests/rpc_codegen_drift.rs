@@ -40,7 +40,7 @@ fn codegen_outputs_match_checked_in() {
             "rpc-codegen",
             "--",
         ])
-        .env("SHEPHERD_RPC_CODEGEN_OUT", out_dir)
+        .env("LUNCHBOX_RPC_CODEGEN_OUT", out_dir)
         .current_dir(repo_root())
         .status()
         .expect("cargo run rpc-codegen");
@@ -49,7 +49,7 @@ fn codegen_outputs_match_checked_in() {
     let files = [
         ("docs/rpc-schema.json", "rpc-schema.json"),
         (
-            "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/RpcMethods.kt",
+            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/RpcMethods.kt",
             "RpcMethods.kt",
         ),
         // The request half of the protocol. Param *names* were the last part
@@ -57,18 +57,18 @@ fn codegen_outputs_match_checked_in() {
         // rename compiled on both sides and failed only when someone tapped
         // the button.
         (
-            "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/RpcParams.generated.kt",
+            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/RpcParams.generated.kt",
             "RpcParams.generated.kt",
         ),
         (
-            "shepherd-webui/src/api/rpc-methods.generated.ts",
+            "lunchbox-webui/src/api/rpc-methods.generated.ts",
             "rpc-methods.generated.ts",
         ),
         // The payload types. This is the artifact that matters most: the
         // companion's hand-written mirrors drifted twice before they were
         // generated, and neither drift was catchable from the method schema.
         (
-            "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt",
+            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/WireTypes.generated.kt",
             "WireTypes.generated.kt",
         ),
         // The web UI's half of the same story. Its types were hand-written for
@@ -76,14 +76,14 @@ fn codegen_outputs_match_checked_in() {
         // the detection: `tsc` checks TypeScript against TypeScript and cannot
         // see the Rust shape at all.
         (
-            "shepherd-webui/src/api/wire-types.generated.ts",
+            "lunchbox-webui/src/api/wire-types.generated.ts",
             "wire-types.generated.ts",
         ),
         // The config editor's mirrors of the `Raw*` types. Same reasoning: a
         // field added to `schema.rs` that the editor never renders is a field
         // nobody can set, and only a generated mirror makes that visible.
         (
-            "shepherd-webui/src/config/model/config.generated.ts",
+            "lunchbox-webui/src/config/model/config.generated.ts",
             "config.generated.ts",
         ),
         // What the editor decodes back out of the wasm module. Both of these
@@ -92,7 +92,7 @@ fn codegen_outputs_match_checked_in() {
         // adding a `ValidationError` variant forces the Rust `From` impl to
         // handle it and leaves the TypeScript untouched.
         (
-            "shepherd-webui/src/config/model/wasm-types.generated.ts",
+            "lunchbox-webui/src/config/model/wasm-types.generated.ts",
             "wasm-types.generated.ts",
         ),
         // The per-kind defaults. Not a type mirror but a *value* one: what an
@@ -100,7 +100,7 @@ fn codegen_outputs_match_checked_in() {
         // before the daemon has resolved anything. Two of these were mirrored
         // by hand first (issues #78 and #160), which is how they got here.
         (
-            "shepherd-webui/src/config/model/kind-defaults.generated.ts",
+            "lunchbox-webui/src/config/model/kind-defaults.generated.ts",
             "kind-defaults.generated.ts",
         ),
         // The per-*field* defaults, from both places the daemon keeps them:
@@ -110,7 +110,7 @@ fn codegen_outputs_match_checked_in() {
         // `?? "kiosk"`, a `const DEFAULT_COOLDOWN_MIN_SESSION = 120` — with
         // nothing anywhere to notice when the Rust moved.
         (
-            "shepherd-webui/src/config/model/field-defaults.generated.ts",
+            "lunchbox-webui/src/config/model/field-defaults.generated.ts",
             "field-defaults.generated.ts",
         ),
     ];
@@ -141,10 +141,11 @@ fn codegen_outputs_match_checked_in() {
 /// found during #149, on a phone that had just been given the new build.
 #[test]
 fn protocol_constants_match_the_companion() {
-    let kotlin = std::fs::read_to_string(repo_root().join(
-        "companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/Protocol.kt",
-    ))
-    .expect("companion Protocol.kt");
+    let kotlin =
+        std::fs::read_to_string(repo_root().join(
+            "companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/Protocol.kt",
+        ))
+        .expect("companion Protocol.kt");
 
     let expected_version = format!(
         "const val PROTOCOL_VERSION: Long = {}",
@@ -160,23 +161,23 @@ fn protocol_constants_match_the_companion() {
     for (name, uuid) in [
         (
             "MANAGEMENT_SERVICE",
-            lunchbox_ble::protocol::SHEPHERD_MANAGEMENT_SERVICE_UUID,
+            lunchbox_ble::protocol::LUNCHBOX_MANAGEMENT_SERVICE_UUID,
         ),
         (
             "DEVICE_INFO_CHAR",
-            lunchbox_ble::protocol::SHEPHERD_DEVICE_INFO_CHAR_UUID,
+            lunchbox_ble::protocol::LUNCHBOX_DEVICE_INFO_CHAR_UUID,
         ),
         (
             "REQUEST_CHAR",
-            lunchbox_ble::protocol::SHEPHERD_REQUEST_CHAR_UUID,
+            lunchbox_ble::protocol::LUNCHBOX_REQUEST_CHAR_UUID,
         ),
         (
             "RESPONSE_CHAR",
-            lunchbox_ble::protocol::SHEPHERD_RESPONSE_CHAR_UUID,
+            lunchbox_ble::protocol::LUNCHBOX_RESPONSE_CHAR_UUID,
         ),
         (
             "EVENTS_CHAR",
-            lunchbox_ble::protocol::SHEPHERD_EVENTS_CHAR_UUID,
+            lunchbox_ble::protocol::LUNCHBOX_EVENTS_CHAR_UUID,
         ),
     ] {
         let expected = format!("val {name}: Uuid = Uuid.parse(\"{uuid}\")");

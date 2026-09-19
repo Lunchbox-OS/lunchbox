@@ -1,10 +1,10 @@
 # lunchbox-host-api
 
-Host adapter trait interfaces for Shepherd.
+Host adapter trait interfaces for Lunchbox.
 
 ## Overview
 
-This crate defines the capability-based interface between the Shepherd core and platform-specific implementations. It contains **no platform code itself**—only traits, types, and a mock implementation for testing.
+This crate defines the capability-based interface between the Lunchbox core and platform-specific implementations. It contains **no platform code itself**—only traits, types, and a mock implementation for testing.
 
 ### Purpose
 
@@ -218,9 +218,9 @@ mock.inject_exit(handle.clone(), ExitStatus::Code(0));
 | Adapter | Crate | Status |
 |---------|-------|--------|
 | Linux | `lunchbox-host-linux` | Implemented |
-| macOS | `shepherd-host-macos` | Planned |
-| Windows | `shepherd-host-windows` | Planned |
-| Android | `shepherd-host-android` | Planned |
+| macOS | `lunchbox-host-macos` | Planned |
+| Windows | `lunchbox-host-windows` | Planned |
+| Android | `lunchbox-host-android` | Planned |
 
 ## Dependencies
 

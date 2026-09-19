@@ -3,7 +3,7 @@ name = "lunchbox-stated"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Custodian for shepherd's policy and state files, at a uid activities do not have (issue #157)"
+description = "Custodian for lunchbox's policy and state files, at a uid activities do not have (issue #157)"
 
 [dependencies]
 lunchbox-ipc = { workspace = true }

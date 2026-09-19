@@ -18,7 +18,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for LauncherTile {
-        const NAME: &'static str = "ShepherdLauncherTile";
+        const NAME: &'static str = "LunchboxLauncherTile";
         type Type = super::LauncherTile;
         type ParentType = gtk4::Button;
     }

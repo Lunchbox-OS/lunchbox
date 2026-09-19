@@ -61,9 +61,9 @@ use crate::claim::{AuthDecision, ClaimError, ClaimMachine, PeerIdentity};
 use crate::framing::{FrameReader, encode_frame};
 use crate::outbox::{COALESCE_DIAGNOSTICS, COALESCE_STATE_CHANGED, CoalesceKey, Outbox};
 use crate::protocol::{
-    ClaimStateTag, DeviceInfo, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, RpcRequest,
-    RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID, SHEPHERD_EVENTS_CHAR_UUID,
-    SHEPHERD_MANAGEMENT_SERVICE_UUID, SHEPHERD_REQUEST_CHAR_UUID, SHEPHERD_RESPONSE_CHAR_UUID,
+    ClaimStateTag, DeviceInfo, ErrorCode, LUNCHBOX_DEVICE_INFO_CHAR_UUID,
+    LUNCHBOX_EVENTS_CHAR_UUID, LUNCHBOX_MANAGEMENT_SERVICE_UUID, LUNCHBOX_REQUEST_CHAR_UUID,
+    LUNCHBOX_RESPONSE_CHAR_UUID, MAX_FRAME_BYTES, PROTOCOL_VERSION, RpcRequest, RpcResponse,
 };
 use crate::rpc::dispatch_management;
 
@@ -131,7 +131,7 @@ const ADV_NAME_ELLIPSIS: &str = "…";
 /// or a boot that walks USB differently renumbers the adapters, and a
 /// config pinned to `hci1` silently follows the number onto whichever
 /// radio now holds it. BlueZ's `Alias` is no better — it defaults to the
-/// hostname plus an order-derived suffix (`shepherd-26.04 #1`) and is
+/// hostname plus an order-derived suffix (`lunchbox-26.04 #1`) and is
 /// user-mutable — and `Modalias` on this hardware reports the same
 /// generic `usb:v1D6Bp0246d0555` for every controller, so it can neither
 /// identify nor distinguish them. The address is burned into the
@@ -382,7 +382,7 @@ impl BleServer {
     /// 2. If we just consumed the reset sentinel, ask BlueZ to forget
     ///    the previously-bonded admin (best-effort).
     /// 3. Register the Numeric Comparison pairing agent.
-    /// 4. Publish the GATT application (Shepherd Management Service +
+    /// 4. Publish the GATT application (Lunchbox Management Service +
     ///    DeviceInfo / Request / Response / Events characteristics).
     /// 5. Start LE advertising under the configured device name.
     /// 6. Spawn the events forwarder task.
@@ -773,7 +773,7 @@ fn coalesce_key_for(payload: &EventPayload) -> Option<CoalesceKey> {
 /// The outboxes and the reassembly reader carry per-session byte
 /// streams. The only *other* reset is the client's `id == 1` sentinel
 /// in [`dispatch_frame`], which a companion sends only when it builds a
-/// *fresh* [`ShepherdConnection`]. On a transient BLE drop (BT toggle,
+/// *fresh* [`DeviceConnection`]. On a transient BLE drop (BT toggle,
 /// brief out-of-range) the companion keeps the same connection and
 /// resumes its RPC id counter mid-sequence, so `id == 1` never fires —
 /// any bytes left over from before the drop (an unread response, a
@@ -903,7 +903,7 @@ fn spawn_device_watcher(
         // keeps only the changed properties, throwing away the interface
         // that emitted them (`device.rs`: `Event::PropertiesChanged {
         // changed, .. }`), and then matches on the property *name*. On
-        // BlueZ >= 5.82 with `Experimental` — which shepherd requires for
+        // BlueZ >= 5.82 with `Experimental` — which lunchbox requires for
         // `PreferredBearer`, so every device has it — one device object
         // carries `org.bluez.Device1`, `org.bluez.Bearer.LE1` *and*
         // `org.bluez.Bearer.BREDR1`, and all three have a `Connected`
@@ -1520,7 +1520,7 @@ async fn go_on_air(
     let adv: AdvertisementHandle = adapter
         .advertise(Advertisement {
             advertisement_type: bluer::adv::Type::Peripheral,
-            service_uuids: [SHEPHERD_MANAGEMENT_SERVICE_UUID].into_iter().collect(),
+            service_uuids: [LUNCHBOX_MANAGEMENT_SERVICE_UUID].into_iter().collect(),
             local_name: Some(adv_name.to_string()),
             discoverable: Some(true),
             ..Default::default()
@@ -1529,7 +1529,7 @@ async fn go_on_air(
     info!(
         device = %config.device_name,
         advertised = %adv_name,
-        service = %SHEPHERD_MANAGEMENT_SERVICE_UUID,
+        service = %LUNCHBOX_MANAGEMENT_SERVICE_UUID,
         "BLE management advertising started",
     );
     Ok(OnAir {
@@ -1619,19 +1619,19 @@ fn build_application(
 ) -> Application {
     Application {
         services: vec![Service {
-            uuid: SHEPHERD_MANAGEMENT_SERVICE_UUID,
+            uuid: LUNCHBOX_MANAGEMENT_SERVICE_UUID,
             primary: true,
             characteristics: vec![
                 device_info_characteristic(config, claim.clone()),
                 request_characteristic(adapter, svc, claim, state.clone()),
                 outbox_read_characteristic(
-                    SHEPHERD_RESPONSE_CHAR_UUID,
+                    LUNCHBOX_RESPONSE_CHAR_UUID,
                     state.response_outbox.clone(),
                     "Response",
                     state.clone(),
                 ),
                 outbox_read_characteristic(
-                    SHEPHERD_EVENTS_CHAR_UUID,
+                    LUNCHBOX_EVENTS_CHAR_UUID,
                     state.events_outbox.clone(),
                     "Events",
                     state.clone(),
@@ -1649,7 +1649,7 @@ fn build_application(
 /// before initiating the bond.
 fn device_info_characteristic(config: BleServerConfig, claim: Arc<ClaimMachine>) -> Characteristic {
     Characteristic {
-        uuid: SHEPHERD_DEVICE_INFO_CHAR_UUID,
+        uuid: LUNCHBOX_DEVICE_INFO_CHAR_UUID,
         read: Some(CharacteristicRead {
             read: true,
             fun: Box::new(move |_req| {
@@ -1700,7 +1700,7 @@ fn request_characteristic(
     // frame; if a second device writes here we wipe the buffer and start
     // fresh.
     Characteristic {
-        uuid: SHEPHERD_REQUEST_CHAR_UUID,
+        uuid: LUNCHBOX_REQUEST_CHAR_UUID,
         write: Some(CharacteristicWrite {
             write: true,
             write_without_response: true,
@@ -1961,7 +1961,7 @@ async fn dispatch_frame(
 
     let id = request.id;
 
-    // Every `ShepherdConnection` on the companion starts its RPC id
+    // Every `DeviceConnection` on the companion starts its RPC id
     // counter at 1, so `id == 1` is a deterministic signal that this
     // write is the first of a fresh BLE session. Wipe the outboxes
     // before queueing the response — any bytes still in the queue
@@ -2142,7 +2142,7 @@ mod tests {
             .map(|a| AdminRecord::new((*a).to_string(), "public".into(), "tester".into()))
             .collect();
         let store = AdminStore::new(Arc::new(lunchbox_util::LocalProtectedFiles::new(
-            std::path::PathBuf::from("/nonexistent/shepherd-ble-test"),
+            std::path::PathBuf::from("/nonexistent/lunchbox-ble-test"),
         )));
         Arc::new(ClaimMachine::new(store, ClaimState::Claimed(records)))
     }
@@ -2763,7 +2763,7 @@ mod tests {
     #[tokio::test]
     async fn factory_reset_when_unclaimed_requests_no_removal() {
         let store = AdminStore::new(Arc::new(lunchbox_util::LocalProtectedFiles::new(
-            std::path::PathBuf::from("/nonexistent/shepherd-ble-test"),
+            std::path::PathBuf::from("/nonexistent/lunchbox-ble-test"),
         )));
         let claim: Arc<ClaimMachine> = Arc::new(ClaimMachine::new(store, ClaimState::Unclaimed));
         let svc: Arc<dyn ManagementService> = Arc::new(MockSvc::new());
@@ -2808,7 +2808,7 @@ mod tests {
         let fits = |s: &str| advertised_name(s).len() <= MAX_ADV_NAME_BYTES;
 
         // Fits already -> returned verbatim (8 bytes is the boundary).
-        assert_eq!(advertised_name("shepherd"), "shepherd");
+        assert_eq!(advertised_name("lunchbox"), "lunchbox");
         assert_eq!(advertised_name("pi"), "pi");
         // The hostname that triggered the field report: 10 bytes -> 5-byte
         // prefix + "…" (3 bytes) = 8.
@@ -2849,7 +2849,7 @@ mod tests {
         std::fs::write(&sentinel_path, "").unwrap();
 
         let config = BleServerConfig {
-            device_name: "shepherd".into(),
+            device_name: "lunchbox".into(),
             firmware_version: "test".into(),
             adapter: None,
             files: Arc::clone(&files),

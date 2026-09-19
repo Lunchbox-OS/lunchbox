@@ -8,7 +8,7 @@
 //! stopped lunchboxd never exits, so the wrapper's `||` never fires, while the
 //! engine that counts a child's time has stopped.
 //!
-//! This daemon is the one piece of shepherd that is outside the session, at a
+//! This daemon is the one piece of lunchbox that is outside the session, at a
 //! uid nothing inside it can signal, that already knows which session is the
 //! kiosk's. So it holds the dead man's switch: lunchboxd feeds a connection,
 //! and when the feeding stops the session ends.
@@ -385,8 +385,8 @@ pub trait Terminator: Send + Sync + 'static {
     ///
     /// **Not `KillSession`**, which would be the obvious pair to `terminate`
     /// and is the wrong call. A session scope holds sway, the launcher, the HUD
-    /// and swayidle; the activities shepherd launches are somewhere else
-    /// entirely — `shepherd-<id>.scope` under the user manager's `app.slice`,
+    /// and swayidle; the activities lunchbox launches are somewhere else
+    /// entirely — `lunchbox-<id>.scope` under the user manager's `app.slice`,
     /// or a snap's or flatpak's own scope (measured on a device,
     /// `docs/ai/history/2026-08-29 003`). Killing the session scope in the one
     /// case this escalation exists for would take the compositor and leave the
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn a_killed_shepherdd_ends_the_session() {
+    fn a_killed_lunchboxd_ends_the_session() {
         // The defect this exists for: the connection is gone, and after the
         // settle the session goes with it.
         let (mut g, t0) = guard();
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_shepherdd_ends_the_session_too() {
+    fn a_stopped_lunchboxd_ends_the_session_too() {
         // `SIGSTOP` holds every file descriptor open, so there is no EOF to
         // notice — only the silence.
         let (mut g, t0) = guard();

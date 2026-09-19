@@ -10,7 +10,7 @@ pub use lunchbox_media_app::Quality;
 
 #[derive(Debug, Parser)]
 #[command(name = "lunchbox-media")]
-#[command(about = "shepherd-launcher media-library activity", long_about = None)]
+#[command(about = "lunchbox-launcher media-library activity", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -43,7 +43,7 @@ pub struct Cli {
     /// item watched most recently. Off by default; with the flag absent
     /// nothing is recorded and no state file is written.
     ///
-    /// Positions live in `$XDG_STATE_HOME/shepherd/media/resume/<library_id>.toml`
+    /// Positions live in `$XDG_STATE_HOME/lunchbox/media/resume/<library_id>.toml`
     /// (falling back to `~/.local/state`). An item watched to its end is
     /// forgotten, so the next play starts from the beginning.
     #[arg(long, global = true)]
@@ -81,7 +81,7 @@ pub struct Cli {
     /// lunchboxd passes its `service.media.cache_max_bytes` here, because the
     /// cache directory this trims is the one lunchboxd prefetches into: two
     /// processes disagreeing about how big it may be would undo each other's
-    /// trims. `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` still overrides it, as a
+    /// trims. `LUNCHBOX_MEDIA_VIDEO_CACHE_MAX_BYTES` still overrides it, as a
     /// local debugging escape hatch.
     #[arg(long, default_value_t = lunchbox_media_cache::DEFAULT_MAX_CACHE_BYTES, global = true)]
     pub cache_max_bytes: u64,

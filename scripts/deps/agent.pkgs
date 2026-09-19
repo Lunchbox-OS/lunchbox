@@ -1,6 +1,6 @@
-# Agent / headless-development packages for shepherd-launcher.
+# Agent / headless-development packages for lunchbox-launcher.
 #
-# These power `shepherd dev headless`, which boots the real launcher stack in a
+# These power `lunchbox dev headless`, which boots the real launcher stack in a
 # GPU-less, login-session-less headless Sway so an automated agent (or a
 # developer over SSH) can screenshot and drive it. See
 # docs/ai/history for the design.

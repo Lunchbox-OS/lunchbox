@@ -1,10 +1,10 @@
 # lunchbox-util
 
-Shared utilities for the Shepherd ecosystem.
+Shared utilities for the Lunchbox ecosystem.
 
 ## Overview
 
-This crate provides common utilities and types used across all Shepherd crates, including:
+This crate provides common utilities and types used across all Lunchbox crates, including:
 
 - **ID types** - Type-safe identifiers (`EntryId`, `SessionId`, `ClientId`)
 - **Time utilities** - Monotonic time handling and duration helpers
@@ -14,7 +14,7 @@ This crate provides common utilities and types used across all Shepherd crates, 
 
 ## Purpose
 
-`lunchbox-util` serves as the foundational layer that other Shepherd crates depend on. It ensures consistency across the codebase by providing:
+`lunchbox-util` serves as the foundational layer that other Lunchbox crates depend on. It ensures consistency across the codebase by providing:
 
 1. **Unified ID management** - All identifiers are strongly typed to prevent mix-ups
 2. **Reliable time handling** - Monotonic time for enforcement (immune to wall-clock changes)
@@ -68,7 +68,7 @@ let data = default_data_dir();       // $XDG_DATA_HOME/lunchboxd or ~/.local/sha
 let logs = default_log_dir();        // $XDG_STATE_HOME/lunchboxd or ~/.local/state/lunchboxd
 ```
 
-Environment variables `SHEPHERD_SOCKET` and `SHEPHERD_DATA_DIR` can override the defaults.
+Environment variables `LUNCHBOX_SOCKET` and `LUNCHBOX_DATA_DIR` can override the defaults.
 
 ## Design Philosophy
 

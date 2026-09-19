@@ -2,17 +2,17 @@
 //!
 //! Provides centralized path defaults that all crates can use.
 //! Paths are user-writable by default (no root required):
-//! - Socket: `$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock` or `/tmp/shepherdd-$USER/lunchboxd.sock`
+//! - Socket: `$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock` or `/tmp/lunchboxd-$USER/lunchboxd.sock`
 //! - Data: `$XDG_DATA_HOME/lunchboxd` or `~/.local/share/lunchboxd`
 //! - Logs: `$XDG_STATE_HOME/lunchboxd` or `~/.local/state/lunchboxd`
 
 use std::path::PathBuf;
 
 /// Environment variable for overriding the socket path
-pub const SHEPHERD_SOCKET_ENV: &str = "SHEPHERD_SOCKET";
+pub const LUNCHBOX_SOCKET_ENV: &str = "LUNCHBOX_SOCKET";
 
 /// Environment variable for overriding the data directory
-pub const SHEPHERD_DATA_DIR_ENV: &str = "SHEPHERD_DATA_DIR";
+pub const LUNCHBOX_DATA_DIR_ENV: &str = "LUNCHBOX_DATA_DIR";
 
 /// Socket filename within the socket directory
 const SOCKET_FILENAME: &str = "lunchboxd.sock";
@@ -23,19 +23,19 @@ const APP_DIR: &str = "lunchboxd";
 /// Get the default socket path.
 ///
 /// Order of precedence:
-/// 1. `$SHEPHERD_SOCKET` environment variable (if set)
+/// 1. `$LUNCHBOX_SOCKET` environment variable (if set)
 /// 2. `$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock` (if XDG_RUNTIME_DIR is set)
-/// 3. `/tmp/shepherdd-$USER/lunchboxd.sock` (fallback)
+/// 3. `/tmp/lunchboxd-$USER/lunchboxd.sock` (fallback)
 pub fn default_socket_path() -> PathBuf {
     // Check environment override first
-    if let Ok(path) = std::env::var(SHEPHERD_SOCKET_ENV) {
+    if let Ok(path) = std::env::var(LUNCHBOX_SOCKET_ENV) {
         return PathBuf::from(path);
     }
 
     socket_path_without_env()
 }
 
-/// Get the socket path without checking SHEPHERD_SOCKET env var.
+/// Get the socket path without checking LUNCHBOX_SOCKET env var.
 /// Used for default values in configs where the env var is checked separately.
 pub fn socket_path_without_env() -> PathBuf {
     // Try XDG_RUNTIME_DIR first (typically /run/user/<uid>)
@@ -53,19 +53,19 @@ pub fn socket_path_without_env() -> PathBuf {
 /// Get the default data directory.
 ///
 /// Order of precedence:
-/// 1. `$SHEPHERD_DATA_DIR` environment variable (if set)
+/// 1. `$LUNCHBOX_DATA_DIR` environment variable (if set)
 /// 2. `$XDG_DATA_HOME/lunchboxd` (if XDG_DATA_HOME is set)
 /// 3. `~/.local/share/lunchboxd` (fallback)
 pub fn default_data_dir() -> PathBuf {
     // Check environment override first
-    if let Ok(path) = std::env::var(SHEPHERD_DATA_DIR_ENV) {
+    if let Ok(path) = std::env::var(LUNCHBOX_DATA_DIR_ENV) {
         return PathBuf::from(path);
     }
 
     data_dir_without_env()
 }
 
-/// Get the data directory without checking SHEPHERD_DATA_DIR env var.
+/// Get the data directory without checking LUNCHBOX_DATA_DIR env var.
 /// Used for default values in configs where the env var is checked separately.
 pub fn data_dir_without_env() -> PathBuf {
     // Try XDG_DATA_HOME first
@@ -132,15 +132,15 @@ pub fn socket_dir() -> PathBuf {
         })
 }
 
-/// Configuration subdirectory name (uses "shepherd" not "lunchboxd")
-const CONFIG_APP_DIR: &str = "shepherd";
+/// Configuration subdirectory name (uses "lunchbox" not "lunchboxd")
+const CONFIG_APP_DIR: &str = "lunchbox";
 
 /// Configuration filename
 const CONFIG_FILENAME: &str = "config.toml";
 
 /// Get the default configuration file path.
 ///
-/// Returns `$XDG_CONFIG_HOME/shepherd/config.toml` or `~/.config/shepherd/config.toml`
+/// Returns `$XDG_CONFIG_HOME/lunchbox/config.toml` or `~/.config/lunchbox/config.toml`
 pub fn default_config_path() -> PathBuf {
     // Try XDG_CONFIG_HOME first
     if let Ok(config_home) = std::env::var("XDG_CONFIG_HOME") {
@@ -149,7 +149,7 @@ pub fn default_config_path() -> PathBuf {
             .join(CONFIG_FILENAME);
     }
 
-    // Fallback to ~/.config/shepherd/config.toml
+    // Fallback to ~/.config/lunchbox/config.toml
     if let Ok(home) = std::env::var("HOME") {
         return PathBuf::from(home)
             .join(".config")
@@ -247,14 +247,14 @@ mod tests {
     }
 
     #[test]
-    fn config_path_contains_shepherd() {
+    fn config_path_contains_lunchbox() {
         let path = default_config_path();
-        assert!(path.to_string_lossy().contains("shepherd"));
+        assert!(path.to_string_lossy().contains("lunchbox"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
     }
 }
 
-/// One of shepherd's protected files (issue #157).
+/// One of lunchbox's protected files (issue #157).
 ///
 /// The files that decide what a child may do: the policy, the BLE admin
 /// identity, and the two small records that go with it. They live at a uid
@@ -270,7 +270,7 @@ mod tests {
 pub enum ProtectedFile {
     /// `config.toml` — every entry, limit, availability window and firewall
     /// spec. Read by the daemon at boot and on every reload; written by an
-    /// operator (`sudoedit`, `shepherd install policy`) or, since issue #185,
+    /// operator (`sudoedit`, `lunchbox install policy`) or, since issue #185,
     /// by the daemon itself on behalf of the web config editor.
     Config,
     /// `admin.toml` — the bonded admin's identity and the minted HTTP token.
@@ -344,7 +344,7 @@ impl ProtectedFile {
     }
 }
 
-/// A small store of shepherd's protected files, wherever they actually live.
+/// A small store of lunchbox's protected files, wherever they actually live.
 ///
 /// Implemented against the local filesystem in development, and against the
 /// custodian's socket on a device. It exists so `lunchbox-ble` can keep the

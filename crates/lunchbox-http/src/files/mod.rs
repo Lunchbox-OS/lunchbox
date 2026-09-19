@@ -34,9 +34,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Local};
+use lunchbox_config::FileManagerConfig;
 use serde::Serialize;
 use serde_json::json;
-use lunchbox_config::FileManagerConfig;
 use tokio::sync::watch;
 
 pub use roots::{RootInfo, RootKind};
@@ -278,7 +278,7 @@ pub enum UnusableReason {
     /// A socket, fifo, device node or other special file. Listed so it is not
     /// invisible, and not something this API will open.
     SpecialFile,
-    /// One of shepherd's own directories, or `~/.ssh`. Refused for reading and
+    /// One of lunchbox's own directories, or `~/.ssh`. Refused for reading and
     /// writing alike — see [`denied_dirs`].
     NotBrowsable,
     /// The directory named it, and then nothing could be learned about it —
@@ -381,7 +381,7 @@ pub struct FileService {
     /// is most USB sticks.
     home_device: Option<u64>,
     settings: watch::Receiver<Arc<FileManagerConfig>>,
-    /// shepherd's own directories inside the home, refused for read and write
+    /// lunchbox's own directories inside the home, refused for read and write
     /// alike. See [`resolve::check_denied`].
     denied: Vec<PathBuf>,
 }
@@ -507,7 +507,7 @@ fn denied_dirs(home: &Path) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| home.join(".cache"))
-        .join("shepherd");
+        .join("lunchbox");
     [data, cache, home.join(".ssh")]
         .into_iter()
         // Canonical where it can be, because what it is compared against is:

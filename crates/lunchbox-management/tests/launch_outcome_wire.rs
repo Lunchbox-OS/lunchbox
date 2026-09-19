@@ -7,7 +7,7 @@
 //! `copernicus` logged
 //!
 //! ```text
-//! ERROR shepherd_launcher::app: Launch failed on server
+//! ERROR lunchbox_launcher::app: Launch failed on server
 //!       error=JSON error: data did not match any variant of untagged enum LaunchOutcome
 //! ```
 //!

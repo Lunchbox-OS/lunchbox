@@ -163,7 +163,7 @@ timeout_ms = 1500
 # long before it fills the cache. lunchboxd hands the cap to every media
 # activity it launches, so the daemon filling the cache and the player trimming
 # it agree on its size — which is why this is config and not only the
-# SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES environment variable, which remains as a
+# LUNCHBOX_MEDIA_VIDEO_CACHE_MAX_BYTES environment variable, which remains as a
 # local debugging override.
 
 # Steam-specific behaviour (optional)
@@ -274,7 +274,7 @@ mode = "self_signed"         # "auto" | "off" | "self_signed" | "files"
 # working BlueZ adapter and the `bluez` system package.
 [service.ble_management]
 enabled = true
-# device_name = "shepherd"              # Advertised local name. Pick something
+# device_name = "lunchbox"              # Advertised local name. Pick something
                                         # the companion app can disambiguate
                                         # when multiple devices are in range.
 # adapter = "DC:56:7B:1F:7D:EA"         # Which controller to serve on, when the
@@ -858,7 +858,7 @@ cooldown_seconds = 0  # No cooldown
 #   2. [entries.browser] -> a Chromium managed-policy (URL allowlist + lockdown)
 #                           plus the launch mode and on-disk profile
 #   3. [entries.firewall] -> optional coarse IP-layer defense-in-depth
-# shepherd-launcher only wraps Chrome through documented controls (enterprise
+# lunchbox-launcher only wraps Chrome through documented controls (enterprise
 # policy JSON + command-line flags) -- it does not patch the browser or
 # circumvent any protections.
 #
@@ -879,7 +879,7 @@ app_id = "com.google.Chrome"
 profile_id = "school"
 # Window mode: "kiosk" and "app" both open a CHROMELESS window (no tabs or
 # omnibox) that sway maximizes into the area around the time-remaining HUD;
-# "windowed" is a normal browser window with tabs. shepherd's compositor keeps
+# "windowed" is a normal browser window with tabs. lunchbox's compositor keeps
 # the HUD on top and intentionally denies apps true fullscreen, so neither mode
 # takes over the whole display -- kiosk and app behave the same here.
 mode = "kiosk"
@@ -907,7 +907,7 @@ disable_dev_tools = true
 disable_incognito = true
 disable_extensions = true
 # wipe_on_exit clears the profile directory after the session ends (handled by
-# shepherd, not Chrome). Use a unique profile_id with this; sharing a profile_id
+# lunchbox, not Chrome). Use a unique profile_id with this; sharing a profile_id
 # AND wiping deletes the shared profile. Defaults to false.
 wipe_on_exit = false
 
@@ -951,16 +951,16 @@ daily_quota_seconds = 7200   # 2 hours per day
 #
 # Entries use `type = "media"`: lunchboxd builds the `lunchbox-media` command
 # line itself, so a bad item id or an unknown quality is caught by
-# `shepherd-admin config validate` rather than on the child's screen.
+# `lunchbox-admin config validate` rather than on the child's screen.
 #
-# Most entries below reference `~/.config/shepherd/movies.toml`. A starter
+# Most entries below reference `~/.config/lunchbox/movies.toml`. A starter
 # library that defines `big-buck-bunny`, `sintel`, `tears-of-steel`, and
 # `lofi-beats` is checked in at `movies-library.example.toml`; copy it and
 # update the `uri` paths to point at your own files:
 #
-#   cp movies-library.example.toml ~/.config/shepherd/movies.toml
-#   $EDITOR ~/.config/shepherd/movies.toml
-#   lunchbox-media validate ~/.config/shepherd/movies.toml
+#   cp movies-library.example.toml ~/.config/lunchbox/movies.toml
+#   $EDITOR ~/.config/lunchbox/movies.toml
+#   lunchbox-media validate ~/.config/lunchbox/movies.toml
 #
 # A YouTube playlist URL can be used in place of a library path; see the
 # `youtube-channel` entry at the end of this section.
@@ -976,7 +976,7 @@ icon = "mpv"
 
 [entries.kind]
 type = "media"
-library = "~/.config/shepherd/movies.toml"
+library = "~/.config/lunchbox/movies.toml"
 mode = "play"
 item = "big-buck-bunny"
 
@@ -1006,7 +1006,7 @@ icon = "folder-videos"
 
 [entries.kind]
 type = "media"
-library = "~/.config/shepherd/movies.toml"
+library = "~/.config/lunchbox/movies.toml"
 # mode = "browse"   # the default; opens the poster grid over the whole library
 # resume = true
 # quality = "1080p" # best | 1080p | 720p | 480p
@@ -1034,7 +1034,7 @@ icon = "mpv"
 
 [entries.kind]
 type = "media"
-library = "~/.config/shepherd/movies.toml"
+library = "~/.config/lunchbox/movies.toml"
 mode = "play"
 item = "lofi-beats"
 # A 24/7 live stream has no end to download; prefetching it would spend the
@@ -1051,7 +1051,7 @@ cooldown_seconds = 0  # No cooldown
 
 # A YouTube playlist exposed as a browse-mode activity. lunchbox-media
 # fetches the playlist via yt-dlp at startup (cached for 6 hours under
-# $XDG_CACHE_HOME/shepherd/media/playlists/) and shows each video as a
+# $XDG_CACHE_HOME/lunchbox/media/playlists/) and shows each video as a
 # poster tile. Replace the `list=` value with a playlist you control or
 # trust. See docs/lunchbox-media.md for caching behavior and the rationale
 # for the recommended flags below.
@@ -1091,8 +1091,8 @@ end = "20:00"
 
 ## === Emulated games (RetroArch) ===
 # Install RetroArch and the cores you need with:
-#   sudo shepherd-admin apps install retroarch mgba
-#   shepherd-admin apps install retroarch help   # lists the available cores
+#   sudo lunchbox-admin apps install retroarch mgba
+#   lunchbox-admin apps install retroarch help   # lists the available cores
 #
 # No games are included. Supply your own, and only ones you have the right to.
 # See docs/emulators.md for the full picture: where saves live, how to back
@@ -1120,7 +1120,7 @@ group = "attention-heavy"
 
 [entries.kind]
 type = "retroarch"
-# The core, named the way `shepherd-admin apps install retroarch` names it.
+# The core, named the way `lunchbox-admin apps install retroarch` names it.
 # Resolved to mgba_libretro.so in the usual libretro directories.
 core = "mgba"
 # Must be absolute or start with "~/": a bare relative path would resolve
@@ -1137,9 +1137,9 @@ cooldown_seconds = 1800
 
 ## === Reading (ebook) ===
 # Install the reader with:
-#   sudo shepherd-admin apps install okular
+#   sudo lunchbox-admin apps install okular
 #
-# One activity per book, opening where the child stopped. shepherd generates
+# One activity per book, opening where the child stopped. lunchbox generates
 # the reader's whole configuration per entry -- the restrictions that keep the
 # activity inside the book, the page-at-a-time view, the reading font -- and
 # re-renders it before every launch, so nothing below needs a config file of
@@ -1147,13 +1147,13 @@ cooldown_seconds = 1800
 #
 # No books are included. Supply your own, DRM-free. A book from a store belongs
 # in that store's app -- a browser activity for Kindle Cloud Reader or Google
-# Play Books -- because the DRM is the point of the store, and shepherd is not
+# Play Books -- because the DRM is the point of the store, and lunchbox is not
 # in the business of removing it.
 [[entries]]
 id = "the-hobbit"
 label = "The Hobbit"
 # The cover makes a far better tile than a generic book icon; without one,
-# shepherd falls back to the format's mime icon.
+# lunchbox falls back to the format's mime icon.
 # icon = "~/Books/covers/the-hobbit.png"
 
 [entries.kind]

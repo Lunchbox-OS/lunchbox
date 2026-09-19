@@ -242,7 +242,7 @@ mod tests {
     }
 
     fn watcher() -> SkipWatcher {
-        let dir = std::env::temp_dir().join("shepherd-media-sponsorblock-tests");
+        let dir = std::env::temp_dir().join("lunchbox-media-sponsorblock-tests");
         let cache = Arc::new(SponsorBlockCache::new(dir));
         SkipWatcher::new(cache, vec![Category::Sponsor]).expect("categories were given")
     }

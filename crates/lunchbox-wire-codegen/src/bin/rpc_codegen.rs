@@ -5,28 +5,28 @@
 //! - `docs/rpc-schema.json` — pretty-printed schema, committed to
 //!   the repo so it's diffable in PRs and available to future
 //!   codegen tools.
-//! - `companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/RpcMethods.kt`
+//! - `companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/RpcMethods.kt`
 //!   — typed method-name constants for the Kotlin companion. Kills
 //!   the raw method-name string literals scattered through
 //!   `ManagementClient.kt`.
-//! - `shepherd-webui/src/config/model/config.generated.ts` — TypeScript
+//! - `lunchbox-webui/src/config/model/config.generated.ts` — TypeScript
 //!   mirrors of the `config.toml` schema, for the config editor.
 //! - `companion-android/.../companion/domain/RpcParams.generated.kt` —
 //!   a params builder per RPC, so the companion stops spelling wire
 //!   param keys as string literals.
-//! - `shepherd-webui/src/api/rpc-methods.generated.ts` — the same
+//! - `lunchbox-webui/src/api/rpc-methods.generated.ts` — the same
 //!   for the TypeScript web UI: a union of all method names, plus the
 //!   params and result type of each one.
-//! - `shepherd-webui/src/api/wire-types.generated.ts` — the payload
+//! - `lunchbox-webui/src/api/wire-types.generated.ts` — the payload
 //!   types for the web UI, the TypeScript counterpart of
 //!   `WireTypes.generated.kt`.
-//! - `shepherd-webui/src/config/model/wasm-types.generated.ts` — the
+//! - `lunchbox-webui/src/config/model/wasm-types.generated.ts` — the
 //!   validation report and availability view the config editor decodes
 //!   back out of `lunchbox-config-wasm`.
-//! - `shepherd-webui/src/config/model/kind-defaults.generated.ts` — what
+//! - `lunchbox-webui/src/config/model/kind-defaults.generated.ts` — what
 //!   each entry kind supplies for a field the entry leaves unset, so the
 //!   editor shows what the daemon will actually do.
-//! - `shepherd-webui/src/config/model/field-defaults.generated.ts` — what
+//! - `lunchbox-webui/src/config/model/field-defaults.generated.ts` — what
 //!   each *field* falls back to, both the serde defaults the schema carries
 //!   and the ones `Policy::from_raw` resolves at load time.
 //!
@@ -35,9 +35,9 @@
 //! same files out, so it's safe to invoke from a pre-commit hook or
 //! a CI check that fails on drift.
 
+use lunchbox_wire_codegen::rust_types::RustType;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use lunchbox_wire_codegen::rust_types::RustType;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,15 +110,15 @@ fn main() -> anyhow::Result<()> {
 
     // Two modes:
     //
-    // - Normal (`SHEPHERD_RPC_CODEGEN_OUT` unset): overwrite the
+    // - Normal (`LUNCHBOX_RPC_CODEGEN_OUT` unset): overwrite the
     //   canonical locations in the repo, resolved from `CARGO_MANIFEST_DIR`
     //   so the binary doesn't care what the caller's cwd is.
-    // - Test mode (`SHEPHERD_RPC_CODEGEN_OUT=<dir>`): write flattened
+    // - Test mode (`LUNCHBOX_RPC_CODEGEN_OUT=<dir>`): write flattened
     //   filenames into <dir>. The drift-check test uses this to compare
     //   against the checked-in copies without racing against a concurrent
     //   `cargo run`.
     let outputs: [(PathBuf, String); 10] = if let Ok(dir) =
-        std::env::var("SHEPHERD_RPC_CODEGEN_OUT")
+        std::env::var("LUNCHBOX_RPC_CODEGEN_OUT")
     {
         let base = PathBuf::from(dir);
         [
@@ -155,39 +155,39 @@ fn main() -> anyhow::Result<()> {
                 format!("{pretty}\n"),
             ),
             (
-                repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/ble/RpcMethods.kt"),
+                repo.join("companion-android/app/src/main/kotlin/com/lunchbox_os/companion/ble/RpcMethods.kt"),
                 render_kotlin(&schema),
             ),
             (
-                repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/RpcParams.generated.kt"),
+                repo.join("companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/RpcParams.generated.kt"),
                 render_kotlin_params(&schema),
             ),
             (
-                repo.join("shepherd-webui/src/api/rpc-methods.generated.ts"),
+                repo.join("lunchbox-webui/src/api/rpc-methods.generated.ts"),
                 render_ts(&schema),
             ),
             (
-                repo.join("companion-android/app/src/main/kotlin/com/armeafamily/shepherd/companion/domain/WireTypes.generated.kt"),
+                repo.join("companion-android/app/src/main/kotlin/com/lunchbox_os/companion/domain/WireTypes.generated.kt"),
                 render_wire_types(),
             ),
             (
-                repo.join("shepherd-webui/src/api/wire-types.generated.ts"),
+                repo.join("lunchbox-webui/src/api/wire-types.generated.ts"),
                 render_wire_types_ts(),
             ),
             (
-                repo.join("shepherd-webui/src/config/model/config.generated.ts"),
+                repo.join("lunchbox-webui/src/config/model/config.generated.ts"),
                 render_config_types(),
             ),
             (
-                repo.join("shepherd-webui/src/config/model/wasm-types.generated.ts"),
+                repo.join("lunchbox-webui/src/config/model/wasm-types.generated.ts"),
                 render_editor_types(),
             ),
             (
-                repo.join("shepherd-webui/src/config/model/kind-defaults.generated.ts"),
+                repo.join("lunchbox-webui/src/config/model/kind-defaults.generated.ts"),
                 lunchbox_wire_codegen::kind_defaults::render(),
             ),
             (
-                repo.join("shepherd-webui/src/config/model/field-defaults.generated.ts"),
+                repo.join("lunchbox-webui/src/config/model/field-defaults.generated.ts"),
                 lunchbox_wire_codegen::config_defaults::render(),
             ),
         ]
@@ -298,9 +298,9 @@ fn render_kotlin(schema: &Schema) -> String {
     out.push_str("// Run `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/lunchbox-management/src/service.rs`.\n\n");
-    out.push_str("package com.armeafamily.shepherd.companion.ble\n\n");
+    out.push_str("package com.lunchbox_os.companion.ble\n\n");
     out.push_str("/**\n");
-    out.push_str(" * Wire-name constants for every RPC exposed by the shepherd device.\n");
+    out.push_str(" * Wire-name constants for every RPC exposed by the lunchbox device.\n");
     out.push_str(" * Mirrors the trait annotated with `#[management_rpc]` on the Rust side,\n");
     out.push_str(" * generated from that trait's `RPC_SCHEMA_JSON` so a drift between the\n");
     out.push_str(" * two sides is a CI failure, not a silent runtime miss.\n");
@@ -337,7 +337,7 @@ fn render_kotlin(schema: &Schema) -> String {
 /// Lives in the `domain` package beside the wire types rather than in `ble`
 /// beside [`render_kotlin`]'s method names: the builders reference the payload
 /// enums (`StopMode`, `WindowAction`), and `domain` already depends on `ble`
-/// for `ShepherdJson`.
+/// for `LunchboxJson`.
 fn render_kotlin_params(schema: &Schema) -> String {
     let defs = lunchbox_wire_codegen::wire_schema::wire_schema();
 
@@ -347,8 +347,8 @@ fn render_kotlin_params(schema: &Schema) -> String {
     out.push_str("// Run `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`\n");
     out.push_str("// after changing the `ManagementService` trait in\n");
     out.push_str("// `crates/lunchbox-management/src/service.rs`.\n\n");
-    out.push_str("package com.armeafamily.shepherd.companion.domain\n\n");
-    out.push_str("import com.armeafamily.shepherd.companion.ble.ShepherdJson\n");
+    out.push_str("package com.lunchbox_os.companion.domain\n\n");
+    out.push_str("import com.lunchbox_os.companion.ble.LunchboxJson\n");
     out.push_str("import kotlinx.serialization.json.JsonNull\n");
     out.push_str("import kotlinx.serialization.json.JsonObject\n");
     out.push_str("import kotlinx.serialization.json.JsonPrimitive\n");
@@ -435,7 +435,7 @@ fn kotlin_json_value(param: &Param, expr: &str, defs: &Map<String, Value>) -> St
                 param.name
             ),
             RustType::Named(name) if is_kotlin_enum(name, defs) => {
-                format!("ShepherdJson.encodeToJsonElement({name}.serializer(), {value})")
+                format!("LunchboxJson.encodeToJsonElement({name}.serializer(), {value})")
             }
             // Everything else is a primitive, or a newtype over a string that
             // `kotlin_types` renders as a `typealias` to `String`.
@@ -493,7 +493,7 @@ fn render_ts(schema: &Schema) -> String {
     out.push_str("} from \"./wire-types.generated\";\n\n");
 
     out.push_str("/**\n");
-    out.push_str(" * Every RPC method the shepherd device speaks. The web-ui client is\n");
+    out.push_str(" * Every RPC method the lunchbox device speaks. The web-ui client is\n");
     out.push_str(" * REST-shaped and doesn't dispatch by name, but references such as\n");
     out.push_str(" * feature-flag names or telemetry event names benefit from a compile-time\n");
     out.push_str(" * check that the string matches a real RPC.\n");

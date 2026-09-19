@@ -16,15 +16,15 @@
 //!    `pkexec <helper> apply-process …` with the right scope name, uid,
 //!    gid, default policy, and allow rules. We can't run a real polkit /
 //!    pkexec / privileged helper in a container, so we drop stub
-//!    executables in front of `PATH` and point `SHEPHERD_FIREWALL_HELPER`
+//!    executables in front of `PATH` and point `LUNCHBOX_FIREWALL_HELPER`
 //!    at one of them.
 //!
 //! Run alongside the other e2e tests with
 //! `cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1`.
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body, proc_inspect};
+use serde_json::json;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -99,8 +99,8 @@ async fn firewall_unsupported_path_gates_activity() -> Result<()> {
         .config_toml(FIREWALL_CONFIG)
         // Force "Unsupported": probe checks file existence first, and this
         // path is guaranteed to not exist.
-        .shepherdd_env(
-            "SHEPHERD_FIREWALL_HELPER",
+        .lunchboxd_env(
+            "LUNCHBOX_FIREWALL_HELPER",
             "/nonexistent/lunchbox-firewall-helper",
         )
         .start()
@@ -187,7 +187,7 @@ async fn firewall_unsupported_path_gates_activity() -> Result<()> {
 #[ignore]
 async fn firewall_supported_path_invokes_helper_with_expected_argv() -> Result<()> {
     let stubs = tempfile::Builder::new()
-        .prefix("shepherd-e2e-fw-stubs-")
+        .prefix("lunchbox-e2e-fw-stubs-")
         .tempdir()
         .context("create stub dir")?;
     let stubs_path = stubs.path().to_path_buf();
@@ -241,11 +241,11 @@ async fn firewall_supported_path_invokes_helper_with_expected_argv() -> Result<(
 
     let h = TestHarness::builder()
         .config_toml(FIREWALL_CONFIG)
-        .shepherdd_env(
-            "SHEPHERD_FIREWALL_HELPER",
+        .lunchboxd_env(
+            "LUNCHBOX_FIREWALL_HELPER",
             helper_path.display().to_string(),
         )
-        .shepherdd_env("PATH", augmented_path)
+        .lunchboxd_env("PATH", augmented_path)
         .start()
         .await?;
     let http = h.http();

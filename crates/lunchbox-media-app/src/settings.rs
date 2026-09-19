@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn load_missing_file_yields_empty() {
-        let dir = std::env::temp_dir().join("shepherd-media-app-test-missing");
+        let dir = std::env::temp_dir().join("lunchbox-media-app-test-missing");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("does-not-exist.toml");
         let s = AppSettings::load(&path).unwrap();
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn save_then_load_is_identity() {
-        let dir = std::env::temp_dir().join("shepherd-media-app-test-save");
+        let dir = std::env::temp_dir().join("lunchbox-media-app-test-save");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.toml");
         let mut s = AppSettings::new();

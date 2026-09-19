@@ -8,14 +8,14 @@
 //! method name and a JSON blob.
 
 use crate::ServerCheck;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 use lunchbox_api::{
     BrightnessInfo, DisplayMode, DisplayState, EntryView, ErrorCode, Event, HealthStatus,
     ReasonCode, Request, Response, ResponseResult, ServiceStateSnapshot, SessionInfo, StopMode,
     VolumeInfo,
 };
 use lunchbox_util::EntryId;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::Duration;
@@ -50,7 +50,7 @@ impl IpcClient {
         match crate::classify_server(stream.as_fd()) {
             ServerCheck::Ours => {}
             // `sudo` reaches the daemon from an operator's own login session,
-            // which is never shepherd's cgroup — the same exemption the daemon
+            // which is never lunchbox's cgroup — the same exemption the daemon
             // makes for root, for the same reason.
             ServerCheck::Foreign { .. } if nix::unistd::getuid().is_root() => {}
             ServerCheck::Foreign { server, ours } => {
@@ -62,7 +62,7 @@ impl IpcClient {
                 );
                 return Err(IpcError::ServerError(format!(
                     "the process listening on this socket is in cgroup {server}, not this \
-                     session's ({ours}); it is not shepherd's daemon"
+                     session's ({ours}); it is not lunchbox's daemon"
                 )));
             }
             ServerCheck::Unknown(e) => {

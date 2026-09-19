@@ -13,8 +13,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use lunchbox_util::ProtectedFile;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 

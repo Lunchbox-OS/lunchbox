@@ -13,7 +13,7 @@ touched until an administrator unlocks it from the companion or web app.
 
 ## Why it is not GTK
 
-Every other shepherd surface is GTK4 (`lunchbox-hud`, `lunchbox-launcher-ui`,
+Every other lunchbox surface is GTK4 (`lunchbox-hud`, `lunchbox-launcher-ui`,
 `lunchbox-pairing-display`). This one is a raw `wayland-client` +
 `smithay-client-toolkit` program drawing with cairo into a shared-memory buffer,
 because it must be a real `ext-session-lock-v1` client rather than a
@@ -23,7 +23,7 @@ The deciding property is what happens when the process dies. Under the lock
 protocol the compositor keeps the session locked and paints a blank screen —
 verified against sway 1.11, which paints it solid red. A layer surface is just a
 window: anything that can reach the compositor can close it, and #148 recorded
-that happening for real, an activity issuing `[app_id=org.shepherd.hud] kill` to
+that happening for real, an activity issuing `[app_id=com.lunchbox-os.hud] kill` to
 remove the HUD for the rest of a session. The same command against a layer-shell
 "lock" would unlock the device.
 
@@ -60,7 +60,7 @@ kiosk-chosen `PATH` is exactly what must not happen here.
 
 **Both of those find nothing unless the binary is installed**, and on a device
 the sibling probe looks in `/usr/bin`, where `lunchboxd` lives. So this crate
-must be listed in `SHEPHERD_BINARIES` in
+must be listed in `LUNCHBOX_BINARIES` in
 [`scripts/lib/build.sh`](../../scripts/lib/build.sh) — the single list that
 `binaries_exist`, `install_bins` and `uninstall_bins` all read, and the one the
 `.deb` inherits, since packaging drives `install.sh` with `DESTDIR` set. It was
@@ -81,11 +81,11 @@ directory was actually looked in.
 
 ## Testing it by hand
 
-Against the headless dev session (`./scripts/shepherd dev headless`):
+Against the headless dev session (`./scripts/lunchbox dev headless`):
 
 ```sh
 set -a; . dev-runtime/headless/session.env; set +a
 ./target/debug/lunchbox-lock &        # covers the screen
-./scripts/shepherd dev shot lock.png  # see it
+./scripts/lunchbox dev shot lock.png  # see it
 pkill -TERM lunchbox-lock             # releases it
 ```

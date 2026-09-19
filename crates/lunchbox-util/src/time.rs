@@ -5,7 +5,7 @@
 //!
 //! # Mock Time for Development
 //!
-//! In debug builds, the `SHEPHERD_MOCK_TIME` environment variable can be set
+//! In debug builds, the `LUNCHBOX_MOCK_TIME` environment variable can be set
 //! to override the system time for all time-sensitive operations. This is useful
 //! for testing availability windows and time-based policies.
 //!
@@ -13,7 +13,7 @@
 //!
 //! Example:
 //! ```bash
-//! SHEPHERD_MOCK_TIME="2025-12-25 14:30:00" ./run-dev
+//! LUNCHBOX_MOCK_TIME="2025-12-25 14:30:00" ./run-dev
 //! ```
 
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, NaiveTime, TimeZone, Timelike, Weekday};
@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Environment variable name for mock time (debug builds only)
-pub const MOCK_TIME_ENV_VAR: &str = "SHEPHERD_MOCK_TIME";
+pub const MOCK_TIME_ENV_VAR: &str = "LUNCHBOX_MOCK_TIME";
 
 /// Cached mock time offset from the real time when the process started.
 /// This allows mock time to advance naturally.
@@ -80,7 +80,7 @@ pub fn is_mock_time_active() -> bool {
 /// Get the current local time, respecting mock time settings in debug builds.
 ///
 /// In release builds, this always returns the real system time.
-/// In debug builds, if `SHEPHERD_MOCK_TIME` is set, this returns a time
+/// In debug builds, if `LUNCHBOX_MOCK_TIME` is set, this returns a time
 /// that advances from the mock time at the same rate as real time.
 #[allow(clippy::disallowed_methods)] // This is the wrapper that provides mock time support
 pub fn now() -> DateTime<Local> {
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn test_mock_time_env_var_name() {
         // Verify the environment variable name is correct
-        assert_eq!(MOCK_TIME_ENV_VAR, "SHEPHERD_MOCK_TIME");
+        assert_eq!(MOCK_TIME_ENV_VAR, "LUNCHBOX_MOCK_TIME");
     }
 
     #[test]
@@ -599,12 +599,12 @@ mod mock_time_integration_tests {
     ///
     /// To manually test:
     /// ```bash
-    /// SHEPHERD_MOCK_TIME="2025-12-25 14:30:00" cargo test
+    /// LUNCHBOX_MOCK_TIME="2025-12-25 14:30:00" cargo test
     /// ```
     #[test]
     fn test_mock_time_documentation() {
         // This test verifies the mock time constants and expected behavior
-        assert_eq!(MOCK_TIME_ENV_VAR, "SHEPHERD_MOCK_TIME");
+        assert_eq!(MOCK_TIME_ENV_VAR, "LUNCHBOX_MOCK_TIME");
 
         // The expected format is documented
         let expected_format = "%Y-%m-%d %H:%M:%S";

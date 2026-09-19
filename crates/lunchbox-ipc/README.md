@@ -1,10 +1,10 @@
 # lunchbox-ipc
 
-IPC layer for Shepherd.
+IPC layer for Lunchbox.
 
 ## Overview
 
-This crate provides the local inter-process communication infrastructure between the Shepherd service (`lunchboxd`) and its clients (launcher UI, HUD overlay, admin tools). It includes:
+This crate provides the local inter-process communication infrastructure between the Lunchbox service (`lunchboxd`) and its clients (launcher UI, HUD overlay, admin tools). It includes:
 
 - **Unix domain socket server** - Listens for client connections
 - **NDJSON protocol** - Newline-delimited JSON message framing
@@ -96,13 +96,13 @@ unprivileged process can neither forge it nor climb out of it.
 
 What is in `lunchboxd`'s cgroup is worth stating in full, because that set *is*
 the trust boundary: sway, `lunchboxd`, the launcher, the HUD, `swayidle` and the
-one-shots sway starts for a keybinding — and also shepherd's own helper
+one-shots sway starts for a keybinding — and also lunchbox's own helper
 subprocesses, which are children of the daemon: the input-compat sidecars,
 `wl-mirror`, the pairing overlay, and the short-lived query commands
 (`wpctl`/`pactl`/`amixer`, `pw-dump`, `brightnessctl`, `pgrep`, `pkcheck`).
 
 Activities are not, by construction — see `lunchbox-host-linux`'s README. Nor is
-`yt-dlp`, which is scoped out of this cgroup despite being shepherd's own
+`yt-dlp`, which is scoped out of this cgroup despite being lunchbox's own
 subprocess, because it parses remote input on a background timer.
 
 The decision is made **once per connection, at accept**, not per call: one
@@ -115,9 +115,9 @@ diagnostic.
 It is an **allow-list**, not a deny-list. "Refuse peers I recognise as
 activities" fails open on exactly the cases it cannot classify, and there is a
 verified escape that lands in that gap: an activity can ask `systemd --user` to
-start a process for it in a cgroup that is in no shepherd scope at all. That
+start a process for it in a cgroup that is in no lunchbox scope at all. That
 process is refused here because it is not *in `lunchboxd`'s cgroup*, which is a
-different question from whether it is in a scope shepherd made.
+different question from whether it is in a scope lunchbox made.
 
 `PeerPolicy::unrestricted()` restores the old uid-only classification; the
 daemon uses it for `--no-restrict-ipc-peers`. See `src/peer.rs` for how the
@@ -127,12 +127,12 @@ the measurements behind it.
 
 `ClientRole` still rides on `ClientInfo` and is recorded in the audit log, but
 nothing consults it at dispatch: once the allow-list is in place every accepted
-peer is either root or shepherd's own code, so a per-method tier split would
+peer is either root or lunchbox's own code, so a per-method tier split would
 have no security content to enforce.
 
 ### Exercising the armed check without a device
 
-`PeerPolicy::restricted()` degrades wherever shepherd's cgroup is one an
+`PeerPolicy::restricted()` degrades wherever lunchbox's cgroup is one an
 activity could join, which is every stack started from a shell — so a dev
 session never runs the enforced path. A **system**-manager scope owned by the
 right uid is not delegated, which is structurally what a logind session scope
@@ -151,7 +151,7 @@ correctly, since the check separates nothing when everything shares its cgroup.
 Look for `Management socket accepts only this session and root`; any other line
 means it degraded, and says why.
 
-For a whole session rather than a bare daemon, `shepherd dev headless
+For a whole session rather than a bare daemon, `lunchbox dev headless
 --harden-ipc-peers` does the same thing around sway, and refuses to hand back a
 session that degraded — the failure it exists to prevent, since a degraded
 session looks identical from the outside. Measured there: the launcher, the HUD
@@ -190,7 +190,7 @@ So the client checks who answered, exactly as the server checks who called.
 | Our own cgroup unreadable | accepted, with a warning — nothing an activity does causes this, and refusing would leave a device with a launcher that will not start |
 
 Root is exempt, because `sudo` reaches the daemon from a login session that is
-never shepherd's cgroup — the same exemption the server makes.
+never lunchbox's cgroup — the same exemption the server makes.
 `IpcClient::connect_unverified` exists for clients that legitimately live
 outside the session; the launcher, the HUD and the one-shots must never use it,
 since they are precisely the clients an impostor is worth deceiving.
@@ -302,7 +302,7 @@ The socket is created with mode `0660`:
 - Group can read/write
 - Others have no access
 
-This allows the service to run as a dedicated user while permitting group members (e.g., `shepherd` group) to connect.
+This allows the service to run as a dedicated user while permitting group members (e.g., `lunchbox` group) to connect.
 
 ## Rate Limiting
 

@@ -1,9 +1,9 @@
 //! SQLite-based store implementation
 
 use chrono::{DateTime, Local, NaiveDate};
-use rusqlite::{Connection, OptionalExtension, params};
 use lunchbox_api::{AudioOutput, AudioOutputKind, AudioOutputRecord, DailyOverride};
 use lunchbox_util::{EntryId, LimitSubject};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;

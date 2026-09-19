@@ -16,7 +16,7 @@
 //! * **Not a shared secret.** Under one uid, any token a trusted client can
 //!   read — from the environment, from argv, from a file — an activity can read
 //!   too. Peer credentials need no secret, which is why they survive.
-//! * **Not the peer's binary.** `/usr/local/bin/shepherd-launcher` is
+//! * **Not the peer's binary.** `/usr/local/bin/lunchbox-launcher` is
 //!   executable by that uid, so an activity can `exec` it and be byte-identical
 //!   by `comm`, `/proc/pid/exe` and `cmdline`. Identity has to come from
 //!   provenance, not from what is running.
@@ -46,8 +46,8 @@
 //! on its response, so that is an invariant to keep rather than a limitation to
 //! work around.
 
-use nix::libc;
 use lunchbox_api::ClientRole;
+use nix::libc;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
@@ -296,7 +296,7 @@ pub fn kernel_supports_peer_cgroup() -> bool {
 /// the peer check was actually exercised. Set this on a runner whose kernel is
 /// known to be above the floor and the suite starts insisting on it, so the
 /// coverage cannot quietly disappear again.
-pub const REQUIRE_PEER_CGROUP_ENV: &str = "SHEPHERD_REQUIRE_PEER_CGROUP";
+pub const REQUIRE_PEER_CGROUP_ENV: &str = "LUNCHBOX_REQUIRE_PEER_CGROUP";
 
 /// Whether `test` should bail out because this kernel cannot support it.
 ///
@@ -331,7 +331,7 @@ pub fn skip_without_peer_cgroup(test: &str) -> bool {
 /// were measured, not assumed.
 ///
 /// So the client checks who answered, the same way the daemon checks who
-/// called. Shepherd's own clients — the launcher, the HUD, the one-shots sway
+/// called. Lunchbox's own clients — the launcher, the HUD, the one-shots sway
 /// starts — live in the daemon's cgroup, so "the server is in my cgroup" is
 /// exactly the question, and an activity's listener cannot pass it: it is in a
 /// scope of its own by construction.
@@ -407,7 +407,7 @@ impl std::fmt::Display for Rejection {
 /// classified. A deny-list — "refuse peers I recognise as activities" — fails
 /// open on precisely the cases it cannot classify, and there is a verified
 /// escape that lands in exactly that gap: an activity can ask `systemd --user`
-/// to start a process for it in a cgroup that is in no shepherd scope at all.
+/// to start a process for it in a cgroup that is in no lunchbox scope at all.
 /// That process is refused here because it is not *in lunchboxd's own cgroup*,
 /// which is a different question from whether it is in a scope we made.
 #[derive(Debug, Clone)]
@@ -625,7 +625,7 @@ mod tests {
         let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let err = policy
             .classify(a.as_fd(), Some(PEER_UID))
-            .expect_err("a peer outside shepherd's cgroup must be refused");
+            .expect_err("a peer outside lunchbox's cgroup must be refused");
         assert!(
             err.reason.contains("not the trusted one"),
             "unhelpful refusal: {}",
@@ -671,7 +671,7 @@ mod tests {
         if skip_without_peer_cgroup("root_is_accepted_from_any_cgroup") {
             return;
         }
-        // `sudo shepherd …` comes from the operator's own login session, which
+        // `sudo lunchbox …` comes from the operator's own login session, which
         // is never lunchboxd's cgroup. Without this the check would lock an
         // administrator out of their own device.
         let policy = PeerPolicy {
@@ -726,7 +726,7 @@ mod tests {
         ));
         // A transient scope in the system manager, where activities go.
         assert!(!is_delegated_user_cgroup(
-            "/system.slice/shepherd-abc.scope"
+            "/system.slice/lunchbox-abc.scope"
         ));
         // Not the user manager, just something that looks like it.
         assert!(!is_delegated_user_cgroup(

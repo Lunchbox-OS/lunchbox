@@ -1,0 +1,8 @@
+node_modules/
+dist/*
+!dist/.gitkeep
+dist-standalone/
+.cache/
+# Built by `lunchbox build config-wasm` (wasm-pack) from
+# crates/lunchbox-config-wasm. Generated, not source.
+src/config/wasm/

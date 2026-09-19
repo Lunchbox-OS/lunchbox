@@ -117,7 +117,7 @@ impl LauncherApp {
 
     pub fn run(&self) -> i32 {
         let app = gtk4::Application::builder()
-            .application_id("org.shepherd.launcher")
+            .application_id("com.lunchbox-os.launcher")
             .build();
 
         let socket_path = self.socket_path.clone();
@@ -142,7 +142,7 @@ impl LauncherApp {
         // Create main window
         let window = gtk4::ApplicationWindow::builder()
             .application(app)
-            .title("Shepherd Launcher")
+            .title("Lunchbox Launcher")
             .default_width(1280)
             .default_height(720)
             .build();

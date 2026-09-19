@@ -27,14 +27,14 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ShepherdMedia">
+        android:theme="@style/Theme.LunchboxMedia">
 
         <!-- A NativeActivity subclass: it loads the Rust cdylib named below and
              calls its android_main entry point exactly as NativeActivity does,
              and additionally owns the SurfaceView that mpv decodes video into
-             (see ShepherdMediaActivity). -->
+             (see LunchboxMediaActivity). -->
         <activity
-            android:name=".ShepherdMediaActivity"
+            android:name=".LunchboxMediaActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
             android:exported="true"
             android:launchMode="singleTask"

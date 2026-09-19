@@ -1,8 +1,8 @@
 //! Event types for lunchboxd -> client streaming
 
 use chrono::{DateTime, Local};
-use serde::{Deserialize, Serialize};
 use lunchbox_util::{EntryId, SessionId};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::types::default_confirm_on_close;

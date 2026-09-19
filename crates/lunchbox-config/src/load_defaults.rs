@@ -48,8 +48,8 @@
 //! are slider extents rather than a mirror of policy. Adding them here would
 //! make the generated file a grab-bag of unrelated literals.
 
-use serde::Serialize;
 use lunchbox_api::HudOrientation;
+use serde::Serialize;
 
 use crate::internet::{DEFAULT_INTERNET_CHECK_INTERVAL, DEFAULT_INTERNET_CHECK_TIMEOUT};
 use crate::policy::{

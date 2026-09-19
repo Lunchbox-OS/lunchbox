@@ -73,7 +73,7 @@ fn android_main(app: android_activity::AndroidApp) {
         // Ask glutin for an EGL config with an alpha channel. Without it the
         // window has no alpha to be transparent *with*, and the video
         // SurfaceView behind it never shows through — see `clear_color` in
-        // `ui.rs` and the translucent window declared in Theme.ShepherdMedia.
+        // `ui.rs` and the translucent window declared in Theme.LunchboxMedia.
         viewport: egui::ViewportBuilder::default().with_transparent(true),
         ..Default::default()
     };

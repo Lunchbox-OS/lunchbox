@@ -64,7 +64,7 @@ const SETTLE: Duration = Duration::from_millis(300);
 
 /// Whether `/dev/uinput` can be opened for writing.
 ///
-/// Every synthetic input in shepherd goes through it — the touch and gamepad
+/// Every synthetic input in lunchbox goes through it — the touch and gamepad
 /// bridges, and the HUD's page-turn buttons — and on a device where the node
 /// is missing or not writable by the session user, all of them fail at the
 /// moment someone tries to use them. Cheap enough to run from a diagnostics

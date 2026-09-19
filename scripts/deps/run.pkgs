@@ -1,4 +1,4 @@
-# Runtime system packages for shepherd-launcher
+# Runtime system packages for lunchbox-launcher
 # These are required to run the compiled binaries
 # One package per line, comments start with #
 
@@ -27,13 +27,13 @@ libudev1
 #
 # mpv also needs a libva driver to decode video on the GPU, and neither depends
 # on nor recommends one. Which driver is right depends on the GPU, so they are
-# not listed here — `shepherd deps install run` picks them from the detected
+# not listed here — `lunchbox deps install run` picks them from the detected
 # hardware via install_media_deps in scripts/lib/admin.sh (also reachable as
-# `shepherd-admin va-api install`).
+# `lunchbox-admin va-api install`).
 mpv
 
 # Python venv support — needed to create the yt-dlp virtualenv.
-# yt-dlp itself is installed via pip into /opt/shepherd/ytdlp-venv so it
+# yt-dlp itself is installed via pip into /opt/lunchbox/ytdlp-venv so it
 # stays up-to-date independent of the Ubuntu package archive.
 python3-venv
 

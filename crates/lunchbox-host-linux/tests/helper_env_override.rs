@@ -5,11 +5,11 @@
 //! it would decide each other's outcome by running order.
 
 /// The environment must not be able to name a binary either — the same file
-/// that sets `PATH` sets `SHEPHERD_*_BIN` and `SHEPHERD_FIREWALL_HELPER`.
+/// that sets `PATH` sets `LUNCHBOX_*_BIN` and `LUNCHBOX_FIREWALL_HELPER`.
 #[test]
 fn environment_overrides_are_ignored_unless_development_enables_them() {
     // SAFETY: as above.
-    unsafe { std::env::set_var("SHEPHERD_FIREWALL_HELPER", "/tmp/evil-helper") };
+    unsafe { std::env::set_var("LUNCHBOX_FIREWALL_HELPER", "/tmp/evil-helper") };
     assert_ne!(
         lunchbox_host_linux::firewall_helper_path(),
         "/tmp/evil-helper",
@@ -23,5 +23,5 @@ fn environment_overrides_are_ignored_unless_development_enables_them() {
         "a development session should still be able to point at a built helper"
     );
     lunchbox_host_linux::helpers::set_trust_environment(false);
-    unsafe { std::env::remove_var("SHEPHERD_FIREWALL_HELPER") };
+    unsafe { std::env::remove_var("LUNCHBOX_FIREWALL_HELPER") };
 }

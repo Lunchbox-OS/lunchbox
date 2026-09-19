@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Version management for shepherd-launcher.
+# Version management for lunchbox-launcher.
 #
 # The canonical version string lives in the repo-root VERSION file. It is the
 # single place to bump; everything else derives from it:
 #
-#   * scripts/shepherd reads it at runtime (see `VERSION=` in scripts/shepherd).
+#   * scripts/lunchbox reads it at runtime (see `VERSION=` in scripts/lunchbox).
 #   * companion-android's Gradle build reads it at configure time
 #     (companion-android/app/build.gradle.kts).
 #
 # Cargo and npm cannot read a file at manifest-parse time, so their version
-# literals are *written* from the canonical file by `shepherd version set` and
-# *verified* against it by `shepherd version check` (which CI runs so drift
+# literals are *written* from the canonical file by `lunchbox version set` and
+# *verified* against it by `lunchbox version check` (which CI runs so drift
 # fails loudly). The synced literals live in:
 #
 #   * Cargo.toml                              [workspace.package] version
 #   * crates/lunchbox-firewall-bpf/Cargo.toml (excluded from the workspace, so
 #                                             it can't use version.workspace)
-#   * shepherd-webui/package.json + package-lock.json
+#   * lunchbox-webui/package.json + package-lock.json
 
 # Absolute path to the canonical VERSION file.
 version_file() {
@@ -83,16 +83,16 @@ _version_set_cargo() {
     sed -i -E "0,/^version = \".*\"/s//version = \"$new\"/" "$file"
 }
 
-# `shepherd version` / `shepherd version get` — print the canonical version.
+# `lunchbox version` / `lunchbox version get` — print the canonical version.
 version_get() {
     version_read
 }
 
-# `shepherd version set X.Y.Z` — bump the canonical file and every synced
+# `lunchbox version set X.Y.Z` — bump the canonical file and every synced
 # literal so nothing drifts.
 version_set() {
     local new="${1:-}"
-    [[ -n "$new" ]] || die "Usage: shepherd version set <X.Y.Z>"
+    [[ -n "$new" ]] || die "Usage: lunchbox version set <X.Y.Z>"
     version_validate "$new"
 
     local root
@@ -111,12 +111,12 @@ version_set() {
     # reflow the multi-thousand-line lockfile). --allow-same-version keeps
     # re-runs idempotent; --no-git-tag-version leaves committing to the caller.
     if command_exists npm; then
-        (cd "$root/shepherd-webui" \
+        (cd "$root/lunchbox-webui" \
             && npm version --no-git-tag-version --allow-same-version "$new" \
                 >/dev/null) \
-            || die "npm version failed for shepherd-webui"
+            || die "npm version failed for lunchbox-webui"
     else
-        warn "npm not found; shepherd-webui version left unchanged"
+        warn "npm not found; lunchbox-webui version left unchanged"
     fi
 
     # Refresh the workspace members' pins in Cargo.lock. Offline + best-effort:
@@ -132,10 +132,10 @@ version_set() {
     success "Bumped version: $old -> $new"
     info "Review the changes and commit them together: VERSION, Cargo.toml,"
     info "Cargo.lock, crates/lunchbox-firewall-bpf/Cargo.{toml,lock}, and"
-    info "shepherd-webui/package*.json."
+    info "lunchbox-webui/package*.json."
 }
 
-# `shepherd version check` — fail if any synced literal has drifted from the
+# `lunchbox version check` — fail if any synced literal has drifted from the
 # canonical VERSION file. CI runs this so a hand-edited manifest can't ship a
 # mismatched version.
 version_check() {
@@ -158,13 +158,13 @@ version_check() {
         || mismatches+=("lunchbox-firewall-bpf Cargo.lock: $actual")
 
     if command_exists node; then
-        actual="$(_version_npm "$root/shepherd-webui/package.json")"
-        [[ "$actual" == "$canonical" ]] || mismatches+=("shepherd-webui/package.json: $actual")
+        actual="$(_version_npm "$root/lunchbox-webui/package.json")"
+        [[ "$actual" == "$canonical" ]] || mismatches+=("lunchbox-webui/package.json: $actual")
 
-        actual="$(_version_npm "$root/shepherd-webui/package-lock.json")"
-        [[ "$actual" == "$canonical" ]] || mismatches+=("shepherd-webui/package-lock.json: $actual")
+        actual="$(_version_npm "$root/lunchbox-webui/package-lock.json")"
+        [[ "$actual" == "$canonical" ]] || mismatches+=("lunchbox-webui/package-lock.json: $actual")
     else
-        warn "node not found; skipping shepherd-webui version check"
+        warn "node not found; skipping lunchbox-webui version check"
     fi
 
     if [[ ${#mismatches[@]} -gt 0 ]]; then
@@ -173,13 +173,13 @@ version_check() {
         for m in "${mismatches[@]}"; do
             error "  $m"
         done
-        die "Run 'shepherd version set $canonical' to resync."
+        die "Run 'lunchbox version set $canonical' to resync."
     fi
 
     success "All versions match VERSION ($canonical)"
 }
 
-# Dispatch for `shepherd version [get|set|check]`.
+# Dispatch for `lunchbox version [get|set|check]`.
 version_main() {
     local subcmd="${1:-get}"
     shift || true
@@ -195,24 +195,24 @@ version_main() {
             ;;
         -h|--help|help)
             cat <<EOF
-Usage: shepherd version [command]
+Usage: lunchbox version [command]
 
 The canonical version lives in the repo-root VERSION file.
 
 Commands:
     get              Print the current version (default)
     set <X.Y.Z>      Bump the version everywhere (VERSION, Cargo manifests,
-                     shepherd-webui package.json/lock)
+                     lunchbox-webui package.json/lock)
     check            Verify all synced version literals match VERSION
 
 Examples:
-    shepherd version
-    shepherd version set 0.2.0
-    shepherd version check
+    lunchbox version
+    lunchbox version set 0.2.0
+    lunchbox version check
 EOF
             ;;
         *)
-            die "Unknown version command: $subcmd (try: shepherd version help)"
+            die "Unknown version command: $subcmd (try: lunchbox version help)"
             ;;
     esac
 }

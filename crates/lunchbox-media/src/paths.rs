@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-/// The `shepherd/media/<leaf>` directory under the user's state home
+/// The `lunchbox/media/<leaf>` directory under the user's state home
 /// (`$XDG_STATE_HOME`, falling back to `$HOME/.local/state`). Returns `None`
 /// when neither environment variable is set, in which case the caller does
 /// without persistence.
@@ -17,5 +17,5 @@ pub fn media_state_dir(leaf: &str) -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state"))
         })?;
-    Some(state_home.join("shepherd").join("media").join(leaf))
+    Some(state_home.join("lunchbox").join("media").join(leaf))
 }

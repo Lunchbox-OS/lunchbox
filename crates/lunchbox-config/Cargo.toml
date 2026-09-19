@@ -6,8 +6,8 @@ license.workspace = true
 description = "Configuration parsing and validation for lunchboxd"
 
 [[bin]]
-name = "shepherd-validate-config"
-path = "src/bin/shepherd-validate-config.rs"
+name = "lunchbox-validate-config"
+path = "src/bin/lunchbox-validate-config.rs"
 
 [dependencies]
 lunchbox-util = { workspace = true }

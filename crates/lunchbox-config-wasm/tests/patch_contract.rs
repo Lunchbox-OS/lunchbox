@@ -2,14 +2,14 @@
 //!
 //! Every shape in `patch_shapes.json` must deserialize into the variant it
 //! claims to be *and* have the effect the editor expects when applied. The
-//! TypeScript half lives in `shepherd-webui/src/config/doc/patches.test.ts` and
+//! TypeScript half lives in `lunchbox-webui/src/config/doc/patches.test.ts` and
 //! asserts its builders produce exactly these objects.
 //!
 //! Without this pairing, a renamed serde tag or field would leave both suites
 //! green while the editor silently stopped being able to edit anything.
 
-use serde_json::Value as Json;
 use lunchbox_config_wasm::{ConfigDoc, Patch};
+use serde_json::Value as Json;
 
 const SHAPES: &str = include_str!("patch_shapes.json");
 

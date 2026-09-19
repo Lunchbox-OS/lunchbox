@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use lunchbox_media_core::{LibraryError, load_library};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct Manifest {

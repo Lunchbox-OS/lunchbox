@@ -31,10 +31,10 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDate};
-use serde::{Deserialize, Serialize};
 use lunchbox_api::AudioOutput;
 use lunchbox_store::{AuditEvent, StateSnapshot, StoreError};
 use lunchbox_util::{EntryId, LimitSubject, ProtectedFile};
+use serde::{Deserialize, Serialize};
 
 use methods::{wire_ty, with_store_methods};
 
@@ -74,12 +74,12 @@ pub const PROTO_VERSION: u32 = 3;
 /// also every activity (`docs/ai/history/2026-08-29 004`). A client that could
 /// be pointed at another socket by an environment variable would be a way to
 /// put something else in the custodian's place.
-pub const STATE_USER: &str = "shepherd-state";
+pub const STATE_USER: &str = "lunchbox-state";
 
 /// Where the custodian's socket lives for `user`.
 ///
 /// Assembled from a compiled-in constant for the same reason [`STATE_USER`] is
-/// one. `lunchbox_util::paths` reads `SHEPHERD_DATA_DIR` and `SHEPHERD_SOCKET`
+/// one. `lunchbox_util::paths` reads `LUNCHBOX_DATA_DIR` and `LUNCHBOX_SOCKET`
 /// from the environment; nothing here does.
 pub fn socket_path(user: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/run/lunchboxd/state").join(format!("{user}.sock"))

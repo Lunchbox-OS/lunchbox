@@ -758,7 +758,7 @@ impl BleManagementConfig {
             device_name: raw
                 .device_name
                 .clone()
-                .unwrap_or_else(|| "shepherd".to_string()),
+                .unwrap_or_else(|| "lunchbox".to_string()),
             adapter: raw
                 .adapter
                 .as_ref()

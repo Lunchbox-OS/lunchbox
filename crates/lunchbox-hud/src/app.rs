@@ -137,11 +137,11 @@ fn rebuild_taskbar(row: &gtk4::Box, windows: &[lunchbox_api::WindowInfo]) {
 fn shell_window_id(windows: &[lunchbox_api::WindowInfo]) -> Option<u64> {
     windows
         .iter()
-        .find(|w| w.app_id.as_deref() == Some("org.shepherd.launcher"))
+        .find(|w| w.app_id.as_deref() == Some("com.lunchbox-os.launcher"))
         .map(|w| w.id)
 }
 
-/// The windows a caregiver opened: everything that is not shepherd's own
+/// The windows a caregiver opened: everything that is not lunchbox's own
 /// furniture, **including the ones stashed on the scratchpad**. What the
 /// taskbar lists.
 ///
@@ -157,7 +157,7 @@ fn shell_window_id(windows: &[lunchbox_api::WindowInfo]) -> Option<u64> {
 fn admin_windows(windows: &[lunchbox_api::WindowInfo]) -> Vec<lunchbox_api::WindowInfo> {
     windows
         .iter()
-        .filter(|w| w.owner != lunchbox_api::WindowOwner::Shepherd)
+        .filter(|w| w.owner != lunchbox_api::WindowOwner::Lunchbox)
         .cloned()
         .collect()
 }
@@ -167,7 +167,7 @@ fn admin_windows(windows: &[lunchbox_api::WindowInfo]) -> Vec<lunchbox_api::Wind
 ///
 /// A separate question from what the taskbar lists, and the two must not share
 /// an answer. The preloaded Steam client sits stashed for the life of the
-/// session and the compositor reports it as belonging to nothing shepherd
+/// session and the compositor reports it as belonging to nothing lunchbox
 /// knows about — `snap run` re-execs, so the pid the host recorded is not the
 /// pid that draws — so counting stashed windows here would mean the "X" never
 /// offered the way out on any device that preloads Steam. Which is every device
@@ -259,7 +259,7 @@ const BASE_SLIDER_LENGTH: i32 = 140;
 
 /// Whether the bar should be carrying the page-turn buttons.
 ///
-/// Debug builds additionally honour `SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS`,
+/// Debug builds additionally honour `LUNCHBOX_HUD_DEBUG_FORCE_PAGE_BUTTONS`,
 /// because the reading session is the bar's worst case for room and there is
 /// otherwise no way to *look* at it: the headless dev session has no reader to
 /// start (okular is not installed there), so every previous attempt at this —
@@ -271,7 +271,7 @@ const BASE_SLIDER_LENGTH: i32 = 140;
 /// keys to whatever holds focus.
 fn show_page_buttons(can_turn_pages: bool) -> bool {
     #[cfg(debug_assertions)]
-    if std::env::var_os("SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS").is_some() {
+    if std::env::var_os("LUNCHBOX_HUD_DEBUG_FORCE_PAGE_BUTTONS").is_some() {
         return true;
     }
     can_turn_pages
@@ -546,7 +546,7 @@ impl HudApp {
         height: i32,
     ) -> Self {
         let app = gtk4::Application::builder()
-            .application_id("org.shepherd.hud")
+            .application_id("com.lunchbox-os.hud")
             .build();
 
         Self {
@@ -1112,7 +1112,7 @@ fn build_hud_content(
     let lock_button = gtk4::Button::builder()
         .child(&lock_icon)
         .has_frame(false)
-        .tooltip_text("Lock the screen (unlock from the Shepherd app)")
+        .tooltip_text("Lock the screen (unlock from the Lunchbox app)")
         .visible(false)
         .build();
     lock_button.add_css_class("indicator-button");
@@ -1361,7 +1361,7 @@ fn build_hud_content(
 
     // Debug-build test hook for the headless dev harness, which has no way to
     // click a GTK button (the synthetic pointer does not fire `clicked`; see the
-    // `headless-dev` skill). With `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
+    // `headless-dev` skill). With `LUNCHBOX_HUD_DEBUG_CONFIRM_TRIGGER=<path>`
     // set, creating `<path>` pops the close-confirmation prompt, `<path>.reset`
     // pops the reset one, `<path>.volume` / `<path>.brightness` open the two
     // pop-out controls, `<path>.down` dismisses whichever is up, and
@@ -1369,7 +1369,7 @@ fn build_hud_content(
     // every file is consumed. That is enough to drive open/close cycles — and scale
     // changes across them — from a shell. Never compiled into a release build.
     #[cfg(debug_assertions)]
-    if let Ok(trigger) = std::env::var("SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER") {
+    if let Ok(trigger) = std::env::var("LUNCHBOX_HUD_DEBUG_CONFIRM_TRIGGER") {
         let up = std::path::PathBuf::from(&trigger);
         let up_reset = std::path::PathBuf::from(format!("{trigger}.reset"));
         let down = std::path::PathBuf::from(format!("{trigger}.down"));
@@ -3169,7 +3169,7 @@ mod tests {
         }
     }
 
-    /// The taskbar lists what the caregiver opened, not shepherd's own
+    /// The taskbar lists what the caregiver opened, not lunchbox's own
     /// furniture: the launcher and the HUD are always mapped, and buttons for
     /// them would be a row that never empties — which is also what the "X"
     /// keys its "leave the mode" state off.
@@ -3177,8 +3177,8 @@ mod tests {
     fn the_taskbar_lists_only_what_the_caregiver_opened() {
         use lunchbox_api::WindowOwner;
         let windows = vec![
-            window(1, "org.shepherd.launcher", WindowOwner::Shepherd),
-            window(2, "org.shepherd.hud", WindowOwner::Shepherd),
+            window(1, "com.lunchbox-os.launcher", WindowOwner::Lunchbox),
+            window(2, "com.lunchbox-os.hud", WindowOwner::Lunchbox),
             window(3, "steam", WindowOwner::Unowned),
             window(4, "org.gnome.Nautilus", WindowOwner::Unowned),
         ];
@@ -3186,7 +3186,7 @@ mod tests {
         assert_eq!(listed, vec![3, 4]);
 
         // With nothing of the caregiver's left, the "X" becomes the way out.
-        let only_ours = vec![window(1, "org.shepherd.launcher", WindowOwner::Shepherd)];
+        let only_ours = vec![window(1, "com.lunchbox-os.launcher", WindowOwner::Lunchbox)];
         assert!(admin_windows(&only_ours).is_empty());
         assert!(admin_windows_on_screen(&only_ours).is_empty());
     }
@@ -3215,7 +3215,7 @@ mod tests {
         stashed.in_scratchpad = true;
         stashed.visible = false;
         let windows = vec![
-            window(1, "org.shepherd.launcher", WindowOwner::Shepherd),
+            window(1, "com.lunchbox-os.launcher", WindowOwner::Lunchbox),
             stashed,
         ];
         assert_eq!(
@@ -3238,7 +3238,7 @@ mod tests {
         use lunchbox_api::WindowOwner;
         let windows = vec![
             window(7, "steam", WindowOwner::Unowned),
-            window(9, "org.shepherd.launcher", WindowOwner::Shepherd),
+            window(9, "com.lunchbox-os.launcher", WindowOwner::Lunchbox),
         ];
         assert_eq!(shell_window_id(&windows), Some(9));
         assert_eq!(shell_window_id(&windows[..1]), None);

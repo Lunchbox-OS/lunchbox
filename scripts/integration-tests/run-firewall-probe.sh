@@ -7,11 +7,11 @@
 # writes the results atomically to a log file the orchestrator polls.
 #
 # Required env (set by the test via [entries.kind.env]):
-#   SHEPHERD_FIREWALL_PROBE_LOG     log path (atomically rewritten)
-#   SHEPHERD_FIREWALL_PROBE_ALLOW   host:port that should be reachable
-#   SHEPHERD_FIREWALL_PROBE_DENY    host:port that should be blocked
+#   LUNCHBOX_FIREWALL_PROBE_LOG     log path (atomically rewritten)
+#   LUNCHBOX_FIREWALL_PROBE_ALLOW   host:port that should be reachable
+#   LUNCHBOX_FIREWALL_PROBE_DENY    host:port that should be blocked
 # Optional:
-#   SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS  seconds to keep the activity
+#   LUNCHBOX_FIREWALL_PROBE_HOLD_SECONDS  seconds to keep the activity
 #                                         alive after writing the log
 #                                         (default 120). The orchestrator
 #                                         normally stops the activity well
@@ -19,16 +19,16 @@
 
 set -uo pipefail
 
-LOG="${SHEPHERD_FIREWALL_PROBE_LOG:?SHEPHERD_FIREWALL_PROBE_LOG required}"
-ALLOW="${SHEPHERD_FIREWALL_PROBE_ALLOW:?SHEPHERD_FIREWALL_PROBE_ALLOW required}"
-DENY="${SHEPHERD_FIREWALL_PROBE_DENY:?SHEPHERD_FIREWALL_PROBE_DENY required}"
-HOLD="${SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS:-120}"
+LOG="${LUNCHBOX_FIREWALL_PROBE_LOG:?LUNCHBOX_FIREWALL_PROBE_LOG required}"
+ALLOW="${LUNCHBOX_FIREWALL_PROBE_ALLOW:?LUNCHBOX_FIREWALL_PROBE_ALLOW required}"
+DENY="${LUNCHBOX_FIREWALL_PROBE_DENY:?LUNCHBOX_FIREWALL_PROBE_DENY required}"
+HOLD="${LUNCHBOX_FIREWALL_PROBE_HOLD_SECONDS:-120}"
 # Snap/Flatpak entries have an inherent race: lunchboxd polls for the
 # runtime's scope cgroup to appear, then invokes the helper to attach BPF.
 # That can lag the activity's start by hundreds of ms. Wait so the probes
 # happen *after* the BPF program is attached. Process-kind entries don't
 # have the race (BPF is attached at scope creation), so default 0.
-INITIAL_DELAY="${SHEPHERD_FIREWALL_PROBE_INITIAL_DELAY:-0}"
+INITIAL_DELAY="${LUNCHBOX_FIREWALL_PROBE_INITIAL_DELAY:-0}"
 
 # Probe a host:port over TCP. Returns "OPEN" on successful connect, "BLOCKED"
 # otherwise. Uses bash's /dev/tcp (so no python/curl/nc dependency).

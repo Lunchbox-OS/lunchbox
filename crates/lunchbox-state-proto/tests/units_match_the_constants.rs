@@ -5,7 +5,7 @@
 //! systemd nor polkit can call Rust: where the socket is, where the state
 //! directory is, which uid owns it, and which uid may end a session. The unit
 //! files say the first three in `ListenStream=`, `StateDirectory=` and `User=`,
-//! and `50-shepherd-session-guard.rules` says the fourth; this crate says them
+//! and `50-lunchbox-session-guard.rules` says the fourth; this crate says them
 //! in [`socket_path`], [`state_dir`] and [`STATE_USER`].
 //!
 //! A drift between them fails in the least helpful way available. The service
@@ -128,9 +128,9 @@ fn the_service_unit_owns_the_directory_the_client_stats() {
 #[test]
 fn the_polkit_rule_names_the_user_the_daemon_runs_as() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dist/polkit/50-shepherd-session-guard.rules")
+        .join("../../dist/polkit/50-lunchbox-session-guard.rules")
         .canonicalize()
-        .expect("dist/polkit/50-shepherd-session-guard.rules is where packaging expects it");
+        .expect("dist/polkit/50-lunchbox-session-guard.rules is where packaging expects it");
     let rule = std::fs::read_to_string(&path).expect("reading the polkit rule");
     let granting: String = rule
         .lines()

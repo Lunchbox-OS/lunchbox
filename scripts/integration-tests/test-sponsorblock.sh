@@ -25,7 +25,7 @@
 #
 # Prerequisites:
 #   - strace, python3
-#   - the headless dev session's dependencies (`shepherd deps install agent`)
+#   - the headless dev session's dependencies (`lunchbox deps install agent`)
 #   - a network (the "off" arm still plays a YouTube video, which is the point:
 #     it proves the silence is about SponsorBlock and not about being offline)
 
@@ -45,14 +45,14 @@ command -v python3 >/dev/null 2>&1 || fail "python3 not found on PATH"
 
 WORK="$(mktemp -d)"
 PORT="${SPONSORBLOCK_TEST_PORT:-8391}"
-CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/shepherd/media/sponsorblock"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/lunchbox/media/sponsorblock"
 STARTED_SESSION=0
 LISTENER=""
 
 cleanup() {
     [[ -n "$LISTENER" ]] && kill "$LISTENER" 2>/dev/null || true
     pkill -x lunchbox-media 2>/dev/null || true
-    [[ "$STARTED_SESSION" == 1 ]] && ./scripts/shepherd dev stop >/dev/null 2>&1 || true
+    [[ "$STARTED_SESSION" == 1 ]] && ./scripts/lunchbox dev stop >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -109,7 +109,7 @@ cargo build -p lunchbox-media
 
 if [[ ! -f dev-runtime/headless/session.env ]]; then
     echo "[test] Booting the headless session..."
-    ./scripts/shepherd dev headless --no-build >/dev/null || fail "could not boot the headless session"
+    ./scripts/lunchbox dev headless --no-build >/dev/null || fail "could not boot the headless session"
     STARTED_SESSION=1
 fi
 set -a

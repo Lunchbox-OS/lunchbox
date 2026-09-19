@@ -34,5 +34,5 @@ compositor applies the user's own keyboard layout to the raw keycodes.
 ## Permissions
 
 Emitting through uinput requires write access to `/dev/uinput`. The kiosk user
-is granted this via a udev rule installed by `scripts/shepherd install`; see
+is granted this via a udev rule installed by `scripts/lunchbox install`; see
 `docs/INSTALL.md`.

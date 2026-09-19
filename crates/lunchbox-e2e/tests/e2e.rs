@@ -1,4 +1,4 @@
-//! End-to-end tests for the full shepherd stack.
+//! End-to-end tests for the full lunchbox stack.
 //!
 //! Each `#[ignore]` test boots its own Sway, lunchboxd, and (optionally) UIs
 //! in an isolated temp environment, then drives the daemon through the
@@ -9,9 +9,9 @@
 //! ```
 
 use anyhow::{Context, Result};
+use lunchbox_e2e::{HarnessProcess, TestHarness, json_body, proc_inspect};
 use nix::sys::signal::Signal;
 use serde_json::json;
-use lunchbox_e2e::{HarnessProcess, TestHarness, json_body, proc_inspect};
 use std::time::Duration;
 
 /// Boot test: lunchboxd comes up with a working `health` RPC, IPC
@@ -32,9 +32,9 @@ async fn boot_health_and_clean_shutdown() -> Result<()> {
     ipc.ping().await.context("IPC ping")?;
 
     // Clean SIGTERM shutdown
-    h.signal(HarnessProcess::Shepherdd, Signal::SIGTERM)?;
+    h.signal(HarnessProcess::Lunchboxd, Signal::SIGTERM)?;
     let status = h
-        .wait_for_exit(HarnessProcess::Shepherdd, Duration::from_secs(5))
+        .wait_for_exit(HarnessProcess::Lunchboxd, Duration::from_secs(5))
         .await?;
     assert!(status.success(), "lunchboxd exit status: {status:?}");
 

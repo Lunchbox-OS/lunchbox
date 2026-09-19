@@ -1,7 +1,7 @@
 # lunchbox-config-wasm
 
 The comment-preserving document model behind the web config editor
-(`shepherd-webui/src/config/`).
+(`lunchbox-webui/src/config/`).
 
 ## Why this exists
 
@@ -55,7 +55,7 @@ and exact down to whitespace.
 `availabilityForEntry()` an `AvailabilityView`. All three have generated
 TypeScript mirrors, so none of them is a shape anyone keeps in step by hand:
 
-- `RawConfig` -> `shepherd-webui/src/config/model/config.generated.ts`, from
+- `RawConfig` -> `lunchbox-webui/src/config/model/config.generated.ts`, from
   `lunchbox-config`'s own schema.
 - `Report` and `AvailabilityView` -> `.../model/wasm-types.generated.ts`, from
   this crate's, behind the `schema` feature.

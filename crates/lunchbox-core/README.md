@@ -1,10 +1,10 @@
 # lunchbox-core
 
-Core policy engine and session state machine for Shepherd.
+Core policy engine and session state machine for Lunchbox.
 
 ## Overview
 
-This crate is the heart of Shepherd, containing all policy evaluation and session management logic. It is completely platform-agnostic and makes no assumptions about the underlying operating system or display environment.
+This crate is the heart of Lunchbox, containing all policy evaluation and session management logic. It is completely platform-agnostic and makes no assumptions about the underlying operating system or display environment.
 
 ### Responsibilities
 

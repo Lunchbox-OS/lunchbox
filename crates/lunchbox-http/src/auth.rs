@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 /// Name of the session cookie. Prefixed so it cannot be confused with anything
 /// an activity's browser profile might set on the same host.
-pub const SESSION_COOKIE: &str = "shepherd_session";
+pub const SESSION_COOKIE: &str = "lunchbox_session";
 
 /// Who the request turned out to be.
 ///

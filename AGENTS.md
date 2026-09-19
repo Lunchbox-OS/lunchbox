@@ -16,7 +16,7 @@ Agents: please use the existing documentation for setup.
 Please ensure that your changes build and pass tests and lint, and run `cargo fmt --all` to match your changes to the rest of the code.
 
 To see or verify a UI change end-to-end without a graphical login session, drive
-the headless dev session (`./scripts/shepherd dev headless` → `dev shot` →
+the headless dev session (`./scripts/lunchbox dev headless` → `dev shot` →
 `dev stop`); see the `headless-dev` skill and the "Headless development" section
 of <CONTRIBUTING.md>. Prefer this over `./run-dev`, which requires a login session.
 
@@ -24,7 +24,7 @@ If you changed the example configuration at <config.example.toml>, make sure tha
 
 Each of the Rust crates in <crates> contains a README.md that describes each at a high level.
 
-<.github/workflows/ci.yml> and <docs/INSTALL.md> describes exact environment setup, especially if coming from Ubuntu 24.04 (shepherd-launcher requires 26.04).
+<.github/workflows/ci.yml> and <docs/INSTALL.md> describes exact environment setup, especially if coming from Ubuntu 24.04 (lunchbox-launcher requires 26.04).
 
 Historical prompts and design docs provided to agents are placed in <docs/ai/history>. Please refer there for history, and if this prompt is substantial, write it along with any relevant context (like the GitHub issue) to that directory as well.
 

@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use lunchbox_host_api::{ExitStatus, FirewallSpec, HostError, HostResult};
 
 /// Path to the privileged firewall helper. Overridable via
-/// `SHEPHERD_FIREWALL_HELPER` for development installs.
+/// `LUNCHBOX_FIREWALL_HELPER` for development installs.
 pub const DEFAULT_FIREWALL_HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
 
 /// Resolve the firewall helper path, honoring the env override.
@@ -25,7 +25,7 @@ pub fn firewall_helper_path() -> String {
     // polkit pins the action to the default path anyway, so an override that
     // slipped through would fail rather than escalate — this is the belt to
     // that brace.
-    helpers::env_override("SHEPHERD_FIREWALL_HELPER")
+    helpers::env_override("LUNCHBOX_FIREWALL_HELPER")
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| DEFAULT_FIREWALL_HELPER_PATH.to_string())
 }
@@ -39,7 +39,7 @@ pub fn firewall_helper_path() -> String {
 /// `/usr/libexec/lunchbox-firewall-helper`, which is invoked via `pkexec`.
 ///
 /// "Supported" therefore means: the helper is installed AND polkit grants the
-/// current user the `org.shepherd.firewall.apply-process` action without an
+/// current user the `com.lunchbox-os.firewall.apply-process` action without an
 /// auth prompt. Both are checked at startup.
 #[derive(Debug, Clone)]
 pub enum FirewallEnforcementStatus {
@@ -87,8 +87,8 @@ fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
             reason: format!(
                 "lunchbox-firewall-helper not installed at {} -- run \
                  scripts/integration-tests/setup-firewall-dev.sh (dev) or \
-                 `shepherd install firewall` (production), or set \
-                 SHEPHERD_FIREWALL_HELPER to its path",
+                 `lunchbox install firewall` (production), or set \
+                 LUNCHBOX_FIREWALL_HELPER to its path",
                 helper
             ),
         };
@@ -97,9 +97,9 @@ fn probe_firewall_enforcement() -> FirewallEnforcementStatus {
         Ok(()) => FirewallEnforcementStatus::Supported,
         Err(e) => FirewallEnforcementStatus::Unsupported {
             reason: format!(
-                "polkit denies non-prompted access to org.shepherd.firewall.apply-process: \
-                 {}. Install dist/polkit/50-shepherd-firewall.rules and add this user to \
-                 the `shepherd-firewall` group (see scripts/integration-tests/setup-firewall-dev.sh).",
+                "polkit denies non-prompted access to com.lunchbox-os.firewall.apply-process: \
+                 {}. Install dist/polkit/50-lunchbox-firewall.rules and add this user to \
+                 the `lunchbox-firewall` group (see scripts/integration-tests/setup-firewall-dev.sh).",
                 e
             ),
         },
@@ -113,7 +113,7 @@ fn probe_polkit_grant() -> Result<(), String> {
     let output = helpers::command("pkcheck")
         .args([
             "--action-id",
-            "org.shepherd.firewall.apply-process",
+            "com.lunchbox-os.firewall.apply-process",
             "--process",
             &pid.to_string(),
         ])
@@ -138,10 +138,10 @@ fn probe_polkit_grant() -> Result<(), String> {
 ///
 /// The privileged firewall helper already moves an activity out, via a
 /// system-manager scope. This is the unprivileged path for everything that
-/// does not go through it: `systemd-run --user --scope` asks shepherd's own
+/// does not go through it: `systemd-run --user --scope` asks lunchbox's own
 /// user manager for a transient scope. That is enough here even though it is
 /// not enough for the firewall (BPF attach needs the *system* manager), because
-/// all this has to achieve is "not shepherd's cgroup".
+/// all this has to achieve is "not lunchbox's cgroup".
 ///
 /// Snap and flatpak activities need nothing: their runtimes already place them
 /// under `user@<uid>.service/app.slice` — the same fact
@@ -186,7 +186,7 @@ fn probe_activity_isolation() -> ActivityIsolationStatus {
     // XDG_RUNTIME_DIR, a live bus, and the manager itself — the e2e harness,
     // for instance, runs with a temp XDG_RUNTIME_DIR and no bus at all. The
     // only reliable test is the thing we are about to do for real.
-    let scope = format!("shepherd-isolation-probe-{}.scope", std::process::id());
+    let scope = format!("lunchbox-isolation-probe-{}.scope", std::process::id());
     let output = helpers::command("systemd-run")
         .args([
             "--user",
@@ -213,7 +213,7 @@ fn probe_activity_isolation() -> ActivityIsolationStatus {
 }
 
 /// Build the argv prefix that launches an activity into a transient scope of
-/// its own in shepherd's *user* manager (issue #144).
+/// its own in lunchbox's *user* manager (issue #144).
 ///
 /// `--collect` so the scope is reaped when the activity exits: there is no
 /// teardown call to forget, unlike the privileged path's `stop_firewall_scope`.
@@ -234,12 +234,12 @@ pub fn user_scope_argv_prefix(scope_name: &str) -> Vec<String> {
     ]
 }
 
-/// The argv prefix that puts one of shepherd's own **helper subprocesses** into
+/// The argv prefix that puts one of lunchbox's own **helper subprocesses** into
 /// a transient scope of its own (issue #144).
 ///
 /// Distinct from [`user_scope_argv_prefix`], which isolates an *activity*, and
-/// the reasoning is different. A helper is shepherd's own choice of binary with
-/// shepherd's own argv, so it is not the untrusted party — but some helpers
+/// the reasoning is different. A helper is lunchbox's own choice of binary with
+/// lunchbox's own argv, so it is not the untrusted party — but some helpers
 /// parse data that is. `yt-dlp` is the one that matters: it runs on a
 /// background prefetch timer with no activity launched, and it parses whatever
 /// a remote host returns. Being a direct child of lunchboxd puts it inside the
@@ -334,8 +334,8 @@ fn sanitize_unit_tag(tag: &str) -> String {
 ///
 /// This looks redundant and is not. `snap run` re-scopes the client into
 /// `snap.steam.steam-<uuid>.scope` moments later, so the scope built here
-/// empties and `--collect` reaps it. It is here so that "nothing shepherd
-/// starts for an activity is ever in shepherd's cgroup" holds because of what
+/// empties and `--collect` reaps it. It is here so that "nothing lunchbox
+/// starts for an activity is ever in lunchbox's cgroup" holds because of what
 /// this code does, not because snapd usually moves the process quickly enough
 /// — and the preloaded client is the parent every Steam game inherits from, so
 /// it is the launch that matters.
@@ -425,7 +425,7 @@ pub fn firewall_helper_argv_prefix(
 pub fn make_scope_name(session_id: &str) -> String {
     // systemd unit names allow alnum + `-_.\:@`. Session IDs are UUIDs from
     // lunchbox-util, which only contain hex + dashes -- safe to embed verbatim.
-    format!("shepherd-{}.scope", session_id)
+    format!("lunchbox-{}.scope", session_id)
 }
 
 /// Variables lunchboxd inherits from its own env when launching an activity.
@@ -509,9 +509,9 @@ pub fn build_inherited_env(user_env: &HashMap<String, String>) -> HashMap<String
     out.insert("_JAVA_AWT_WM_NONREPARENTING".to_string(), "1".to_string());
     // Chromium / Electron password store.
     out.insert("PASSWORD_STORE".to_string(), "gnome".to_string());
-    // SHEPHERD_WAYLAND_DISPLAY override (used when the service runs on the
+    // LUNCHBOX_WAYLAND_DISPLAY override (used when the service runs on the
     // parent compositor but apps need to launch into a nested one).
-    if let Ok(d) = std::env::var("SHEPHERD_WAYLAND_DISPLAY") {
+    if let Ok(d) = std::env::var("LUNCHBOX_WAYLAND_DISPLAY") {
         out.insert("WAYLAND_DISPLAY".to_string(), d);
     }
     // Entry-specific vars override the inherited defaults.
@@ -554,7 +554,7 @@ pub fn init() {
         ActivityIsolationStatus::Unsupported { reason } => {
             warn!(
                 reason = %reason,
-                "Activities will share shepherd's own cgroup, so the management socket \
+                "Activities will share lunchbox's own cgroup, so the management socket \
                  cannot tell one from the launcher (issue #144)"
             );
         }
@@ -1001,7 +1001,7 @@ pub fn signal_group(pgid: u32, signal: Signal) {
 /// reaches *every* copy of that program the user is running, which for
 /// `retroarch` includes the game a child started seconds ago in a different
 /// session. Killing that one costs the child their save — a `SIGKILL` runs no
-/// shutdown path at all — so a session shepherd is still tracking is spared,
+/// shutdown path at all — so a session lunchbox is still tracking is spared,
 /// identified by its process group (every descendant shares it, courtesy of
 /// `setsid` at spawn).
 ///
@@ -1132,7 +1132,7 @@ impl ManagedProcess {
 
         // Deliberately not resolved here (issue #144). `program` is
         // `actual_argv[0]`, which is either an activity's own command from
-        // `config.toml` — the admin's string, and not shepherd's to reinterpret
+        // `config.toml` — the admin's string, and not lunchbox's to reinterpret
         // — or a helper the caller already resolved before building the argv.
         // Resolving again would be wrong for the first and redundant for the
         // second.
@@ -1148,8 +1148,8 @@ impl ManagedProcess {
         for (k, v) in &activity_env {
             cmd.env(k, v);
         }
-        if let Ok(shepherd_display) = std::env::var("SHEPHERD_WAYLAND_DISPLAY") {
-            debug!(display = %shepherd_display, "Using SHEPHERD_WAYLAND_DISPLAY override for child process");
+        if let Ok(lunchbox_display) = std::env::var("LUNCHBOX_WAYLAND_DISPLAY") {
+            debug!(display = %lunchbox_display, "Using LUNCHBOX_WAYLAND_DISPLAY override for child process");
         }
 
         // Set working directory
@@ -1492,7 +1492,7 @@ mod tests {
 
         let prefix = firewall_helper_argv_prefix(
             &spec,
-            "shepherd-test.scope",
+            "lunchbox-test.scope",
             1000,
             1000,
             &env,
@@ -1504,7 +1504,7 @@ mod tests {
         assert_eq!(prefix[0], helpers::resolve_arg("pkexec"));
         assert!(prefix.iter().any(|a| a == "--keep-cwd"));
         assert!(prefix.iter().any(|a| a == "apply-process"));
-        assert!(prefix.iter().any(|a| a == "shepherd-test.scope"));
+        assert!(prefix.iter().any(|a| a == "lunchbox-test.scope"));
         // uid/gid are emitted as two args (`--uid` + `1000`), matching the
         // separated form the helper's argv parser expects.
         let uid_idx = prefix.iter().position(|a| a == "--uid").unwrap();
@@ -1561,7 +1561,7 @@ mod tests {
         // Process should be gone or terminating
     }
 
-    /// The by-name last resort must not reach a session shepherd is still
+    /// The by-name last resort must not reach a session lunchbox is still
     /// tracking.
     ///
     /// `pkill -f retroarch` does not know which RetroArch it is looking at, so
@@ -1574,7 +1574,7 @@ mod tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         // A uniquely named stand-in, so the `pgrep` cannot match anything on
         // the machine running the test but these two processes.
-        let script = scratch.path().join("shepherd-killtest-stand-in.sh");
+        let script = scratch.path().join("lunchbox-killtest-stand-in.sh");
         // Bounded rather than endless: a failing assertion unwinds past the
         // kill this test ends with, and an orphaned stand-in then outlives the
         // suite. 60s is longer than the test needs and shorter than a run.
@@ -1604,7 +1604,7 @@ mod tests {
         );
         assert!(
             pid_is_live(tracked.pid),
-            "a session shepherd is tracking must survive a by-name kill aimed at another"
+            "a session lunchbox is tracking must survive a by-name kill aimed at another"
         );
 
         let _ = tracked.kill();
@@ -1688,11 +1688,11 @@ mod tests {
         // Deliberate, and it looks redundant: `snap run` re-scopes the client
         // into `snap.steam.steam-<uuid>.scope` a moment later, so the scope
         // built here empties out and is reaped. Keeping it is what makes
-        // "nothing shepherd starts for an activity is ever in shepherd's
+        // "nothing lunchbox starts for an activity is ever in lunchbox's
         // cgroup" a property of this code rather than of snapd's timing — and
         // the preloaded client is the parent every Steam game inherits from,
         // so dropping it would reopen the window for every game at once.
-        let argv = steam_preload_argv(Some("shepherd-steam-preload-42.scope"));
+        let argv = steam_preload_argv(Some("lunchbox-steam-preload-42.scope"));
         assert_eq!(
             argv,
             vec![
@@ -1701,7 +1701,7 @@ mod tests {
                 "--scope".into(),
                 "--collect".into(),
                 "--quiet".into(),
-                "--unit=shepherd-steam-preload-42.scope".into(),
+                "--unit=lunchbox-steam-preload-42.scope".into(),
                 "--".into(),
                 helpers::resolve_arg("snap"),
                 "run".into(),
@@ -1732,7 +1732,7 @@ mod tests {
     fn the_preload_scope_is_named_per_daemon_not_per_session() {
         let name = steam_preload_scope_name();
         assert!(
-            name.starts_with("shepherd-steam-preload-") && name.ends_with(".scope"),
+            name.starts_with("lunchbox-steam-preload-") && name.ends_with(".scope"),
             "unexpected preload scope name {name:?}"
         );
         // Distinguishable from a session scope, so a stale preload scope can

@@ -8,7 +8,7 @@
 //!
 //! It cannot run in CI — `CAP_NET_ADMIN`, the *system* systemd manager, a
 //! running polkit, the helper installed at `/usr/libexec/...`, and the
-//! invoking user a member of the `shepherd-firewall` group are all
+//! invoking user a member of the `lunchbox-firewall` group are all
 //! prerequisites. When any of those is missing the test prints a `[SKIP]`
 //! line and returns Ok, so the same `cargo test --include-ignored`
 //! command works in both environments.
@@ -29,8 +29,8 @@
 #![allow(clippy::disallowed_methods)]
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body};
+use serde_json::json;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
@@ -38,7 +38,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "org.shepherd.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
 /// Public, well-known TCP endpoint used as the deny target. Must be
 /// reachable from outside the firewall scope, otherwise the deny check
 /// passes for the wrong reason.
@@ -111,7 +111,7 @@ async fn firewall_enforcement_with_real_helper() -> Result<()> {
     // Probe log: in a per-test temp dir we own. The activity runs as the
     // same uid (the helper's `--uid=$PKEXEC_UID`) so it can write here.
     let temp = tempfile::Builder::new()
-        .prefix("shepherd-e2e-fwreal-")
+        .prefix("lunchbox-e2e-fwreal-")
         .tempdir()?;
     let log_path = temp.path().join("probe.log");
 
@@ -143,10 +143,10 @@ label = "Firewall Probe"
 type = "process"
 command = "{probe}"
 [entries.kind.env]
-SHEPHERD_FIREWALL_PROBE_LOG = "{log}"
-SHEPHERD_FIREWALL_PROBE_ALLOW = "{allow}"
-SHEPHERD_FIREWALL_PROBE_DENY = "{deny}"
-SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS = "120"
+LUNCHBOX_FIREWALL_PROBE_LOG = "{log}"
+LUNCHBOX_FIREWALL_PROBE_ALLOW = "{allow}"
+LUNCHBOX_FIREWALL_PROBE_DENY = "{deny}"
+LUNCHBOX_FIREWALL_PROBE_HOLD_SECONDS = "120"
 [entries.availability]
 always = true
 [entries.limits]

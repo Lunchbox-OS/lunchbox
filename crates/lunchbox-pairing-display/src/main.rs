@@ -94,7 +94,7 @@ fn main() -> Result<()> {
         .init();
 
     let app = gtk4::Application::builder()
-        .application_id("org.shepherd.pairing-display")
+        .application_id("com.lunchbox-os.pairing-display")
         .build();
 
     let mode = match args.setup_code {

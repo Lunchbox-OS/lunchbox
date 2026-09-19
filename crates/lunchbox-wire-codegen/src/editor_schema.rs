@@ -4,7 +4,7 @@
 //! projection, a validation [`Report`], and an [`AvailabilityView`] per
 //! subject. The first has been generated from `schema.rs` since the editor
 //! shipped; the other two were mirrored by hand in
-//! `shepherd-webui/src/config/model/`, each with a header naming the Rust file
+//! `lunchbox-webui/src/config/model/`, each with a header naming the Rust file
 //! it copied — a promise nothing enforced.
 //!
 //! The drift path was asymmetric in the way that matters. Add a

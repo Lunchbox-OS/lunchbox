@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Headless, agent-drivable development session for shepherd-launcher.
+# Headless, agent-drivable development session for lunchbox-launcher.
 #
-# `shepherd dev run` boots the launcher in a *nested* Sway
+# `lunchbox dev run` boots the launcher in a *nested* Sway
 # (WLR_BACKENDS=wayland), which must attach to a parent Wayland compositor and
 # therefore requires a graphical login session. That makes it impossible for a
 # headless agent (or a developer over SSH) to bring the stack up and see it.
@@ -16,7 +16,7 @@
 #   - driven with `wtype` (keys/text) and `swaymsg seat cursor` (pointer).
 #
 # The session runs detached; connection details are written to
-# dev-runtime/headless/session.env so later `shepherd dev {shot,tree,key,...}`
+# dev-runtime/headless/session.env so later `lunchbox dev {shot,tree,key,...}`
 # invocations can reattach.
 
 HEADLESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,11 +52,11 @@ headless_wayland_sockets() {
 # invoked via `sudo -u` with the session's XDG_RUNTIME_DIR/SWAYSOCK/WAYLAND_DISPLAY
 # (the runtime dir is mode 0700, so the invoker cannot reach the sockets directly).
 # When the session runs as the invoker, it runs the tool inline. Reads
-# SWAYSOCK/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/SHEPHERD_HEADLESS_USER from the env.
+# SWAYSOCK/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/LUNCHBOX_HEADLESS_USER from the env.
 headless_run() {
-    if [[ -n "${SHEPHERD_HEADLESS_USER:-}" && "$SHEPHERD_HEADLESS_USER" != "$(id -un)" ]]; then
+    if [[ -n "${LUNCHBOX_HEADLESS_USER:-}" && "$LUNCHBOX_HEADLESS_USER" != "$(id -un)" ]]; then
         # `sudo -u` (not maybe_sudo): switching *to* a user; root can sudo too.
-        sudo -u "$SHEPHERD_HEADLESS_USER" env \
+        sudo -u "$LUNCHBOX_HEADLESS_USER" env \
             XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
             SWAYSOCK="$SWAYSOCK" \
             WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
@@ -74,16 +74,16 @@ headless_load_session() {
     local envf; envf="$(headless_session_env)"
     if [[ ! -f "$envf" ]]; then
         [[ "$quiet" == "quiet" ]] && return 1
-        die "No headless session found. Start one with: shepherd dev headless"
+        die "No headless session found. Start one with: lunchbox dev headless"
     fi
     # shellcheck source=/dev/null
     source "$envf"
-    export SWAYSOCK WAYLAND_DISPLAY XDG_RUNTIME_DIR SHEPHERD_HEADLESS_USER
+    export SWAYSOCK WAYLAND_DISPLAY XDG_RUNTIME_DIR LUNCHBOX_HEADLESS_USER
     # Liveness via /proc, not `kill -0`: the process may be owned by another user
     # (--user mode), where kill -0 fails with EPERM even though it is alive.
-    if [[ -z "${SHEPHERD_HEADLESS_PID:-}" ]] || [[ ! -d "/proc/$SHEPHERD_HEADLESS_PID" ]]; then
+    if [[ -z "${LUNCHBOX_HEADLESS_PID:-}" ]] || [[ ! -d "/proc/$LUNCHBOX_HEADLESS_PID" ]]; then
         [[ "$quiet" == "quiet" ]] && return 1
-        die "Recorded headless session (pid ${SHEPHERD_HEADLESS_PID:-?}) is not running. Re-run: shepherd dev headless"
+        die "Recorded headless session (pid ${LUNCHBOX_HEADLESS_PID:-?}) is not running. Re-run: lunchbox dev headless"
     fi
     return 0
 }
@@ -105,7 +105,7 @@ headless_wait_socket() {
 
 # Prefix that runs the session in a cgroup the peer check can mean something in.
 #
-# `PeerPolicy::restricted()` degrades wherever shepherd's cgroup is one an
+# `PeerPolicy::restricted()` degrades wherever lunchbox's cgroup is one an
 # activity could join, and a stack started from a shell sits under
 # `user@<uid>.service` — the user manager's delegated subtree, which anything at
 # this uid can join. A **system**-manager scope owned by the same uid is not
@@ -123,7 +123,7 @@ headless_scope_prefix() {
     uid="$(id -u)"; gid="$(id -g)"
     printf '%s\n' \
         sudo systemd-run --uid="$uid" --gid="$gid" --scope \
-        --slice="user-$uid.slice" --unit="shepherd-dev-headless-$$" --quiet --collect \
+        --slice="user-$uid.slice" --unit="lunchbox-dev-headless-$$" --quiet --collect \
         "--setenv=XDG_RUNTIME_DIR=$rt" \
         "--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
         "--setenv=HOME=$HOME" "--setenv=USER=${USER:-$(id -un)}" "--setenv=PATH=$PATH"
@@ -177,11 +177,11 @@ headless_wait_ipc() {
 #   headless_wait_launcher [tries] [hint_after]
 headless_wait_launcher() {
     local tries="${1:-900}" hint_after="${2:-200}" i=0
-    # The launcher registers as "org.shepherd.launcher" (older builds used the
-    # bare "shepherd-launcher"); accept either.
+    # The launcher registers as "com.lunchbox-os.launcher" (older builds used the
+    # bare "lunchbox-launcher"); accept either.
     for _ in $(seq 1 "$tries"); do
         if headless_run swaymsg -t get_tree 2>/dev/null \
-            | grep -qE '"app_id": *"(org\.)?shepherd[.-]launcher"'; then
+            | grep -qE '"app_id": *"(org\.)?lunchbox[.-]launcher"'; then
             return 0
         fi
         i=$((i + 1))
@@ -230,7 +230,7 @@ headless_precheck_user() {
         sudo -u "$user" test -r "$config" \
             || die "$user cannot read the config $config"
     fi
-    for b in lunchboxd shepherd-launcher lunchbox-hud; do
+    for b in lunchboxd lunchbox-launcher lunchbox-hud; do
         sudo -u "$user" test -x "$repo_root/target/debug/$b" \
             || die "$user cannot execute $repo_root/target/debug/$b — is the repo traversable by $user?"
     done
@@ -239,11 +239,11 @@ headless_precheck_user() {
 # Start a detached headless session.
 #   --config PATH   lunchboxd config to boot
 #                   (default: ./config.example.toml, or the target user's
-#                    ~/.config/shepherd/config.toml under --user)
+#                    ~/.config/lunchbox/config.toml under --user)
 #   --user NAME     run the whole stack as NAME (via sudo) for a more realistic
 #                   session — that user's groups, HOME, and default config
 #   --size WxH      virtual output resolution (default 1280x720)
-#   --time "..."    SHEPHERD_MOCK_TIME passthrough (e.g. "2025-12-25 21:00:00")
+#   --time "..."    LUNCHBOX_MOCK_TIME passthrough (e.g. "2025-12-25 21:00:00")
 #   --gpu           use the GL renderer against a DRM node instead of pixman
 #   --no-build      skip the cargo build (use existing target/debug binaries)
 #   --harden-ipc-peers
@@ -279,7 +279,7 @@ headless_start() {
             --harden-ipc) harden=1; shift ;;
             --harden-ipc-peers) harden_peers=1; shift ;;
             -h|--help) headless_usage; return 0 ;;
-            *) die "Unknown option for 'dev headless': $1 (try: shepherd dev headless --help)" ;;
+            *) die "Unknown option for 'dev headless': $1 (try: lunchbox dev headless --help)" ;;
         esac
     done
 
@@ -301,7 +301,7 @@ headless_start() {
         target_home="$(getent passwd "$user" | cut -d: -f6)"
         [[ -n "$target_home" ]] || die "Could not resolve home directory for $user"
         if [[ -z "$config" ]]; then
-            config="$target_home/.config/shepherd/config.toml"
+            config="$target_home/.config/lunchbox/config.toml"
         fi
     fi
 
@@ -311,7 +311,7 @@ headless_start() {
     if [[ "$user_mode" -eq 1 ]]; then
         # Dedicated, short-pathed, target-owned runtime dir (the target user may
         # have no /run/user/<uid> without a login session).
-        rt="/run/shepherd-headless/$(id -u "$user")"
+        rt="/run/lunchbox-headless/$(id -u "$user")"
     else
         rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         [[ -d "$rt" ]] || die "XDG_RUNTIME_DIR ($rt) does not exist; a headless session still needs a short-pathed runtime dir for its wayland socket"
@@ -324,7 +324,7 @@ headless_start() {
     #
     # Named for this shell so two concurrent sessions in one runtime dir do not
     # collide, and inside $rt because a hard link cannot cross filesystems.
-    local sway_alias="$rt/shepherd-dev-sway.$$.sock"
+    local sway_alias="$rt/lunchbox-dev-sway.$$.sock"
 
     # Default sway config boots ./config.example.toml (hard-coded in sway.conf).
     # The derived copy rewrites the lunchboxd exec line: its `-c` token when a
@@ -345,7 +345,7 @@ headless_start() {
         fi
         if [[ "$config_exists" -eq 0 ]]; then
             if [[ "$user_mode" -eq 1 ]]; then
-                die "Config not found: $config — deploy it first (e.g. shepherd install config --user $user), or pass --config PATH"
+                die "Config not found: $config — deploy it first (e.g. lunchbox install config --user $user), or pass --config PATH"
             fi
             die "Config not found: $config"
         fi
@@ -433,7 +433,7 @@ headless_start() {
     fi
 
     if [[ "$do_build" -eq 1 ]]; then
-        info "Building shepherd binaries..."
+        info "Building lunchbox binaries..."
         build_cargo false
     fi
 
@@ -455,20 +455,20 @@ headless_start() {
         "GSK_RENDERER=${GSK_RENDERER:-cairo}"
         XDG_SESSION_TYPE=wayland
     )
-    [[ -n "$mock_time" ]] && sway_env+=("SHEPHERD_MOCK_TIME=$mock_time")
+    [[ -n "$mock_time" ]] && sway_env+=("LUNCHBOX_MOCK_TIME=$mock_time")
     # Pass the HUD anchor through when the caller sets it, so the vertical HUD
     # (issue #171) can be driven from a shell. sway.conf starts the HUD with no
     # flags, and `env -i` in the `--user` path would drop anything not listed
     # here.
-    [[ -n "${SHEPHERD_HUD_ANCHOR:-}" ]] && sway_env+=("SHEPHERD_HUD_ANCHOR=$SHEPHERD_HUD_ANCHOR")
+    [[ -n "${LUNCHBOX_HUD_ANCHOR:-}" ]] && sway_env+=("LUNCHBOX_HUD_ANCHOR=$LUNCHBOX_HUD_ANCHOR")
     # The HUD's debug-build hooks, forwarded for the same reason: they are the
     # only way to drive HUD-only UI here (the synthetic pointer does not fire
     # GTK `clicked`), and the reading layout has no reader to start.
     # (`set -e` is on, so the test cannot be the loop body's last command.)
     local hud_debug
     for hud_debug in \
-        SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER \
-        SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS; do
+        LUNCHBOX_HUD_DEBUG_CONFIRM_TRIGGER \
+        LUNCHBOX_HUD_DEBUG_FORCE_PAGE_BUTTONS; do
         if [[ -n "${!hud_debug:-}" ]]; then
             sway_env+=("$hud_debug=${!hud_debug}")
         fi
@@ -496,7 +496,7 @@ headless_start() {
         maybe_sudo pkill -u "$user" -f "sway -c $sway_config" 2>/dev/null || true
 
         info "Starting headless Sway ($renderer renderer, $size) as $user..."
-        # lunchboxd/launcher/HUD get no SHEPHERD_SOCKET, so they agree on the
+        # lunchboxd/launcher/HUD get no LUNCHBOX_SOCKET, so they agree on the
         # default $XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock under this runtime dir.
         setsid sudo -u "$user" env -i \
             HOME="$target_home" USER="$user" LOGNAME="$user" \
@@ -531,7 +531,7 @@ headless_start() {
         sway_kill_existing
         # Aliases from a session that died without running `dev stop` point at
         # a socket that no longer exists; nothing can connect through them.
-        rm -f "$rt"/shepherd-dev-sway.*.sock
+        rm -f "$rt"/lunchbox-dev-sway.*.sock
 
         # Snapshot wayland-N sockets to identify the one sway creates (sway
         # ignores a preset WAYLAND_DISPLAY and picks the lowest free slot).
@@ -558,7 +558,7 @@ headless_start() {
         wd="$(comm -13 <(printf '%s\n' "$before" | sort) <(printf '%s\n' "$after" | sort) | head -1)"
     fi
 
-    export SHEPHERD_HEADLESS_USER="$user"
+    export LUNCHBOX_HEADLESS_USER="$user"
     export XDG_RUNTIME_DIR="$rt"
 
     # Second stage: the alias exists only once lunchboxd has connected to the
@@ -592,14 +592,14 @@ headless_start() {
 
     # Persist the connection details for later dev subcommands.
     cat > "$(headless_session_env)" <<EOF
-# Written by 'shepherd dev headless'. Source to reattach.
-SHEPHERD_HEADLESS_PID=$pid
-SHEPHERD_HEADLESS_USER=$user
+# Written by 'lunchbox dev headless'. Source to reattach.
+LUNCHBOX_HEADLESS_PID=$pid
+LUNCHBOX_HEADLESS_USER=$user
 XDG_RUNTIME_DIR=$rt
 SWAYSOCK=$swaysock
 WAYLAND_DISPLAY=$wd
-SHEPHERD_HEADLESS_SIZE=$size
-SHEPHERD_HEADLESS_OUTPUT=$HEADLESS_OUTPUT
+LUNCHBOX_HEADLESS_SIZE=$size
+LUNCHBOX_HEADLESS_OUTPUT=$HEADLESS_OUTPUT
 EOF
 
     # Asking for the armed check and getting a degraded one is the failure this
@@ -612,7 +612,7 @@ EOF
             success "Peer check armed: only lunchboxd's own cgroup and root may drive the daemon"
         else
             local why
-            why="$(grep -aoE "(delegated cgroup subtree|Activities will share shepherd's own cgroup)[^\"]*" "$log" | head -1)"
+            why="$(grep -aoE "(delegated cgroup subtree|Activities will share lunchbox's own cgroup)[^\"]*" "$log" | head -1)"
             error "--harden-ipc-peers did not arm the peer check. The daemon said:"
             printf '  %s\n' "${why:-<no reason logged; see $log>}" >&2
             die "Refusing to hand back a session that looks hardened and is not (issue #144)"
@@ -625,17 +625,17 @@ EOF
         success "Launcher surface is mapped and ready to screenshot."
     else
         warn "Launcher surface not detected within 90s — the stack is up but the"
-        warn "GTK UI may not have painted. Check $log and 'shepherd dev tree'."
+        warn "GTK UI may not have painted. Check $log and 'lunchbox dev tree'."
     fi
 
     cat >&2 <<EOF
 
 Next:
-  shepherd dev shot [out.png]   # screenshot the virtual output
-  shepherd dev tree             # dump the window tree (app_id/focus/fullscreen)
-  shepherd dev key Down         # inject a keystroke; also: dev type "text"
-  shepherd dev click X Y        # move+click the virtual pointer
-  shepherd dev stop             # tear the session down
+  lunchbox dev shot [out.png]   # screenshot the virtual output
+  lunchbox dev tree             # dump the window tree (app_id/focus/fullscreen)
+  lunchbox dev key Down         # inject a keystroke; also: dev type "text"
+  lunchbox dev click X Y        # move+click the virtual pointer
+  lunchbox dev stop             # tear the session down
 EOF
 }
 
@@ -654,8 +654,8 @@ headless_shot() {
     # grim writes the PNG to stdout (`-`), which the invoker's shell redirects to
     # $out. Under --user, grim runs as the session's user (its runtime dir is
     # 0700), but the *invoker* owns $out — so an agent can always read it back.
-    headless_run grim -o "${SHEPHERD_HEADLESS_OUTPUT:-$HEADLESS_OUTPUT}" - > "$out" \
-        || die "grim failed (is the session still up? try: shepherd dev tree)"
+    headless_run grim -o "${LUNCHBOX_HEADLESS_OUTPUT:-$HEADLESS_OUTPUT}" - > "$out" \
+        || die "grim failed (is the session still up? try: lunchbox dev tree)"
     success "Wrote $out"
     echo "$out"
 }
@@ -678,7 +678,7 @@ headless_tree() {
 headless_key() {
     headless_load_session
     require_command wtype
-    [[ $# -ge 1 ]] || die "Usage: shepherd dev key <keysym> [<keysym>...]"
+    [[ $# -ge 1 ]] || die "Usage: lunchbox dev key <keysym> [<keysym>...]"
     local k
     for k in "$@"; do
         headless_run wtype -k "$k" || die "wtype failed for key '$k'"
@@ -689,7 +689,7 @@ headless_key() {
 headless_type() {
     headless_load_session
     require_command wtype
-    [[ $# -ge 1 ]] || die "Usage: shepherd dev type <text>"
+    [[ $# -ge 1 ]] || die "Usage: lunchbox dev type <text>"
     headless_run wtype "$*" || die "wtype failed"
 }
 
@@ -697,7 +697,7 @@ headless_type() {
 # Uses sway's IPC seat cursor commands — no pointer daemon or root needed.
 headless_click() {
     headless_load_session
-    [[ $# -ge 2 ]] || die "Usage: shepherd dev click <x> <y> [button]"
+    [[ $# -ge 2 ]] || die "Usage: lunchbox dev click <x> <y> [button]"
     local x="$1" y="$2" btn="${3:-1}"
     local name; name="button${btn}"
     case "$btn" in 1) name=button1 ;; 2) name=button3 ;; 3) name=button2 ;; *) name="button${btn}" ;; esac
@@ -715,31 +715,31 @@ headless_stop() {
         warn "No live headless session to stop."
         return 0
     fi
-    local u="${SHEPHERD_HEADLESS_USER:-}"
-    info "Stopping headless session (pid $SHEPHERD_HEADLESS_PID${u:+, user=$u})..."
+    local u="${LUNCHBOX_HEADLESS_USER:-}"
+    info "Stopping headless session (pid $LUNCHBOX_HEADLESS_PID${u:+, user=$u})..."
     headless_run swaymsg exit >/dev/null 2>&1 || true
     # Liveness via /proc (the process may be another user's under --user).
     for _ in $(seq 1 20); do
-        [[ -d "/proc/$SHEPHERD_HEADLESS_PID" ]] || break
+        [[ -d "/proc/$LUNCHBOX_HEADLESS_PID" ]] || break
         sleep 0.1
     done
     if [[ -n "$u" && "$u" != "$(id -un)" ]]; then
         # Owned by another user — signal + reap via sudo, scoped to that user.
-        maybe_sudo kill -KILL "$SHEPHERD_HEADLESS_PID" 2>/dev/null || true
+        maybe_sudo kill -KILL "$LUNCHBOX_HEADLESS_PID" 2>/dev/null || true
         maybe_sudo pkill -u "$u" -x lunchboxd 2>/dev/null || true
-        maybe_sudo pkill -u "$u" -x shepherd-launcher 2>/dev/null || true
+        maybe_sudo pkill -u "$u" -x lunchbox-launcher 2>/dev/null || true
         maybe_sudo pkill -u "$u" -x lunchbox-hud 2>/dev/null || true
         maybe_sudo pkill -u "$u" -x lunchbox-media 2>/dev/null || true
         maybe_sudo pkill -u "$u" -x sway 2>/dev/null || true
         # Remove the dedicated runtime dir we created for this user.
         maybe_sudo rm -rf "$XDG_RUNTIME_DIR"
     else
-        kill -KILL "$SHEPHERD_HEADLESS_PID" 2>/dev/null || true
+        kill -KILL "$LUNCHBOX_HEADLESS_PID" 2>/dev/null || true
         pkill -x lunchboxd 2>/dev/null || true
-        pkill -x shepherd-launcher 2>/dev/null || true
+        pkill -x lunchbox-launcher 2>/dev/null || true
         pkill -x lunchbox-hud 2>/dev/null || true
         pkill -x lunchbox-media 2>/dev/null || true
-        [[ -n "${SHEPHERD_SOCKET:-}" ]] && rm -f "$SHEPHERD_SOCKET"
+        [[ -n "${LUNCHBOX_SOCKET:-}" ]] && rm -f "$LUNCHBOX_SOCKET"
         # The alias outlives sway: it is a second name for a socket whose
         # inode is now gone, so it would sit there dangling.
         [[ -n "${SWAYSOCK:-}" ]] && rm -f "$SWAYSOCK"
@@ -752,23 +752,23 @@ headless_stop() {
 
 headless_usage() {
     cat <<EOF
-Usage: shepherd dev headless [options]   # start a detached headless session
-       shepherd dev shot [out.png]       # screenshot the virtual output
-       shepherd dev tree [raw]           # dump the window tree (jq summary)
-       shepherd dev key <keysym>...      # inject keystroke(s) (e.g. Down Return)
-       shepherd dev type <text>          # type literal text
-       shepherd dev click <x> <y> [btn]  # move + click the virtual pointer
-       shepherd dev stop                 # tear the session down
+Usage: lunchbox dev headless [options]   # start a detached headless session
+       lunchbox dev shot [out.png]       # screenshot the virtual output
+       lunchbox dev tree [raw]           # dump the window tree (jq summary)
+       lunchbox dev key <keysym>...      # inject keystroke(s) (e.g. Down Return)
+       lunchbox dev type <text>          # type literal text
+       lunchbox dev click <x> <y> [btn]  # move + click the virtual pointer
+       lunchbox dev stop                 # tear the session down
 
 Start options:
     --config PATH  lunchboxd config to boot (default: ./config.example.toml,
-                   or the target user's ~/.config/shepherd/config.toml under --user)
+                   or the target user's ~/.config/lunchbox/config.toml under --user)
     --user NAME    Run the whole stack as NAME (via sudo) for a more realistic
                    session: that user's groups, HOME, and default config. The
                    repo must be readable/executable by NAME (a checkout under a
                    0700 \$HOME is not). shot/tree/key/... reattach automatically.
     --size WxH     Virtual output resolution (default $HEADLESS_SIZE_DEFAULT)
-    --time "..."   SHEPHERD_MOCK_TIME for the session (e.g. "2025-12-25 21:00:00")
+    --time "..."   LUNCHBOX_MOCK_TIME for the session (e.g. "2025-12-25 21:00:00")
     --gpu          Use the GL renderer against a DRM node instead of pixman
     --no-build     Skip the cargo build; use existing target/debug binaries
     --harden-ipc   Exercise the production sway-IPC hardening (issue #144):
@@ -794,7 +794,7 @@ dev-runtime/headless/session.env.
 EOF
 }
 
-# Dispatcher used by `shepherd dev <subcmd>`.
+# Dispatcher used by `lunchbox dev <subcmd>`.
 headless_dev_dispatch() {
     local sub="$1"; shift || true
     case "$sub" in

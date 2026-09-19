@@ -15,7 +15,7 @@
 use lunchbox_ipc::{IpcClient, IpcServer};
 
 /// The positive path, and the one that would break every device if the check
-/// were wrong: shepherd's own clients live in the daemon's cgroup, so a genuine
+/// were wrong: lunchbox's own clients live in the daemon's cgroup, so a genuine
 /// daemon must always verify.
 #[tokio::test]
 async fn a_client_accepts_the_daemon_in_its_own_cgroup() {
@@ -62,7 +62,7 @@ async fn a_client_refuses_an_impostor_in_another_cgroup() {
             "--scope",
             "--collect",
             "--quiet",
-            &format!("--unit=shepherd-impostor-test-{}.scope", std::process::id()),
+            &format!("--unit=lunchbox-impostor-test-{}.scope", std::process::id()),
             "--",
             "python3",
             "-c",
@@ -93,7 +93,7 @@ async fn a_client_refuses_an_impostor_in_another_cgroup() {
         .expect("a client must refuse a listener outside the session's cgroup");
     let msg = err.to_string();
     assert!(
-        msg.contains("not shepherd's daemon") || msg.contains("could not identify"),
+        msg.contains("not lunchbox's daemon") || msg.contains("could not identify"),
         "refused, but unhelpfully: {msg}"
     );
 }

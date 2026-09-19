@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installation logic for shepherd-launcher
+# Installation logic for lunchbox-launcher
 # Handles binary installation, config deployment, and desktop entry setup
 
 # Get the directory containing this script
@@ -21,14 +21,14 @@ source "$INSTALL_LIB_DIR/config.sh"
 # Distro package name. Lives here rather than in package.sh because the
 # uninstall path needs it to point at `apt purge`, and package.sh sources
 # this file (not the other way round).
-DISTRO_PACKAGE_NAME="shepherd-launcher"
+DISTRO_PACKAGE_NAME="lunchbox-launcher"
 
 # Where a packaged install keeps the data files that have no repo to come from
 # (the example config, the media library, VERSION, and the bluetoothd drop-in
-# template). `scripts/shepherd-admin` points `SHEPHERD_DATA_DIR` here, and
+# template). `scripts/lunchbox-admin` points `LUNCHBOX_DATA_DIR` here, and
 # `package.sh` stages into it; it lives here because both of those are
 # downstream of this file.
-PACKAGED_DATA_DIR="/usr/share/shepherd"
+PACKAGED_DATA_DIR="/usr/share/lunchbox"
 
 # Default installation paths
 DEFAULT_PREFIX="/usr/local"
@@ -36,20 +36,20 @@ DEFAULT_BINDIR="bin"
 
 # Standard sway config location
 SWAY_CONFIG_DIR="/etc/sway"
-SHEPHERD_SWAY_CONFIG="shepherd.conf"
-SHEPHERD_SWAY_CONFD="shepherd.conf.d"
+LUNCHBOX_SWAY_CONFIG="lunchbox.conf"
+LUNCHBOX_SWAY_CONFD="lunchbox.conf.d"
 
 # Desktop entry location
 DESKTOP_ENTRY_DIR="share/wayland-sessions"
-DESKTOP_ENTRY_NAME="shepherd.desktop"
+DESKTOP_ENTRY_NAME="lunchbox.desktop"
 
 # Firewall helper paths (hardcoded -- the polkit .policy file references
 # the absolute path to the helper binary, and polkit's own dirs are fixed
 # system locations regardless of $prefix).
 #
 # Both the action and the rule go to polkit's *vendor* directories under
-# /usr/share, because both are shepherd's own files rather than site policy
-# (issue #177). The rule grants shepherd's own action to shepherd's own group;
+# /usr/share, because both are lunchbox's own files rather than site policy
+# (issue #177). The rule grants lunchbox's own action to lunchbox's own group;
 # nothing about it is a local decision. An admin who wants to override it still
 # can, the way polkit intends: a same-named file in /etc/polkit-1/rules.d,
 # which is read first and wins.
@@ -60,16 +60,16 @@ POLKIT_RULES_DIR="/usr/share/polkit-1/rules.d"
 # clear a copy left there by an older from-source install; the .deb's
 # maintainer scripts do the same with `dpkg-maintscript-helper rm_conffile`.
 POLKIT_LEGACY_RULES_DIR="/etc/polkit-1/rules.d"
-FIREWALL_POLICY_NAME="org.shepherd.firewall.policy"
-FIREWALL_RULES_NAME="50-shepherd-firewall.rules"
-FIREWALL_GROUP="shepherd-firewall"
+FIREWALL_POLICY_NAME="com.lunchbox-os.firewall.policy"
+FIREWALL_RULES_NAME="50-lunchbox-firewall.rules"
+FIREWALL_GROUP="lunchbox-firewall"
 
 # State custodian (issue #157). Like the firewall helper, the binary lives at a
 # fixed path regardless of --prefix, because a systemd unit references it
 # absolutely and units are not relocatable. It is not a command an operator
 # runs, so /usr/libexec is where it belongs anyway.
 STATED_PATH="/usr/libexec/lunchbox-stated"
-STATED_USER="shepherd-state"
+STATED_USER="lunchbox-state"
 STATED_UNIT_DIR="/etc/systemd/system"
 STATED_SOCKET_UNIT="lunchbox-stated@.socket"
 STATED_SERVICE_UNIT="lunchbox-stated@.service"
@@ -83,9 +83,9 @@ STATED_STATE_ROOT="/var/lib/lunchboxd/state"
 # -- and what means logind treats it as a stranger to the session it has to end.
 # This rule is the difference between a watchdog that fires and one that only
 # looks like it will.
-SESSION_GUARD_RULES_NAME="50-shepherd-session-guard.rules"
+SESSION_GUARD_RULES_NAME="50-lunchbox-session-guard.rules"
 
-# The file names shepherd's protected files have, and what happens to each when
+# The file names lunchbox's protected files have, and what happens to each when
 # a device gains or loses the custodian.
 #
 # These mirror `ProtectedFile` in `lunchbox-util`, which is the Rust half of the
@@ -98,7 +98,7 @@ SESSION_GUARD_RULES_NAME="50-shepherd-session-guard.rules"
 #
 # Moved from `~/.local/share/lunchboxd/` into this user's custodian directory,
 # and back again by `uninstall state --restore-to-home`.
-SHEPHERD_MIGRATED_FILES=(lunchboxd.db)
+LUNCHBOX_MIGRATED_FILES=(lunchboxd.db)
 # The device's files rather than a user's, so they move to the *shared*
 # directory instead. There is one Bluetooth adapter and one BlueZ bond table,
 # and forgetting a bond forgets it for the machine -- so an admin record kept
@@ -107,13 +107,13 @@ SHEPHERD_MIGRATED_FILES=(lunchboxd.db)
 # API on one port, so a per-user web password would be two passwords for one
 # door, and one certificate for the host that serves it.
 # `ProtectedFile::scope` is the Rust half of this split.
-SHEPHERD_SYSTEM_FILES=(admin.toml unbond-queue.toml web-auth.toml tls.pem)
+LUNCHBOX_SYSTEM_FILES=(admin.toml unbond-queue.toml web-auth.toml tls.pem)
 # Where they go. Shared by every kiosk user, at the same uid and mode as the
 # per-user directories, so it is no more reachable from an activity.
 STATED_ADMIN_DIR="/var/lib/lunchboxd/admin"
-# The policy, moved from `~/.config/shepherd/` -- a different directory, so it
+# The policy, moved from `~/.config/lunchbox/` -- a different directory, so it
 # is handled apart from the list above rather than being in it.
-SHEPHERD_POLICY_FILE="config.toml"
+LUNCHBOX_POLICY_FILE="config.toml"
 # Deliberately *not* moved: a one-shot instruction rather than state, so moving
 # a stale one would factory-reset a device during an upgrade. Declared rather
 # than merely omitted, so the drift test can tell "decided against" apart from
@@ -121,15 +121,15 @@ SHEPHERD_POLICY_FILE="config.toml"
 # device file like the ones above, and lunchboxd reads it from the shared
 # directory; it is simply never carried across.)
 # shellcheck disable=SC2034  # read by installer_covers_protected_files.rs
-SHEPHERD_UNMIGRATED_FILES=(.factory-reset-ble)
+LUNCHBOX_UNMIGRATED_FILES=(.factory-reset-ble)
 # Named individually where a caller needs one by name. shellcheck reads each
 # file alone, so it cannot see the libraries below using these.
 # shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
-SHEPHERD_ADMIN_RECORD_FILE="admin.toml"
+LUNCHBOX_ADMIN_RECORD_FILE="admin.toml"
 # shellcheck disable=SC2034  # used by bluetooth.sh, which sources this file
-SHEPHERD_RESET_SENTINEL_FILE=".factory-reset-ble"
+LUNCHBOX_RESET_SENTINEL_FILE=".factory-reset-ble"
 # shellcheck disable=SC2034  # used by webauth.sh, which sources this file
-SHEPHERD_WEB_AUTH_FILE="web-auth.toml"
+LUNCHBOX_WEB_AUTH_FILE="web-auth.toml"
 
 # The socket unit instance that serves `$1`.
 #
@@ -145,12 +145,12 @@ stated_socket_unit_for() {
 # just the /dev/uinput access rule the input-compat sidecars need.
 #
 # The vendor directory, for the same reason as the polkit rule above (issue
-# #177): this is shepherd's rule, not the site's. /etc/udev/rules.d is read
+# #177): this is lunchbox's rule, not the site's. /etc/udev/rules.d is read
 # afterwards and a same-named file there still overrides it.
 UDEV_RULES_DIR="/usr/lib/udev/rules.d"
 # Where the rule used to go, before #177 moved it. See POLKIT_LEGACY_RULES_DIR.
 UDEV_LEGACY_RULES_DIR="/etc/udev/rules.d"
-UINPUT_RULES_NAME="71-shepherd-uinput.rules"
+UINPUT_RULES_NAME="71-lunchbox-uinput.rules"
 
 # systemd drop-in that runs bluetoothd with experimental D-Bus interfaces,
 # which is what exposes `Device1.PreferredBearer` — see install_bluetooth_dropin
@@ -158,7 +158,7 @@ UINPUT_RULES_NAME="71-shepherd-uinput.rules"
 # because BlueZ has no conf.d: it reads exactly one file, so shipping config
 # there means fighting the distro's conffile on every upgrade.
 BLUETOOTH_DROPIN_DIR="/etc/systemd/system/bluetooth.service.d"
-BLUETOOTH_DROPIN_NAME="10-shepherd-bluetooth-experimental.conf"
+BLUETOOTH_DROPIN_NAME="10-lunchbox-bluetooth-experimental.conf"
 # The drop-in names the *rendering* machine's bluetoothd, so a build host can
 # never write a correct one -- which is why a package ships the template here
 # instead of the rendered file and renders it in its postinst (issue #177).
@@ -181,14 +181,14 @@ install_bins() {
     
     # Ensure release build exists
     if ! binaries_exist true; then
-        die "Release binaries not found. Run 'shepherd build --release' first."
+        die "Release binaries not found. Run 'lunchbox build --release' first."
     fi
     
     info "Installing binaries to $bindir..."
     
     ensure_dir "$bindir" 0755
     
-    for binary in "${SHEPHERD_BINARIES[@]}"; do
+    for binary in "${LUNCHBOX_BINARIES[@]}"; do
         local src="$target_dir/$binary"
         local dst="$bindir/$binary"
         
@@ -209,8 +209,8 @@ install_sway_config() {
     
     local src_config="$repo_root/sway.conf"
     local dst_dir="$destdir$SWAY_CONFIG_DIR"
-    local dst_config="$dst_dir/$SHEPHERD_SWAY_CONFIG"
-    local dst_confd="$dst_dir/$SHEPHERD_SWAY_CONFD"
+    local dst_config="$dst_dir/$LUNCHBOX_SWAY_CONFIG"
+    local dst_confd="$dst_dir/$LUNCHBOX_SWAY_CONFD"
 
     if [[ ! -f "$src_config" ]]; then
         die "Source sway.conf not found at $src_config"
@@ -245,7 +245,7 @@ install_sway_config() {
     # suite passes it, but a hand-edited config could.
     #
     # `--no-state-custodian` is stripped for the same reason again: it keeps
-    # shepherd's policy and state in the kiosk user's home, where every
+    # lunchbox's policy and state in the kiosk user's home, where every
     # activity can read and rewrite them (issue #157).
     #
     # `--no-restrict-ipc-peers` is stripped for the same reason. It opens
@@ -279,10 +279,10 @@ install_sway_config() {
     # shellcheck disable=SC2016  # $XDG_SESSION_ID must reach the config
     # literally, for the session's own shell to expand when the fallback runs.
     sed \
-        -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
+        -e "s|./target/debug/lunchbox-launcher|$bindir/lunchbox-launcher|g" \
         -e "s|./target/debug/lunchbox-hud|$bindir/lunchbox-hud|g" \
         -e "s|./target/debug/lunchboxd|$bindir/lunchboxd|g" \
-        -e "s|./config.example.toml|~/.config/shepherd/config.toml|g" \
+        -e "s|./config.example.toml|~/.config/lunchbox/config.toml|g" \
         -e "s|-c ./sway.conf|-c $dst_config|g" \
         -e "s| --no-harden-sway-ipc||g" \
         -e "s| --no-restrict-ipc-peers||g" \
@@ -303,7 +303,7 @@ install_sway_config() {
         die "Failed to strip --no-harden-sway-ipc from $dst_config; the installed device would leave sway's IPC socket reachable by every activity (issue #144)"
     fi
     if [[ "$dst_exec_line" == *--no-restrict-ipc-peers* ]]; then
-        die "Failed to strip --no-restrict-ipc-peers from $dst_config; the installed device would let every activity drive shepherd's own management socket (issue #144)"
+        die "Failed to strip --no-restrict-ipc-peers from $dst_config; the installed device would let every activity drive lunchbox's own management socket (issue #144)"
     fi
     if [[ "$dst_exec_line" == *--no-state-custodian* ]]; then
         die "Failed to strip --no-state-custodian from $dst_config; the installed device would keep policy and state in the kiosk user's home, where every activity can rewrite them (issue #157)"
@@ -347,11 +347,11 @@ install_desktop_entry() {
     
     cat > "$dst_entry" <<EOF
 [Desktop Entry]
-Name=Shepherd Kiosk
-Comment=Shepherd game launcher kiosk mode
-Exec=sway -c $SWAY_CONFIG_DIR/$SHEPHERD_SWAY_CONFIG --unsupported-gpu
+Name=Lunchbox Kiosk
+Comment=Lunchbox game launcher kiosk mode
+Exec=sway -c $SWAY_CONFIG_DIR/$LUNCHBOX_SWAY_CONFIG --unsupported-gpu
 Type=Application
-DesktopNames=shepherd
+DesktopNames=lunchbox
 EOF
     
     chmod 0644 "$dst_entry"
@@ -365,14 +365,14 @@ install_config() {
     local source_config="${2:-}"
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install config --user USER [--source CONFIG]"
+        die "Usage: lunchbox install config --user USER [--source CONFIG]"
     fi
     
     validate_user "$user"
 
     # Example configs live at the repo root in a source checkout and under
-    # /usr/share/shepherd on a packaged install; get_data_dir picks the right
-    # one so `shepherd-admin setup-user` works without a source tree.
+    # /usr/share/lunchbox on a packaged install; get_data_dir picks the right
+    # one so `lunchbox-admin setup-user` works without a source tree.
     local repo_root
     repo_root="$(get_data_dir)"
 
@@ -388,7 +388,7 @@ install_config() {
     # Get user's config directory
     local user_home
     user_home="$(get_user_home "$user")"
-    local user_config_dir="$user_home/.config/shepherd"
+    local user_config_dir="$user_home/.config/lunchbox"
     local dst_config="$user_config_dir/config.toml"
     
     info "Installing user config to $dst_config..."
@@ -420,7 +420,7 @@ install_config() {
         if [[ -e "$custodian_dir/config.toml" ]]; then
             warn "Policy already exists at $custodian_dir/config.toml, leaving it alone"
             info "  To change the policy this device runs:"
-            info "    shepherd install policy --user $user --source PATH"
+            info "    lunchbox install policy --user $user --source PATH"
         else
             install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
                 "$source_config" "$custodian_dir/config.toml"
@@ -430,7 +430,7 @@ install_config() {
     elif maybe_sudo test -f "$dst_config"; then
         warn "Config file already exists at $dst_config, leaving it alone"
         info "  To change the policy this device runs:"
-        info "    shepherd install policy --user $user [--source PATH]"
+        info "    lunchbox install policy --user $user [--source PATH]"
     else
         maybe_sudo cp "$source_config" "$dst_config"
         maybe_sudo chown "$user:$user" "$dst_config"
@@ -438,7 +438,7 @@ install_config() {
         success "Installed user configuration for $user"
     fi
 
-    # The example config references `~/.config/shepherd/movies.toml` for the
+    # The example config references `~/.config/lunchbox/movies.toml` for the
     # lunchbox-media entries. If the user picked the default example config,
     # also drop the matching example library so the entries don't 404 on
     # first launch. The user is still expected to edit the URIs.
@@ -456,7 +456,7 @@ install_config() {
     fi
 }
 
-# Groups the kiosk user must belong to for shepherd-launcher features.
+# Groups the kiosk user must belong to for lunchbox-launcher features.
 #
 # - input: required by lunchbox-touch-bridge, lunchbox-tablet-bridge, and
 #   lunchbox-gamepad-bridge (used when an entry has `input_compat =
@@ -477,7 +477,7 @@ install_config() {
 #
 # Add new groups here as features need them; install_user_groups walks the
 # array and skips memberships the user already has.
-SHEPHERD_REQUIRED_GROUPS=(
+LUNCHBOX_REQUIRED_GROUPS=(
     "input"
     "video"
     "bluetooth"
@@ -485,7 +485,7 @@ SHEPHERD_REQUIRED_GROUPS=(
 
 # Add $user to each named group, skipping groups that don't exist on this
 # system or that the user already belongs to. Shared by install_user_groups
-# (from-source `install all`) and setup_user (shepherd-admin, .deb path) so the
+# (from-source `install all`) and setup_user (lunchbox-admin, .deb path) so the
 # membership logic lives in one place.
 add_user_to_groups() {
     local user="$1"
@@ -499,7 +499,7 @@ add_user_to_groups() {
     for group in "$@"; do
         # Skip groups that don't exist on this system. We don't create
         # them — they're expected to come from the distro (or, for
-        # shepherd-firewall, from install/packaging).
+        # lunchbox-firewall, from install/packaging).
         if ! getent group "$group" >/dev/null 2>&1; then
             warn "Group '$group' does not exist on this system; skipping"
             continue
@@ -522,19 +522,19 @@ add_user_to_groups() {
     fi
 }
 
-# Add the target user to all groups required by shepherd-launcher.
+# Add the target user to all groups required by lunchbox-launcher.
 # Idempotent: skips any group the user is already in.
 install_user_groups() {
     local user="${1:-}"
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install groups --user USER"
+        die "Usage: lunchbox install groups --user USER"
     fi
 
     require_root
     validate_user "$user"
 
-    add_user_to_groups "$user" "${SHEPHERD_REQUIRED_GROUPS[@]}"
+    add_user_to_groups "$user" "${LUNCHBOX_REQUIRED_GROUPS[@]}"
     success "Updated group memberships for $user"
 }
 
@@ -562,10 +562,10 @@ _bluetoothd_exec_path() {
 
 # Install the bluetoothd drop-in that enables experimental D-Bus interfaces.
 #
-# shepherd needs `Device1.PreferredBearer` to pin the admin phone to the
+# lunchbox needs `Device1.PreferredBearer` to pin the admin phone to the
 # BR/EDR bearer; without it BlueZ arms the kernel to auto-connect the phone
 # over LE, the device ends up central, and the companion can never encrypt
-# the link (see dist/systemd/ for the full story). shepherd degrades
+# the link (see dist/systemd/ for the full story). lunchbox degrades
 # gracefully without this — it says so in the log and falls back — so a box
 # with no BlueZ at all is skipped rather than treated as an error.
 install_bluetooth_dropin() {
@@ -631,7 +631,7 @@ install_bluetooth_dropin() {
     success "Installed bluetoothd drop-in"
 }
 
-# Drop a copy of one of shepherd's files left at a path an earlier release used.
+# Drop a copy of one of lunchbox's files left at a path an earlier release used.
 #
 # Issue #177 moved the udev and polkit rules out of the admin directories into
 # the vendor ones. Both subsystems read both locations, so a copy left behind is
@@ -660,7 +660,7 @@ remove_superseded_copy() {
     rm -f "$path"
 }
 
-# Install the udev rules shepherd-launcher needs.
+# Install the udev rules lunchbox-launcher needs.
 #
 # Currently just the /dev/uinput access rule. The input-compat sidecars
 # synthesize their mouse/keyboard output through /dev/uinput, which is
@@ -711,7 +711,7 @@ install_udev() {
 # Install the firewall helper and its polkit assets.
 #
 # Args:
-#   $1 -- target user to add to the shepherd-firewall group (optional;
+#   $1 -- target user to add to the lunchbox-firewall group (optional;
 #         skipped when DESTDIR is set so packaging doesn't mutate hosts)
 #   $2 -- "true" for release binary, "false" for debug (default: true)
 install_firewall() {
@@ -733,7 +733,7 @@ install_firewall() {
 
     if [[ ! -x "$helper_src" ]]; then
         if [[ "$release" == "true" ]]; then
-            die "lunchbox-firewall-helper not found at $helper_src; run 'shepherd build --release' first"
+            die "lunchbox-firewall-helper not found at $helper_src; run 'lunchbox build --release' first"
         else
             die "lunchbox-firewall-helper not found at $helper_src; run 'cargo build --bin lunchbox-firewall-helper' first"
         fi
@@ -791,12 +791,12 @@ install_firewall() {
 # Give one user a custodian: the directory, their migrated state, and the socket.
 #
 # Split out of `install_state` because a packaged device cannot reach that.
-# The `.deb` ships `shepherd-admin`, which has no `install` verb -- so on a
+# The `.deb` ships `lunchbox-admin`, which has no `install` verb -- so on a
 # packaged system this is the only route to the per-user half, and
-# `shepherd-admin setup-user` is what calls it. Without that, `setup-user`
+# `lunchbox-admin setup-user` is what calls it. Without that, `setup-user`
 # enabled the socket and nothing else: the custodian came up with an empty
 # directory while the device's real history sat in the home directory, and the
-# diagnostic that noticed named `shepherd install state`, a command that does
+# diagnostic that noticed named `lunchbox install state`, a command that does
 # not exist there.
 #
 # Args:
@@ -831,7 +831,7 @@ setup_state_for_user() {
 }
 
 # Install the state custodian: the binary, its systemd units, and the system
-# user that owns shepherd's policy and state (issue #157).
+# user that owns lunchbox's policy and state (issue #157).
 #
 # Why this exists at all: lunchboxd runs as the same uid as every activity it
 # launches, so `lunchboxd.db`, `config.toml` and the BLE admin record are
@@ -858,7 +858,7 @@ install_state() {
     bin_src="$(get_target_dir "$release")/lunchbox-stated"
     if [[ ! -x "$bin_src" ]]; then
         if [[ "$release" == "true" ]]; then
-            die "lunchbox-stated not found at $bin_src; run 'shepherd build --release' first"
+            die "lunchbox-stated not found at $bin_src; run 'lunchbox build --release' first"
         else
             die "lunchbox-stated not found at $bin_src; run 'cargo build --bin lunchbox-stated' first"
         fi
@@ -926,12 +926,12 @@ will be refused when it fires"
     success "State custodian installed"
 }
 
-# The line that marks a policy file as shepherd's signpost rather than a policy.
+# The line that marks a policy file as lunchbox's signpost rather than a policy.
 #
 # Matched, not just written: `install policy` must never push one of these to
 # the custodian, and the migration must not "move" one it wrote itself on an
 # earlier run.
-POLICY_PLACEHOLDER_MARK="# shepherd: this device's policy lives with the state custodian"
+POLICY_PLACEHOLDER_MARK="# lunchbox: this device's policy lives with the state custodian"
 
 # Whether $1 is the placeholder rather than a real policy.
 _is_policy_placeholder() {
@@ -955,7 +955,7 @@ _write_policy_placeholder() {
     local home dst
     home="$(getent passwd "$user" | cut -d: -f6)"
     [[ -n "$home" ]] || return 0
-    dst="$home/.config/shepherd/config.toml"
+    dst="$home/.config/lunchbox/config.toml"
 
     # Never over a real policy: on a device without a custodian that file is
     # the live one, and this function is called from paths that also run there.
@@ -963,7 +963,7 @@ _write_policy_placeholder() {
         return 0
     fi
 
-    install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
+    install -d -m 0755 -o "$user" -g "$user" "$home/.config/lunchbox"
     cat > "$dst" <<EOF
 $POLICY_PLACEHOLDER_MARK
 #
@@ -978,7 +978,7 @@ $POLICY_PLACEHOLDER_MARK
 #
 # -- or install one from anywhere, validated before it is applied:
 #
-#     sudo shepherd install policy --user $user --source ./new-config.toml
+#     sudo lunchbox install policy --user $user --source ./new-config.toml
 #
 # Either way lunchboxd reloads within a second; no restart is needed.
 #
@@ -1003,7 +1003,7 @@ EOF
 # outcome, so this runs as part of the install rather than being left to a note
 # in a changelog.
 #
-# Root's job, necessarily: `shepherd-state` cannot read the user's home (0750),
+# Root's job, necessarily: `lunchbox-state` cannot read the user's home (0750),
 # so it could not migrate its own state even if it wanted to.
 #
 # Idempotent and non-destructive. A file already in the protected directory is
@@ -1031,7 +1031,7 @@ _migrate_state_for_user() {
     # instruction, not state, and moving a stale one would factory-reset a
     # device during an upgrade.
     local src dst name
-    for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
+    for name in "${LUNCHBOX_MIGRATED_FILES[@]}"; do
         src="$home/.local/share/lunchboxd/$name"
         dst="$state_dir/$name"
         [[ -f "$src" ]] || continue
@@ -1061,7 +1061,7 @@ _migrate_state_for_user() {
     # be one admin record, and picking the later one would silently discard a
     # pairing that still works. The one left behind is reported, not deleted.
     install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_ADMIN_DIR"
-    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+    for name in "${LUNCHBOX_SYSTEM_FILES[@]}"; do
         src="$home/.local/share/lunchboxd/$name"
         dst="$STATED_ADMIN_DIR/$name"
         [[ -f "$src" ]] || continue
@@ -1079,8 +1079,8 @@ _migrate_state_for_user() {
     done
 
     # The policy, moved like the rest, with a signpost left behind.
-    src="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
-    dst="$state_dir/$SHEPHERD_POLICY_FILE"
+    src="$home/.config/lunchbox/$LUNCHBOX_POLICY_FILE"
+    dst="$state_dir/$LUNCHBOX_POLICY_FILE"
     if [[ -f "$src" ]] && ! _is_policy_placeholder "$src"; then
         if [[ -e "$dst" ]]; then
             warn "  $dst already exists; not replacing it from $src"
@@ -1114,13 +1114,13 @@ _migrate_state_for_user() {
 # one is the one that matches the daemon, and a stale `target/` from an old
 # checkout would be the wrong answer to validate against.
 #
-# Deliberately never *builds* it, unlike `shepherd config validate`: this runs
+# Deliberately never *builds* it, unlike `lunchbox config validate`: this runs
 # as root, and a cargo build as root leaves a root-owned `target/` behind that
 # the developer's next plain build cannot write.
 _resolve_validator() {
     local release="${1:-true}"
     local installed
-    if installed="$(command -v shepherd-validate-config 2>/dev/null)" && [[ -x "$installed" ]]; then
+    if installed="$(command -v lunchbox-validate-config 2>/dev/null)" && [[ -x "$installed" ]]; then
         echo "$installed"
         return 0
     fi
@@ -1151,14 +1151,14 @@ _resolve_validator() {
 #
 # Args:
 #   $1 -- the kiosk user whose custodian receives the policy (required)
-#   $2 -- policy to push (default: that user's ~/.config/shepherd/config.toml)
+#   $2 -- policy to push (default: that user's ~/.config/lunchbox/config.toml)
 #   $3 -- "true" for the release validator (default), "false" for debug
 install_policy() {
     local user="${1:-}"
     local source_config="${2:-}"
     local release="${3:-true}"
     require_root
-    [[ -n "$user" ]] || die "Usage: shepherd install policy --user USER [--source PATH]"
+    [[ -n "$user" ]] || die "Usage: lunchbox install policy --user USER [--source PATH]"
     validate_user "$user"
 
     local home src
@@ -1167,7 +1167,7 @@ install_policy() {
         src="$source_config"
         [[ -f "$src" ]] || die "No policy at $src to push"
     else
-        src="$home/.config/shepherd/config.toml"
+        src="$home/.config/lunchbox/config.toml"
         [[ -f "$src" ]] \
             || die "No policy at $src to push (name one with --source PATH)"
     fi
@@ -1176,14 +1176,14 @@ install_policy() {
     # policy with an empty one -- every activity gone -- which is a bad enough
     # outcome to be worth a check rather than a comment.
     if _is_policy_placeholder "$src"; then
-        die "$src is the signpost shepherd leaves when the policy moves to the custodian, not a policy.
+        die "$src is the signpost lunchbox leaves when the policy moves to the custodian, not a policy.
   The live one is at $STATED_STATE_ROOT/$user/config.toml -- edit it with
     sudoedit $STATED_STATE_ROOT/$user/config.toml
   or install a different one with --source PATH."
     fi
 
     [[ -d "$STATED_STATE_ROOT/$user" ]] \
-        || die "No state custodian for $user; run 'shepherd install state --user $user' first"
+        || die "No state custodian for $user; run 'lunchbox install state --user $user' first"
 
     # Validate before installing, not after. lunchboxd tolerates a bad policy on
     # *reload* -- it keeps the running one and logs -- but at startup
@@ -1194,7 +1194,7 @@ install_policy() {
     # exists and the file is right here; there is no reason to find out later.
     local validator
     validator="$(_resolve_validator "$release")" \
-        || die "shepherd-validate-config not found; run 'shepherd build' first (from a source tree), \
+        || die "lunchbox-validate-config not found; run 'lunchbox build' first (from a source tree), \
 or reinstall the package, which ships it"
     info "Validating $src..."
     "$validator" "$src" \
@@ -1216,7 +1216,7 @@ or reinstall the package, which ships it"
 #
 # Args:
 #   $1 -- install prefix (default: $DEFAULT_PREFIX)
-#   $2 -- user to add to the shepherd-firewall group (empty under DESTDIR)
+#   $2 -- user to add to the lunchbox-firewall group (empty under DESTDIR)
 install_system() {
     local prefix="${1:-$DEFAULT_PREFIX}"
     local firewall_user="${2:-}"
@@ -1236,13 +1236,13 @@ install_all() {
     local prefix="${2:-$DEFAULT_PREFIX}"
 
     if [[ -z "$user" ]]; then
-        die "Usage: shepherd install all --user USER [--prefix PREFIX]"
+        die "Usage: lunchbox install all --user USER [--prefix PREFIX]"
     fi
 
     require_root
     validate_user "$user"
 
-    info "Installing shepherd-launcher (prefix: $prefix)..."
+    info "Installing lunchbox-launcher (prefix: $prefix)..."
 
     install_system "$prefix" "$user"
     install_config "$user" ""
@@ -1251,23 +1251,23 @@ install_all() {
     success "Installation complete!"
     info ""
     info "Next steps:"
-    # Step 1 named ~/.config/shepherd/config.toml until issue #157 moved the
+    # Step 1 named ~/.config/lunchbox/config.toml until issue #157 moved the
     # policy to the custodian and left a signpost there. An operator following
     # the old wording would edit a file that decides nothing.
     info "  1. Set the policy. It lives with the state custodian now --"
     info "     $STATED_STATE_ROOT/$user/config.toml -- and"
-    info "     ~$user/.config/shepherd/config.toml is a signpost saying so."
+    info "     ~$user/.config/lunchbox/config.toml is a signpost saying so."
     info "     Edit it in place:"
     info "       sudoedit $STATED_STATE_ROOT/$user/config.toml"
     info "     or install one from anywhere, validated before it is applied:"
-    info "       sudo shepherd install policy --user $user --source PATH"
+    info "       sudo lunchbox install policy --user $user --source PATH"
     info "     Either way lunchboxd reloads within a second."
-    info "  2. Have $user log out and back in (so the new shepherd-firewall"
+    info "  2. Have $user log out and back in (so the new lunchbox-firewall"
     info "     group membership takes effect for per-entry firewall rules)"
-    info "  3. Select 'Shepherd Kiosk' session at login"
-    # Not "optionally" any more (issue #157): two of shepherd's own protections
+    info "  3. Select 'Lunchbox Kiosk' session at login"
+    # Not "optionally" any more (issue #157): two of lunchbox's own protections
     # rest on hardening, so a device a child uses is not finished without it.
-    info "  4. Run 'shepherd harden apply --user $user'. On a device a child"
+    info "  4. Run 'lunchbox harden apply --user $user'. On a device a child"
     info "     uses this is not optional: it is what stops a second login for"
     info "     $user, which the state custodian refuses to choose between, and"
     info "     what stops PAM reading an environment $user wrote."
@@ -1276,9 +1276,9 @@ install_all() {
 # --- Uninstall -------------------------------------------------------------
 #
 # The uninstall_* functions below reverse the matching install_* steps. They
-# only remove host-global, shepherd-owned files; they deliberately leave user
-# data alone (per-user config under ~/.config/shepherd) and group memberships
-# (input/video/bluetooth/shepherd-firewall) in place, since removing those can
+# only remove host-global, lunchbox-owned files; they deliberately leave user
+# data alone (per-user config under ~/.config/lunchbox) and group memberships
+# (input/video/bluetooth/lunchbox-firewall) in place, since removing those can
 # affect a user's other software and isn't reversible from a backup. Each
 # function is a no-op for files that are already gone, so uninstall is safe to
 # re-run and safe to run after a partial install.
@@ -1297,7 +1297,7 @@ UNINSTALL_SKIPPED_OWNED=0
 # straight back to the greeter.
 #
 # The package declares no conffiles (issue #177), so everything it ships is an
-# ordinary file and `apt install --reinstall shepherd-launcher` puts the lot
+# ordinary file and `apt install --reinstall lunchbox-launcher` puts the lot
 # back. That was not true while the four files below were conffiles: dpkg read
 # a missing conffile as a deliberate admin removal and needed --force-confmiss
 # to restore it. See docs/INSTALL.md.
@@ -1342,7 +1342,7 @@ uninstall_bins() {
     local bindir="$destdir$prefix/$DEFAULT_BINDIR"
 
     info "Removing binaries from $bindir..."
-    for binary in "${SHEPHERD_BINARIES[@]}"; do
+    for binary in "${LUNCHBOX_BINARIES[@]}"; do
         remove_path "$bindir/$binary"
     done
 
@@ -1363,7 +1363,7 @@ uninstall_firewall() {
     remove_path "$destdir$POLKIT_LEGACY_RULES_DIR/$FIREWALL_RULES_NAME"
 
     # Reload polkit on a real (non-packaging) uninstall so the dropped rule
-    # stops applying. The shepherd-firewall system group is intentionally left
+    # stops applying. The lunchbox-firewall system group is intentionally left
     # in place: it's harmless, and leftover files or other users may still
     # reference it. This mirrors the .deb postrm (scripts/lib/package.sh).
     if [[ -z "$destdir" ]]; then
@@ -1387,13 +1387,13 @@ uninstall_sway_config() {
     local dst_dir="$destdir$SWAY_CONFIG_DIR"
 
     info "Removing sway configuration from $dst_dir..."
-    remove_path "$dst_dir/$SHEPHERD_SWAY_CONFIG"
+    remove_path "$dst_dir/$LUNCHBOX_SWAY_CONFIG"
 
     # Remove the site-override drop-in dir only if it is empty, to preserve any
     # files a site placed there. Also try to remove the /etc/sway dir itself if
     # it's now empty (it may be shared with a system sway, so ignore failure).
-    if rmdir "$dst_dir/$SHEPHERD_SWAY_CONFD" 2>/dev/null; then
-        info "  Removed empty $dst_dir/$SHEPHERD_SWAY_CONFD"
+    if rmdir "$dst_dir/$LUNCHBOX_SWAY_CONFD" 2>/dev/null; then
+        info "  Removed empty $dst_dir/$LUNCHBOX_SWAY_CONFD"
     fi
     rmdir "$dst_dir" 2>/dev/null || true
 
@@ -1455,7 +1455,7 @@ _restore_state_to_home() {
     done
 
     local src dst name side
-    for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
+    for name in "${LUNCHBOX_MIGRATED_FILES[@]}"; do
         src="$state_dir/$name"
         dst="$data_dir/$name"
         [[ -f "$src" ]] || continue
@@ -1482,15 +1482,15 @@ _restore_state_to_home() {
     # is not worth preserving: it exists to say the policy went somewhere else,
     # and it is about to be wrong. A real policy at that path is a different
     # matter and is left alone like everything else.
-    src="$state_dir/$SHEPHERD_POLICY_FILE"
-    dst="$home/.config/shepherd/$SHEPHERD_POLICY_FILE"
+    src="$state_dir/$LUNCHBOX_POLICY_FILE"
+    dst="$home/.config/lunchbox/$LUNCHBOX_POLICY_FILE"
     if [[ -f "$src" ]]; then
         if [[ -e "$dst" ]] && ! _is_policy_placeholder "$dst"; then
             warn "  $dst is a real policy; leaving $src where it is"
             skipped=$((skipped + 1))
         else
             info "  Moving the policy back to $dst"
-            install -d -m 0755 -o "$user" -g "$user" "$home/.config/shepherd"
+            install -d -m 0755 -o "$user" -g "$user" "$home/.config/lunchbox"
             install -m 0644 -o "$user" -g "$user" "$src" "$dst"
             rm -f "$src"
             moved=$((moved + 1))
@@ -1502,7 +1502,7 @@ _restore_state_to_home() {
     # restored. `_drop_shared_admin_files` removes the shared originals once
     # every user has taken a copy.
     local shared
-    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+    for name in "${LUNCHBOX_SYSTEM_FILES[@]}"; do
         shared="$STATED_ADMIN_DIR/$name"
         dst="$data_dir/$name"
         [[ -f "$shared" ]] || continue
@@ -1532,12 +1532,12 @@ _restore_state_to_home() {
 _drop_shared_admin_files() {
     [[ -d "$STATED_ADMIN_DIR" ]] || return 0
     local name
-    for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
+    for name in "${LUNCHBOX_SYSTEM_FILES[@]}"; do
         rm -f "$STATED_ADMIN_DIR/$name"
     done
     # The sentinel is an instruction, not state; a stale one left here would
     # factory-reset the device the next time a custodian is installed.
-    rm -f "$STATED_ADMIN_DIR/${SHEPHERD_UNMIGRATED_FILES[0]}"
+    rm -f "$STATED_ADMIN_DIR/${LUNCHBOX_UNMIGRATED_FILES[0]}"
     rmdir "$STATED_ADMIN_DIR" 2>/dev/null || true
 }
 
@@ -1589,7 +1589,7 @@ restore_state_to_home() {
     _stop_stated_instances
     _restore_state_for_every_user
 
-    success "Shepherd's state is back in the users' home directories"
+    success "Lunchbox's state is back in the users' home directories"
     info "  The custodian's binary and units are untouched; they belong to the"
     info "  package manager. Downgrade or remove the package to finish."
 }
@@ -1654,7 +1654,7 @@ uninstall_state() {
             info "  Anything still in them is named above; the rest went back to the"
             info "  users' home directories. Remove them by hand once you are happy."
         else
-            info "Left shepherd's state, owned by $STATED_USER:"
+            info "Left lunchbox's state, owned by $STATED_USER:"
             local dir
             for dir in "${left[@]}"; do
                 case "$dir" in
@@ -1744,14 +1744,14 @@ uninstall_system() {
     uninstall_bluetooth_dropin
 }
 
-# Remove everything shepherd installed system-wide.
+# Remove everything lunchbox installed system-wide.
 uninstall_all() {
     local prefix="${1:-$DEFAULT_PREFIX}"
     local restore="${2:-false}"
 
     require_root
 
-    info "Uninstalling shepherd-launcher (prefix: $prefix)..."
+    info "Uninstalling lunchbox-launcher (prefix: $prefix)..."
 
     uninstall_system "$prefix" "$restore"
 
@@ -1766,9 +1766,9 @@ uninstall_all() {
 
     info ""
     info "Left in place (remove by hand if you want them gone):"
-    info "  - Per-user config under ~/.config/shepherd/ (config.toml, movies.toml)"
-    info "  - Group memberships (input, video, bluetooth, shepherd-firewall)"
-    info "  - The shepherd-firewall system group"
+    info "  - Per-user config under ~/.config/lunchbox/ (config.toml, movies.toml)"
+    info "  - Group memberships (input, video, bluetooth, lunchbox-firewall)"
+    info "  - The lunchbox-firewall system group"
 }
 
 # Main uninstall command dispatcher. Parallels install_main.
@@ -1819,10 +1819,10 @@ uninstall_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd uninstall <command> [OPTIONS]
+Usage: lunchbox uninstall <command> [OPTIONS]
 
-Removes files that 'shepherd install' placed system-wide. Per-user config
-(~/.config/shepherd) and group memberships are left untouched.
+Removes files that 'lunchbox install' placed system-wide. Per-user config
+(~/.config/lunchbox) and group memberships are left untouched.
 
 Commands:
     bins              Remove the installed binaries
@@ -1849,14 +1849,14 @@ Environment:
                       When set, firewall/udev skip the polkit/udev reload.
 
 Examples:
-    shepherd uninstall bins
-    shepherd uninstall bins --prefix /usr
-    shepherd uninstall all
-    shepherd uninstall state --restore-to-home
+    lunchbox uninstall bins
+    lunchbox uninstall bins --prefix /usr
+    lunchbox uninstall all
+    lunchbox uninstall state --restore-to-home
 EOF
             ;;
         *)
-            die "Unknown uninstall command: $subcmd (try: shepherd uninstall help)"
+            die "Unknown uninstall command: $subcmd (try: lunchbox uninstall help)"
             ;;
     esac
 }
@@ -1933,7 +1933,7 @@ install_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd install <command> [OPTIONS]
+Usage: lunchbox install <command> [OPTIONS]
 
 Commands:
     bins              Install release binaries
@@ -1942,7 +1942,7 @@ Commands:
                       and system user (issue #157)
     policy            Push a policy to the custodian, making it the one
                       lunchboxd reads. Takes the user's edited
-                      ~/.config/shepherd/config.toml, or any file named with
+                      ~/.config/lunchbox/config.toml, or any file named with
                       --source. Validated before it is installed.
     config            Deploy user configuration
     sway-config       Install sway configuration
@@ -1975,18 +1975,18 @@ Notes:
     own directories are not relocatable.
 
 Examples:
-    shepherd install bins --prefix /usr/local
-    shepherd install firewall --user kiosk
-    shepherd install config --user kiosk
-    shepherd install policy --user kiosk
-    shepherd install policy --user kiosk --source ./new-config.toml
-    shepherd install groups --user kiosk
-    shepherd install udev
-    shepherd install all --user kiosk --prefix /usr
+    lunchbox install bins --prefix /usr/local
+    lunchbox install firewall --user kiosk
+    lunchbox install config --user kiosk
+    lunchbox install policy --user kiosk
+    lunchbox install policy --user kiosk --source ./new-config.toml
+    lunchbox install groups --user kiosk
+    lunchbox install udev
+    lunchbox install all --user kiosk --prefix /usr
 EOF
             ;;
         *)
-            die "Unknown install command: $subcmd (try: shepherd install help)"
+            die "Unknown install command: $subcmd (try: lunchbox install help)"
             ;;
     esac
 }

@@ -20,8 +20,8 @@
 //! never talks to anything but loopback.
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use lunchbox_api::InterstitialKind;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

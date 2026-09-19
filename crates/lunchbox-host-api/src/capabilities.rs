@@ -1,7 +1,7 @@
 //! Host capabilities model
 
-use serde::{Deserialize, Serialize};
 use lunchbox_api::EntryKindTag;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Describes what a host adapter can do

@@ -2,10 +2,10 @@
 # Manual real-Chrome test for the supervised-browser activity.
 #
 # Verifies the two assumptions only real Chrome can confirm:
-#   1. Flatpak Chrome reads the managed-policy JSON at the path shepherd writes
+#   1. Flatpak Chrome reads the managed-policy JSON at the path lunchbox writes
 #      it to (`~/.var/app/com.google.Chrome/config/chromium/policies/managed/`),
 #      so the URL allow/blocklist is actually enforced.
-#   2. `--user-data-dir` lands where shepherd later wipes the profile.
+#   2. `--user-data-dir` lands where lunchbox later wipes the profile.
 #
 # It drives `cargo test -p lunchbox-host-linux` against the real
 # `com.google.Chrome` flatpak. HOME is redirected to a tempdir inside the test
@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-APP_ID="${SHEPHERD_CHROME_FLATPAK:-com.google.Chrome}"
+APP_ID="${LUNCHBOX_CHROME_FLATPAK:-com.google.Chrome}"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -42,11 +42,11 @@ echo "[orchestrator] Verifying preconditions..."
 if ! flatpak info "$APP_ID" >/dev/null 2>&1; then
     fail "flatpak '$APP_ID' is not installed.
        Run: flatpak install -y flathub $APP_ID
-       (or set SHEPHERD_CHROME_FLATPAK to another Chromium-based flatpak id)"
+       (or set LUNCHBOX_CHROME_FLATPAK to another Chromium-based flatpak id)"
 fi
 
 echo "[orchestrator] Running cargo test (real Chrome, $APP_ID)..."
-SHEPHERD_CHROME_FLATPAK="$APP_ID" \
+LUNCHBOX_CHROME_FLATPAK="$APP_ID" \
     cargo test -p lunchbox-host-linux --lib -- \
     --ignored --nocapture --test-threads=1 \
     browser::tests::real_flatpak_chrome_enforces_policy_and_user_data_dir

@@ -434,7 +434,7 @@ mod libmpv_backend {
                 let raw_options = format!("extractor-args=%{}%{clients}", clients.len());
                 init.set_property("ytdl-raw-options", raw_options.as_str())?;
                 // Optional verbose mpv log to a file, for on-device debugging.
-                if let Ok(path) = std::env::var("SHEPHERD_MPV_LOG") {
+                if let Ok(path) = std::env::var("LUNCHBOX_MPV_LOG") {
                     let _ = init.set_property("msg-level", "all=v");
                     let _ = init.set_property("log-file", path.as_str());
                 }
@@ -480,7 +480,7 @@ mod libmpv_backend {
     }
 
     /// Which decode path the render-API front-end asks mpv for, honouring a
-    /// `SHEPHERD_MPV_HWDEC` override.
+    /// `LUNCHBOX_MPV_HWDEC` override.
     ///
     /// The default is a *copy* mode — `auto-copy-safe` — rather than the
     /// zero-copy `auto-safe` that issue #115 fought for, because zero-copy
@@ -503,18 +503,18 @@ mod libmpv_backend {
     ///
     /// Identical with `hr-seek-framedrop` on and off, identical under `vo=gpu`
     /// and `vo=gpu-next`, and identical with a larger surface pool — and bare
-    /// `mpv` reproduces it with no shepherd code involved, so it is a driver
+    /// `mpv` reproduces it with no lunchbox code involved, so it is a driver
     /// bug in the DMABUF export, not something this crate can seek its way
     /// around. The one thing that changes it is whether the decoded surface is
     /// read back into system RAM, which is exactly what a `-copy` mode does.
     ///
     /// The price is the 2.6 points of one core in the table, and it is only
     /// paid on hardware where the interop is fine. Set
-    /// `SHEPHERD_MPV_HWDEC=auto-safe` to take the zero-copy path back on a GPU
+    /// `LUNCHBOX_MPV_HWDEC=auto-safe` to take the zero-copy path back on a GPU
     /// that renders it correctly; any value mpv's `--hwdec` accepts works,
     /// including `no` to force software. See `docs/lunchbox-media.md`.
     fn render_api_hwdec() -> String {
-        std::env::var("SHEPHERD_MPV_HWDEC").unwrap_or_else(|_| "auto-copy-safe".to_string())
+        std::env::var("LUNCHBOX_MPV_HWDEC").unwrap_or_else(|_| "auto-copy-safe".to_string())
     }
 
     /// Report the decode path mpv chose for the current file, at a level that
@@ -544,7 +544,7 @@ mod libmpv_backend {
             if copy_wanted {
                 tracing::info!(
                     "mpv is decoding video with {interop}, reading each frame back \
-                     to system RAM ({mode}); set SHEPHERD_MPV_HWDEC=auto-safe for \
+                     to system RAM ({mode}); set LUNCHBOX_MPV_HWDEC=auto-safe for \
                      the zero-copy path if this GPU renders it correctly."
                 );
             } else {

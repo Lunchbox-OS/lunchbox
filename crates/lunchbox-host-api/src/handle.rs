@@ -1,7 +1,7 @@
 //! Session handle abstraction
 
-use serde::{Deserialize, Serialize};
 use lunchbox_util::SessionId;
+use serde::{Deserialize, Serialize};
 
 /// Opaque handle to a running session on the host
 ///

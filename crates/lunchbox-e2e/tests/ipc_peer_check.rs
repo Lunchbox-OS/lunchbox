@@ -32,7 +32,7 @@ fn probe_in_own_cgroup(socket: &str, method: &str) -> Option<String> {
             // `systemd-run` fail silently — which reads as an empty probe
             // result rather than as a refusal.
             &format!(
-                "--unit=shepherd-peer-probe-{}-{}.scope",
+                "--unit=lunchbox-peer-probe-{}-{}.scope",
                 std::process::id(),
                 method.replace('_', "-")
             ),
@@ -56,7 +56,7 @@ fn probe_in_our_cgroup(socket: &str, method: &str) -> Result<String> {
 
 #[tokio::test]
 #[ignore = "needs a user manager to put a peer in a cgroup of its own"]
-async fn a_peer_outside_shepherds_cgroup_cannot_call_a_mutating_method() -> Result<()> {
+async fn a_peer_outside_lunchboxs_cgroup_cannot_call_a_mutating_method() -> Result<()> {
     if !lunchbox_ipc::kernel_supports_peer_cgroup() {
         eprintln!("[SKIP] this kernel cannot report a peer's cgroup");
         return Ok(());
@@ -68,12 +68,12 @@ async fn a_peer_outside_shepherds_cgroup_cannot_call_a_mutating_method() -> Resu
         .await?;
     let socket = h.socket_path().display().to_string();
 
-    // Control: shepherd's own clients share its cgroup and must still work,
+    // Control: lunchbox's own clients share its cgroup and must still work,
     // or a passing refusal below would prove nothing.
     let ours = probe_in_our_cgroup(&socket, "health")?;
     assert!(
         ours.starts_with("ACCEPTED"),
-        "a peer in shepherd's own cgroup must be accepted, got: {ours}"
+        "a peer in lunchbox's own cgroup must be accepted, got: {ours}"
     );
 
     let Some(foreign) = probe_in_own_cgroup(&socket, "adjust_tokens") else {
@@ -86,7 +86,7 @@ async fn a_peer_outside_shepherds_cgroup_cannot_call_a_mutating_method() -> Resu
     }
     assert!(
         foreign.starts_with("REFUSED"),
-        "a peer outside shepherd's cgroup must not reach adjust_tokens, got: {foreign}"
+        "a peer outside lunchbox's cgroup must not reach adjust_tokens, got: {foreign}"
     );
 
     // ...and the same for the other method #144 names. Empty means the probe
@@ -95,7 +95,7 @@ async fn a_peer_outside_shepherds_cgroup_cannot_call_a_mutating_method() -> Resu
     match probe_in_own_cgroup(&socket, "extend_current") {
         Some(extend) if !extend.is_empty() => assert!(
             extend.starts_with("REFUSED"),
-            "a peer outside shepherd's cgroup must not reach extend_current, got: {extend}"
+            "a peer outside lunchbox's cgroup must not reach extend_current, got: {extend}"
         ),
         _ => eprintln!("[SKIP] extend_current probe never ran in its own scope"),
     }

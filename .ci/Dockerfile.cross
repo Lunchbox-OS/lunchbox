@@ -1,4 +1,4 @@
-# arm64 cross-compilation CI image for shepherd-launcher.
+# arm64 cross-compilation CI image for lunchbox-launcher.
 #
 # Layers the cross toolchain and the target-architecture sysroot on top of the
 # base CI image (.ci/Dockerfile), so the arm64 build and package jobs get a
@@ -26,7 +26,7 @@ ARG TARGET_ARCH=arm64
 
 # Install the cross toolchain, the target architecture's half of build.pkgs,
 # and rustc's std for the derived triple -- via the project's own installer, so
-# the image stays in lockstep with `shepherd deps install cross` on a host and
+# the image stays in lockstep with `lunchbox deps install cross` on a host and
 # the multiarch/mirror setup is exercised here rather than reimplemented.
 #
 # --allow-remove is required, and is safe *here specifically*. The two
@@ -38,13 +38,13 @@ ARG TARGET_ARCH=arm64
 # image never builds natively -- it exists to cross-compile -- so it has no
 # native build to protect, and the base image it layers on is untouched.
 #
-# Re-copy scripts (and VERSION, which `scripts/shepherd` reads at startup for
+# Re-copy scripts (and VERSION, which `scripts/lunchbox` reads at startup for
 # any subcommand) so this layer reflects the current checkout rather than
 # whatever the base image baked.
-COPY VERSION /opt/shepherd-deps/VERSION
-COPY scripts /opt/shepherd-deps/scripts
-WORKDIR /opt/shepherd-deps
-RUN ./scripts/shepherd deps install cross --arch "${TARGET_ARCH}" --allow-remove && \
+COPY VERSION /opt/lunchbox-deps/VERSION
+COPY scripts /opt/lunchbox-deps/scripts
+WORKDIR /opt/lunchbox-deps
+RUN ./scripts/lunchbox deps install cross --arch "${TARGET_ARCH}" --allow-remove && \
     rm -rf /var/lib/apt/lists/*
 
 # `deps install cross` adds the Rust target as root, so re-open the toolchain
@@ -61,12 +61,12 @@ RUN chmod -R a+rwX "$CARGO_HOME" "$RUSTUP_HOME"
 # These are the same variables scripts/lib/build.sh exports for a foreign
 # target. They are deliberately NOT baked in as ENV: build.sh sets each one
 # only where it is unset, so it supplies them for every job that goes through
-# `shepherd build`, and duplicating them here would be a second copy to keep in
+# `lunchbox build`, and duplicating them here would be a second copy to keep in
 # step. This RUN sets them for the length of the check only.
 #
 # Never set CARGO_BUILD_TARGET, here or in a job. It would override
 # crates/lunchbox-firewall-bpf's own `[build] target = "bpfel-unknown-none"`
-# and compile the eBPF program for the host triple; `shepherd build` passes
+# and compile the eBPF program for the host triple; `lunchbox build` passes
 # --target on the command line for exactly that reason.
 # `sh` here, not bash: Docker runs each RUN through /bin/sh, which on Ubuntu is
 # dash -- and dash has no ${var/a/b} substitution, so the triple is derived with

@@ -12,26 +12,26 @@ val rustAbis = listOf("arm64-v8a", "armeabi-v7a")
 // Single source of truth: the repo-root VERSION file, three directories up from
 // this Gradle project (android/ -> lunchbox-media-android/ -> crates/ -> root).
 // Mirrors companion-android and scripts/lib/version.sh so versionName can't drift.
-val shepherdVersion: String =
+val lunchboxVersion: String =
     rootProject.projectDir.parentFile.parentFile.parentFile.resolve("VERSION")
         .readText().trim()
 
 // Monotonic versionCode packed from semver (minor/patch < 100). e.g. 0.2.0 -> 200.
-val shepherdVersionCode: Int =
-    shepherdVersion.substringBefore('-').substringBefore('+').split('.').let {
+val lunchboxVersionCode: Int =
+    lunchboxVersion.substringBefore('-').substringBefore('+').split('.').let {
         it[0].toInt() * 10000 + it[1].toInt() * 100 + it[2].toInt()
     }
 
 android {
-    namespace = "com.armeafamily.shepherd.media"
+    namespace = "com.lunchbox_os.media"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.armeafamily.shepherd.media"
+        applicationId = "com.lunchbox_os.media"
         minSdk = 24
         targetSdk = 35
-        versionCode = shepherdVersionCode
-        versionName = shepherdVersion
+        versionCode = lunchboxVersionCode
+        versionName = lunchboxVersion
         ndk {
             //noinspection ChromeOsAbiSupport
             abiFilters += rustAbis
@@ -42,14 +42,14 @@ android {
     // present (see .github/workflows/release.yml). Local `assembleRelease`
     // without them falls back to debug signing, so developers can still produce
     // an installable APK without the release key.
-    val releaseKeystore: String? = System.getenv("SHEPHERD_KEYSTORE_FILE")
+    val releaseKeystore: String? = System.getenv("LUNCHBOX_KEYSTORE_FILE")
     signingConfigs {
         if (releaseKeystore != null) {
             create("release") {
                 storeFile = file(releaseKeystore)
-                storePassword = System.getenv("SHEPHERD_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("SHEPHERD_KEY_ALIAS")
-                keyPassword = System.getenv("SHEPHERD_KEY_PASSWORD")
+                storePassword = System.getenv("LUNCHBOX_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("LUNCHBOX_KEY_ALIAS")
+                keyPassword = System.getenv("LUNCHBOX_KEY_PASSWORD")
             }
         }
     }

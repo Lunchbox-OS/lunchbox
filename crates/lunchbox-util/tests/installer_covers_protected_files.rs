@@ -1,4 +1,4 @@
-//! The installer's idea of shepherd's protected files must match this crate's.
+//! The installer's idea of lunchbox's protected files must match this crate's.
 //!
 //! [`ProtectedFile`] is the Rust list; `scripts/lib/install.sh` carries a shell
 //! list of the same files, because the migration that moves a device's state
@@ -57,19 +57,19 @@ fn every_protected_file_is_accounted_for_by_the_installer() {
     // deliberately left behind. The third is declared rather than omitted so
     // that "decided against" reads differently from "forgotten" — which is the
     // distinction this test exists to make.
-    let mut accounted: Vec<String> = shell_names(&script, "SHEPHERD_MIGRATED_FILES");
-    accounted.extend(shell_names(&script, "SHEPHERD_SYSTEM_FILES"));
-    accounted.extend(shell_names(&script, "SHEPHERD_POLICY_FILE"));
-    accounted.extend(shell_names(&script, "SHEPHERD_UNMIGRATED_FILES"));
+    let mut accounted: Vec<String> = shell_names(&script, "LUNCHBOX_MIGRATED_FILES");
+    accounted.extend(shell_names(&script, "LUNCHBOX_SYSTEM_FILES"));
+    accounted.extend(shell_names(&script, "LUNCHBOX_POLICY_FILE"));
+    accounted.extend(shell_names(&script, "LUNCHBOX_UNMIGRATED_FILES"));
 
     for file in ALL {
         let name = file.file_name();
         assert!(
             accounted.iter().any(|n| n == name),
             "{name} is a ProtectedFile the installer says nothing about.\n\
-             Add it to SHEPHERD_MIGRATED_FILES (a user's) or SHEPHERD_SYSTEM_FILES \
+             Add it to LUNCHBOX_MIGRATED_FILES (a user's) or LUNCHBOX_SYSTEM_FILES \
              (the device's) in scripts/lib/install.sh so it is carried across, or to \
-             SHEPHERD_UNMIGRATED_FILES if it should be left behind on purpose.\n\
+             LUNCHBOX_UNMIGRATED_FILES if it should be left behind on purpose.\n\
              The installer currently accounts for: {accounted:?}"
         );
     }
@@ -79,7 +79,7 @@ fn every_protected_file_is_accounted_for_by_the_installer() {
 fn the_installer_does_not_carry_files_that_no_longer_exist() {
     // The other direction. A name removed from `ProtectedFile` but left in the
     // installer is harmless on a device — it moves a file nothing writes — but
-    // it is a lie about what shepherd keeps, and the next person to read the
+    // it is a lie about what lunchbox keeps, and the next person to read the
     // list would believe it.
     let script = installer();
     let known: Vec<&str> = ALL
@@ -90,14 +90,14 @@ fn the_installer_does_not_carry_files_that_no_longer_exist() {
         .chain(std::iter::once("lunchboxd.db"))
         .collect();
 
-    for name in shell_names(&script, "SHEPHERD_MIGRATED_FILES")
+    for name in shell_names(&script, "LUNCHBOX_MIGRATED_FILES")
         .into_iter()
-        .chain(shell_names(&script, "SHEPHERD_SYSTEM_FILES"))
-        .chain(shell_names(&script, "SHEPHERD_UNMIGRATED_FILES"))
+        .chain(shell_names(&script, "LUNCHBOX_SYSTEM_FILES"))
+        .chain(shell_names(&script, "LUNCHBOX_UNMIGRATED_FILES"))
     {
         assert!(
             known.contains(&name.as_str()),
-            "install.sh migrates {name}, which is not a file shepherd keeps any more \
+            "install.sh migrates {name}, which is not a file lunchbox keeps any more \
              (known: {known:?})"
         );
     }
@@ -111,9 +111,9 @@ fn the_installer_puts_each_file_in_the_scope_rust_says_it_has() {
     // custodian serves it from. A file the installer treats as a user's and the
     // daemon reads as the device's is one the daemon never finds.
     let script = installer();
-    let per_user = shell_names(&script, "SHEPHERD_MIGRATED_FILES");
-    let system = shell_names(&script, "SHEPHERD_SYSTEM_FILES");
-    let policy = shell_names(&script, "SHEPHERD_POLICY_FILE");
+    let per_user = shell_names(&script, "LUNCHBOX_MIGRATED_FILES");
+    let system = shell_names(&script, "LUNCHBOX_SYSTEM_FILES");
+    let policy = shell_names(&script, "LUNCHBOX_POLICY_FILE");
 
     for file in ALL {
         let name = file.file_name().to_string();
@@ -127,13 +127,13 @@ fn the_installer_puts_each_file_in_the_scope_rust_says_it_has() {
             FileScope::System => assert!(
                 system.contains(&name),
                 "{name} is a device file to Rust but the installer moves it to a user's \
-                 directory (SHEPHERD_SYSTEM_FILES has {system:?})"
+                 directory (LUNCHBOX_SYSTEM_FILES has {system:?})"
             ),
             FileScope::PerUser => assert!(
                 per_user.contains(&name) || policy.contains(&name),
                 "{name} is a user's file to Rust but the installer does not move it to \
-                 their directory (SHEPHERD_MIGRATED_FILES has {per_user:?}, \
-                 SHEPHERD_POLICY_FILE has {policy:?})"
+                 their directory (LUNCHBOX_MIGRATED_FILES has {per_user:?}, \
+                 LUNCHBOX_POLICY_FILE has {policy:?})"
             ),
         }
     }

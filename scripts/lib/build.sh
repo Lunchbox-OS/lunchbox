@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build logic for shepherd-launcher
+# Build logic for lunchbox-launcher
 # Wraps cargo build with project-specific settings
 
 # Get the directory containing this script
@@ -10,9 +10,9 @@ BUILD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$BUILD_LIB_DIR/common.sh"
 
 # Binary names produced by the build
-SHEPHERD_BINARIES=(
+LUNCHBOX_BINARIES=(
     "lunchboxd"
-    "shepherd-launcher"
+    "lunchbox-launcher"
     "lunchbox-hud"
     "lunchbox-media"
     "lunchbox-pairing-display"
@@ -36,7 +36,7 @@ SHEPHERD_BINARIES=(
     # only route to a policy is an unchecked one, and an unparseable policy is
     # fatal at lunchboxd's *startup* -- a session that ends at the next boot,
     # on a device whose kiosk user has no shell to fix it from.
-    "shepherd-validate-config"
+    "lunchbox-validate-config"
 )
 
 # Rust target triple to build for, or empty for a native build.
@@ -45,7 +45,7 @@ SHEPHERD_BINARIES=(
 # that everything which locates a built binary follows a cross build without
 # knowing that one is happening. Exported so a re-exec (package deb's fakeroot
 # re-entry) keeps it.
-export SHEPHERD_CARGO_TARGET="${SHEPHERD_CARGO_TARGET:-}"
+export LUNCHBOX_CARGO_TARGET="${LUNCHBOX_CARGO_TARGET:-}"
 
 # Rust triples that name an ISA revision the GNU type does not.
 #
@@ -108,7 +108,7 @@ Pass --target <triple> explicitly if you know the right one."
     echo "$triple"
 }
 
-# Resolve --target/--arch into SHEPHERD_CARGO_TARGET.
+# Resolve --target/--arch into LUNCHBOX_CARGO_TARGET.
 #
 # An --arch that names the host architecture stays a native build: it leaves the
 # triple unset, so the output paths and the cargo fingerprints are the ones every
@@ -121,20 +121,20 @@ build_set_target() {
 
     case "$kind" in
         target)
-            SHEPHERD_CARGO_TARGET="$value"
+            LUNCHBOX_CARGO_TARGET="$value"
             ;;
         arch)
             if [[ "$value" == "$(dpkg --print-architecture)" ]]; then
-                SHEPHERD_CARGO_TARGET=""
+                LUNCHBOX_CARGO_TARGET=""
             else
-                SHEPHERD_CARGO_TARGET="$(arch_to_triple "$value")"
+                LUNCHBOX_CARGO_TARGET="$(arch_to_triple "$value")"
             fi
             ;;
         *)
             die "build_set_target: unknown kind '$kind'"
             ;;
     esac
-    export SHEPHERD_CARGO_TARGET
+    export LUNCHBOX_CARGO_TARGET
 }
 
 # Get the target directory for binaries
@@ -147,8 +147,8 @@ get_target_dir() {
     [[ "$release" == "true" ]] && profile="release"
 
     # cargo puts a --target build under target/<triple>/ instead of target/.
-    if [[ -n "${SHEPHERD_CARGO_TARGET:-}" ]]; then
-        echo "$repo_root/target/$SHEPHERD_CARGO_TARGET/$profile"
+    if [[ -n "${LUNCHBOX_CARGO_TARGET:-}" ]]; then
+        echo "$repo_root/target/$LUNCHBOX_CARGO_TARGET/$profile"
     else
         echo "$repo_root/target/$profile"
     fi
@@ -168,7 +168,7 @@ binaries_exist() {
     local target_dir
     target_dir="$(get_target_dir "$release")"
     
-    for binary in "${SHEPHERD_BINARIES[@]}"; do
+    for binary in "${LUNCHBOX_BINARIES[@]}"; do
         if [[ ! -x "$target_dir/$binary" ]]; then
             return 1
         fi
@@ -176,7 +176,7 @@ binaries_exist() {
     return 0
 }
 
-# Build the config editor's wasm validator into shepherd-webui/src/config/wasm.
+# Build the config editor's wasm validator into lunchbox-webui/src/config/wasm.
 #
 # Must run before the npm build, which imports it. The editor runs the real
 # `lunchbox_config` parser and validator rather than a TypeScript
@@ -197,7 +197,7 @@ build_config_wasm() {
     info "Building config editor wasm validator..."
     cd "$repo_root" || die "Failed to change directory to $repo_root"
     wasm-pack build --target web --release \
-        --out-dir ../../shepherd-webui/src/config/wasm \
+        --out-dir ../../lunchbox-webui/src/config/wasm \
         --out-name lunchbox_config \
         crates/lunchbox-config-wasm \
         || die "wasm-pack build failed"
@@ -208,10 +208,10 @@ build_config_wasm() {
 build_webui() {
     local repo_root
     repo_root="$(get_repo_root)"
-    local webui_dir="$repo_root/shepherd-webui"
+    local webui_dir="$repo_root/lunchbox-webui"
 
     if [[ ! -d "$webui_dir" ]]; then
-        warn "shepherd-webui directory not found; skipping web UI build"
+        warn "lunchbox-webui directory not found; skipping web UI build"
         return 0
     fi
 
@@ -239,7 +239,7 @@ build_webui() {
 build_config_editor() {
     local repo_root
     repo_root="$(get_repo_root)"
-    local webui_dir="$repo_root/shepherd-webui"
+    local webui_dir="$repo_root/lunchbox-webui"
 
     require_command npm
 
@@ -252,7 +252,7 @@ build_config_editor() {
         npm install
     fi
     npm run build:standalone
-    success "Config editor built (shepherd-webui/dist-standalone/)"
+    success "Config editor built (lunchbox-webui/dist-standalone/)"
     cd "$repo_root" || die "Failed to return to repo root"
 }
 
@@ -265,7 +265,7 @@ build_config_editor() {
 dev_webui() {
     local repo_root
     repo_root="$(get_repo_root)"
-    local webui_dir="$repo_root/shepherd-webui"
+    local webui_dir="$repo_root/lunchbox-webui"
     local target="embedded"
     local rebuild_wasm=false
     local -a passthrough=()
@@ -282,7 +282,7 @@ dev_webui() {
                 ;;
             help|-h|--help)
                 cat <<EOF
-Usage: shepherd dev webui [--standalone] [--wasm] [-- <rsbuild args>]
+Usage: lunchbox dev webui [--standalone] [--wasm] [-- <rsbuild args>]
 
 Runs the rsbuild dev server in the foreground with hot reload.
 
@@ -297,9 +297,9 @@ Options:
 Anything after -- is passed to rsbuild, e.g. --port 3001.
 
 Examples:
-    shepherd dev webui
-    shepherd dev webui --standalone
-    shepherd dev webui --wasm -- --port 3001
+    lunchbox dev webui
+    lunchbox dev webui --standalone
+    lunchbox dev webui --wasm -- --port 3001
 EOF
                 return 0
                 ;;
@@ -309,12 +309,12 @@ EOF
                 break
                 ;;
             *)
-                die "Unknown dev webui option: $1 (try: shepherd dev webui help)"
+                die "Unknown dev webui option: $1 (try: lunchbox dev webui help)"
                 ;;
         esac
     done
 
-    [[ -d "$webui_dir" ]] || die "shepherd-webui directory not found"
+    [[ -d "$webui_dir" ]] || die "lunchbox-webui directory not found"
     require_command npm
 
     # The config editor is imported by both targets — lazily in the management
@@ -340,7 +340,7 @@ EOF
     fi
 }
 
-# Export the cross-compilation environment for SHEPHERD_CARGO_TARGET.
+# Export the cross-compilation environment for LUNCHBOX_CARGO_TARGET.
 #
 # Only touches variables that are unset, so a CI image that bakes them in wins
 # and a developer can override any one of them. Everything is derived from the
@@ -399,22 +399,22 @@ build_cargo() {
     fi
 
     local for_target=""
-    if [[ -n "${SHEPHERD_CARGO_TARGET:-}" ]]; then
+    if [[ -n "${LUNCHBOX_CARGO_TARGET:-}" ]]; then
         # Pass --target on the command line rather than exporting
         # CARGO_BUILD_TARGET: lunchbox-firewall-helper's build.rs shells out to
         # a nightly cargo for the sibling BPF crate, and an environment
         # variable would beat that crate's own [build] target and try to build
         # the eBPF program for this triple. (build.rs strips it too, belt and
         # braces -- but the command line never reaches the child at all.)
-        cargo_args+=(--target "$SHEPHERD_CARGO_TARGET")
-        for_target=" for $SHEPHERD_CARGO_TARGET"
+        cargo_args+=(--target "$LUNCHBOX_CARGO_TARGET")
+        for_target=" for $LUNCHBOX_CARGO_TARGET"
 
-        if [[ "$SHEPHERD_CARGO_TARGET" != "$(rustc -vV | awk '/^host: /{print $2}')" ]]; then
-            _build_export_cross_env "$SHEPHERD_CARGO_TARGET"
+        if [[ "$LUNCHBOX_CARGO_TARGET" != "$(rustc -vV | awk '/^host: /{print $2}')" ]]; then
+            _build_export_cross_env "$LUNCHBOX_CARGO_TARGET"
         fi
     fi
 
-    info "Building shepherd ($build_type mode)$for_target..."
+    info "Building lunchbox ($build_type mode)$for_target..."
     cargo build "${cargo_args[@]}"
 
     # Verify binaries were created
@@ -426,7 +426,7 @@ build_cargo() {
     target_dir="$(get_target_dir "$release")"
     
     success "Built binaries ($build_type):"
-    for binary in "${SHEPHERD_BINARIES[@]}"; do
+    for binary in "${LUNCHBOX_BINARIES[@]}"; do
         info "  $target_dir/$binary"
     done
 }
@@ -484,14 +484,14 @@ build_main() {
                 ;;
             help|-h|--help)
                 cat <<EOF
-Usage: shepherd build [OPTIONS]
+Usage: lunchbox build [OPTIONS]
 
 Options:
     --release, -r    Build in release mode (optimized)
     --arch ARCH      Build for a Debian architecture (arm64, …). The host's own
                      architecture builds natively; any other cross-compiles and
                      lands in target/<triple>/, which install and package follow.
-                     Needs the cross toolchain: shepherd deps install cross
+                     Needs the cross toolchain: lunchbox deps install cross
                      --arch ARCH
     --target TRIPLE  Build for a Rust target triple, always explicitly, even
                      when it is the host's. Lower-level form of --arch.
@@ -501,16 +501,16 @@ Options:
     help             Show this help
 
 Examples:
-    shepherd build                  # Debug build
-    shepherd build --release        # Release build
-    shepherd build --arch arm64     # Cross-compile (from another architecture)
-    shepherd build clean            # Clean artifacts
-    shepherd build config-editor    # Static bundle for a web host
+    lunchbox build                  # Debug build
+    lunchbox build --release        # Release build
+    lunchbox build --arch arm64     # Cross-compile (from another architecture)
+    lunchbox build clean            # Clean artifacts
+    lunchbox build config-editor    # Static bundle for a web host
 EOF
                 return
                 ;;
             *)
-                die "Unknown build option: $1 (try: shepherd build help)"
+                die "Unknown build option: $1 (try: lunchbox build help)"
                 ;;
         esac
     done

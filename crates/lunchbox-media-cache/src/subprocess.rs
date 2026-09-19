@@ -2,7 +2,7 @@
 //!
 //! `lunchboxd` accepts a client on its management socket only from its own
 //! cgroup. Every subprocess it starts is a direct child, so it inherits that
-//! cgroup and lands inside the allow-list. For most of shepherd's helpers that
+//! cgroup and lands inside the allow-list. For most of lunchbox's helpers that
 //! is uninteresting — fixed argv, output read straight back. `yt-dlp` is not:
 //! it runs on a background prefetch timer with no activity launched, and it
 //! parses whatever a remote host returns, from an extractor with a recurring
@@ -135,7 +135,7 @@ mod tests {
             "systemd-run".to_string(),
             "--user".to_string(),
             "--scope".to_string(),
-            "--unit=shepherd-ytdlp-download-7-0.scope".to_string(),
+            "--unit=lunchbox-ytdlp-download-7-0.scope".to_string(),
             "--".to_string(),
         ];
         assert_eq!(
@@ -144,7 +144,7 @@ mod tests {
                 "systemd-run",
                 "--user",
                 "--scope",
-                "--unit=shepherd-ytdlp-download-7-0.scope",
+                "--unit=lunchbox-ytdlp-download-7-0.scope",
                 "--",
                 "yt-dlp",
             ]

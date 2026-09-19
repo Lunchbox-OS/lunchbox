@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 
 /// On a stock 26.04 + GDM host the kiosk user sets the session's environment by
 /// writing `~/.pam_environment`, which GDM's PAM stack reads (`user_readenv=1`).
-/// While shepherd resolved helpers through `$PATH`, that let any activity put
+/// While lunchbox resolved helpers through `$PATH`, that let any activity put
 /// its own `systemd-run` in front of the real one — and since a helper is a
 /// direct child of the daemon, the substitute would run **in the daemon's own
 /// cgroup**, which the management socket accepts as `Admin`. It would also turn
@@ -18,7 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 /// The fix is that `resolve` does not read the environment at all.
 #[test]
 fn a_poisoned_path_cannot_redirect_a_helper() {
-    let decoy_dir = std::env::temp_dir().join("shepherd-poisoned-path-test");
+    let decoy_dir = std::env::temp_dir().join("lunchbox-poisoned-path-test");
     std::fs::create_dir_all(&decoy_dir).expect("create decoy dir");
     let planted = decoy_dir.join("systemd-run");
     std::fs::write(&planted, b"#!/bin/sh\nexit 0\n").expect("plant decoy");
@@ -41,7 +41,7 @@ fn a_poisoned_path_cannot_redirect_a_helper() {
     assert_ne!(
         found, planted,
         "a $PATH entry redirected a helper; an activity could put its own binary \
-         in shepherd's cgroup (issue #144)"
+         in lunchbox's cgroup (issue #144)"
     );
     assert!(
         found.is_absolute(),

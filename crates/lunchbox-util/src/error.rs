@@ -6,7 +6,7 @@ use crate::EntryId;
 
 /// Core error type for lunchboxd operations
 #[derive(Debug, Error)]
-pub enum ShepherdError {
+pub enum LunchboxError {
     #[error("Entry not found: {0}")]
     EntryNotFound(EntryId),
 
@@ -41,7 +41,7 @@ pub enum ShepherdError {
     Internal(String),
 }
 
-impl ShepherdError {
+impl LunchboxError {
     pub fn config(msg: impl Into<String>) -> Self {
         Self::ConfigError(msg.into())
     }
@@ -71,4 +71,4 @@ impl ShepherdError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, ShepherdError>;
+pub type Result<T> = std::result::Result<T, LunchboxError>;

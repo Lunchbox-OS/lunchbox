@@ -20,8 +20,8 @@
 //! warnings that had none at all.
 
 use chrono::{DateTime, Local};
-use serde::{Deserialize, Serialize};
 use lunchbox_util::EntryId;
+use serde::{Deserialize, Serialize};
 
 /// Upper bound on how many diagnostics travel on a snapshot.
 ///
@@ -46,7 +46,7 @@ pub enum DiagnosticCode {
     /// launch. Distinct from [`Self::FirewallUnenforceable`], which is the
     /// host-wide cause: this one names an activity the child has lost.
     FirewallNotApplied,
-    /// shepherd cannot talk to the compositor, so it cannot see what is on
+    /// lunchbox cannot talk to the compositor, so it cannot see what is on
     /// screen. The escape sweep closes nothing and no orphaned window is
     /// reported, which is indistinguishable from a clear screen unless it is
     /// said out loud (issue #147).
@@ -78,7 +78,7 @@ pub enum DiagnosticCode {
     /// running, so nothing else about the device looks wrong and the downgrade
     /// is invisible unless it is said out loud.
     IpcSocketNotHardened,
-    /// shepherd's policy and state are files at the uid activities run as,
+    /// lunchbox's policy and state are files at the uid activities run as,
     /// because this device has no state custodian (issue #157).
     ///
     /// The session is deliberately left running — an unprotected kiosk beats a
@@ -87,7 +87,7 @@ pub enum DiagnosticCode {
     /// wrong and the downgrade is invisible unless it is said out loud.
     ///
     /// Only for a device that never had one: a packaged install where
-    /// `shepherd-admin setup-user` has not run, or one deliberately left
+    /// `lunchbox-admin setup-user` has not run, or one deliberately left
     /// without. A device whose custodian *is* installed and unreachable does
     /// not reach this — it refuses to start, because its state has moved and
     /// running anyway would mean an empty database and a launcher with no

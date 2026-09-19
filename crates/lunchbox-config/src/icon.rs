@@ -308,7 +308,7 @@ mod tests {
 
     fn media_kind(mode: MediaMode) -> EntryKind {
         EntryKind::Media {
-            library: "/etc/shepherd/movies.toml".to_string(),
+            library: "/etc/lunchbox/movies.toml".to_string(),
             mode,
             item: None,
             quality: Default::default(),

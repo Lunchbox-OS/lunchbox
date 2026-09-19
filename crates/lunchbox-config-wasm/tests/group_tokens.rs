@@ -2,7 +2,7 @@
 //! picker encodes.
 //!
 //! The picker's exclusions live in
-//! `shepherd-webui/src/config/model/tokenSources.ts` and are tested there. These
+//! `lunchbox-webui/src/config/model/tokenSources.ts` and are tested there. These
 //! are the other half of that pairing: each one asserts the validator really
 //! does reject what the picker refuses to offer, so the two cannot drift apart
 //! into a picker that hides valid choices or offers invalid ones.

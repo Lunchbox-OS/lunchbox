@@ -1,10 +1,10 @@
 # lunchbox-store
 
-Persistence layer for Shepherd.
+Persistence layer for Lunchbox.
 
 ## Overview
 
-This crate provides durable storage for the Shepherd service, including:
+This crate provides durable storage for the Lunchbox service, including:
 
 - **Audit log** - Append-only record of all significant events
 - **Usage accounting** - Track time used per entry per day

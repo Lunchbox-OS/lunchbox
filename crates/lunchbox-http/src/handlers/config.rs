@@ -19,7 +19,7 @@
 //!
 //! ## Why `ETag` and `If-Match`
 //!
-//! A device's policy has three writers: `sudoedit`, `shepherd install policy`,
+//! A device's policy has three writers: `sudoedit`, `lunchbox install policy`,
 //! and now this. An editor open in a browser holds a copy that any of the
 //! other two can invalidate, and without a precondition the browser's save
 //! would silently discard their work. `If-Match` is required rather than
@@ -39,8 +39,8 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde_json::json;
 use lunchbox_management::{ManagementError, ManagementService};
+use serde_json::json;
 use std::sync::Arc;
 
 use crate::state::AppState;

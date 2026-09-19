@@ -13,7 +13,7 @@
 //! emits `anyOf` for `#[serde(untagged)]`, which nothing on the wire uses.
 //!
 //! The counterpart to [`crate::kotlin_types`], and it exists for the same
-//! reason: `shepherd-webui/src/api/types.ts` was hand-written, so nothing
+//! reason: `lunchbox-webui/src/api/types.ts` was hand-written, so nothing
 //! connected it to the Rust types it mirrors. The drift test compares codegen
 //! outputs against their checked-in copies, and a file that is not an output is
 //! invisible to it; `tsc` only checks TypeScript against itself and has no idea

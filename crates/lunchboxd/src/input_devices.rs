@@ -24,11 +24,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use evdev::{AbsoluteAxisCode, Device, KeyCode, PropType, RelativeAxisCode};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use lunchbox_api::{Event, EventPayload, InputDeviceType};
 use lunchbox_config::Policy;
 use lunchbox_core::CoreEngine;
 use lunchbox_ipc::IpcServer;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, info, warn};

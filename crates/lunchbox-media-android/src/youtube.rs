@@ -197,7 +197,7 @@ mod jni_impl {
             // init() didn't lay down the payload dir; nothing to refresh.
             return;
         }
-        let marker = dir.join(".shepherd-ytdlp-refreshed");
+        let marker = dir.join(".lunchbox-ytdlp-refreshed");
         let fresh = marker
             .metadata()
             .and_then(|m| m.modified())
@@ -402,7 +402,7 @@ mod jni_impl {
         // item can resolve twice at once (a background prefetch racing the play).
         static RESOLVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let pid_value = format!(
-            "shepherd-resolve-{}",
+            "lunchbox-resolve-{}",
             RESOLVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let pid: JString = env.new_string(&pid_value).map_err(jni_err)?;

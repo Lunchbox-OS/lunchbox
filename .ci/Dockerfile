@@ -1,6 +1,6 @@
-# CI image for shepherd-launcher.
+# CI image for lunchbox-launcher.
 #
-# Pre-installs everything `./scripts/shepherd deps install dev` would on a
+# Pre-installs everything `./scripts/lunchbox deps install dev` would on a
 # real Ubuntu 26.04 host: apt build/run/test deps, rustup with stable
 # (clippy + rustfmt) and nightly+rust-src, and bpf-linker. Subsequent CI
 # jobs use this image so they can skip the multi-minute apt + rustup +
@@ -13,10 +13,10 @@
 # when no input file changed; the hash forces a rebuild whenever the
 # inputs do change.
 
-# 26.04, matching the platform shepherd-launcher is developed and tested on
+# 26.04, matching the platform lunchbox-launcher is developed and tested on
 # (docs/INSTALL.md) and the floor `check_ubuntu_version` recommends. CI had sat
 # a release behind on 25.10, which is how it ended up running an npm below the
-# `engines` floor shepherd-webui declares, and a Node wrangler refuses to start
+# `engines` floor lunchbox-webui declares, and a Node wrangler refuses to start
 # on. 26.04 ships nodejs 22.
 FROM ubuntu:26.04
 
@@ -40,19 +40,19 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 # Install apt build/run/test deps + rustup (stable) + nightly+rust-src
 # + bpf-linker via the project's own deps script, so the image stays in
-# lockstep with what `./scripts/shepherd deps install` does on a host.
+# lockstep with what `./scripts/lunchbox deps install` does on a host.
 #
-# `scripts/shepherd` reads the canonical repo-root VERSION file at startup
+# `scripts/lunchbox` reads the canonical repo-root VERSION file at startup
 # (for any subcommand), resolving it relative to the script location as
-# `scripts/../VERSION` — i.e. /opt/shepherd-deps/VERSION here. Copy it in so
+# `scripts/../VERSION` — i.e. /opt/lunchbox-deps/VERSION here. Copy it in so
 # the deps subcommand doesn't die with "Version file not found". Its value is
 # irrelevant to what gets installed; only its presence matters.
-COPY VERSION /opt/shepherd-deps/VERSION
-COPY scripts /opt/shepherd-deps/scripts
-WORKDIR /opt/shepherd-deps
-RUN ./scripts/shepherd deps install build && \
-    ./scripts/shepherd deps install run && \
-    ./scripts/shepherd deps install test && \
+COPY VERSION /opt/lunchbox-deps/VERSION
+COPY scripts /opt/lunchbox-deps/scripts
+WORKDIR /opt/lunchbox-deps
+RUN ./scripts/lunchbox deps install build && \
+    ./scripts/lunchbox deps install run && \
+    ./scripts/lunchbox deps install test && \
     rm -rf /var/lib/apt/lists/*
 
 # install_rust uses --profile minimal, so neither clippy nor rustfmt is

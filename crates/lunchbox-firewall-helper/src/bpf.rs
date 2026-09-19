@@ -39,7 +39,7 @@ use aya::{
 /// change to this crate's rodata can lose. See issue #151, where the flatpak
 /// firewall silently stopped enforcing with
 /// `ParseError(ElfError(Error("Invalid ELF header size or alignment")))`.
-static BPF_OBJ: &[u8] = include_bytes_aligned!(env!("SHEPHERD_FIREWALL_BPF_OBJ"));
+static BPF_OBJ: &[u8] = include_bytes_aligned!(env!("LUNCHBOX_FIREWALL_BPF_OBJ"));
 
 /// Build, populate, and attach the firewall program to `cgroup_path`.
 /// On success the program is left attached to the cgroup; the kernel
@@ -66,8 +66,8 @@ pub fn apply_cgroup(
 
     // Load the program (kernel verifier runs here).
     let prog: &mut CgroupSkb = bpf
-        .program_mut("shepherd_firewall")
-        .ok_or_else(|| Error::msg("BPF program 'shepherd_firewall' missing in object"))?
+        .program_mut("lunchbox_firewall")
+        .ok_or_else(|| Error::msg("BPF program 'lunchbox_firewall' missing in object"))?
         .try_into()
         .map_err(|e: aya::programs::ProgramError| Error::other("program try_into", e))?;
     prog.load()

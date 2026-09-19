@@ -39,7 +39,7 @@
 # # release (each asset gets a `.sha256` sidecar).
 # #
 # # Release flow:
-# #   ./scripts/shepherd version set X.Y.Z
+# #   ./scripts/lunchbox version set X.Y.Z
 # #   git commit -am "bump to X.Y.Z" && git tag -a vX.Y.Z -m vX.Y.Z
 # #   git push && git push --tags
 # #
@@ -53,6 +53,11 @@
 # # A `v*` tag pushed to GitHub would therefore run these against
 # # git.armeafamily.com. Decide where releases and the apt repo live before
 # # tagging here.
+# #
+# # The rename to Lunchbox picked the names the docs now advertise --
+# # `apt.lunchbox-os.com` (docs/INSTALL.md) and `lunchbox-os.com/fdroid/repo`
+# # -- but neither host is stood up yet. Whoever ports this workflow has to
+# # create them (or change the docs), not just swap the URLs in here.
 # #
 # # Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
 # # as an artifact, and a single `publish` job at the end creates the release and
@@ -71,10 +76,10 @@
 # #                               those prefixes for secret names.)
 # #   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
 # #                               .deb into Forgejo's Debian (apt) package registry.
-# #   SHEPHERD_KEYSTORE_B64       base64 of the Android release keystore
-# #   SHEPHERD_KEYSTORE_PASSWORD  keystore password
-# #   SHEPHERD_KEY_ALIAS          signing key alias
-# #   SHEPHERD_KEY_PASSWORD       signing key password
+# #   LUNCHBOX_KEYSTORE_B64       base64 of the Android release keystore
+# #   LUNCHBOX_KEYSTORE_PASSWORD  keystore password
+# #   LUNCHBOX_KEY_ALIAS          signing key alias
+# #   LUNCHBOX_KEY_PASSWORD       signing key password
 # #   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
 # #                               Edit" permission, to publish the config editor
 # #   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
@@ -112,7 +117,7 @@
 #         if: github.event_name == 'push'
 #         run: |
 #           tag_version="${GITHUB_REF_NAME#v}"
-#           file_version="$(./scripts/shepherd version)"
+#           file_version="$(./scripts/lunchbox version)"
 #           if [ "$tag_version" != "$file_version" ]; then
 #             echo "::error::tag $GITHUB_REF_NAME (=$tag_version) does not match VERSION ($file_version)"
 #             exit 1
@@ -120,7 +125,7 @@
 #           echo "Releasing version $file_version"
 #
 #       - name: Version harmony
-#         run: ./scripts/shepherd version check
+#         run: ./scripts/lunchbox version check
 #
 #   # --------------------------------------------------------------------------
 #   # images: build-if-missing the pre-baked CI images and expose their refs. One
@@ -225,9 +230,9 @@
 #             ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-
 #
 #       - name: Build .deb
-#         # Builds --release, stages via `DESTDIR=… shepherd install …`, runs
+#         # Builds --release, stages via `DESTDIR=… lunchbox install …`, runs
 #         # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
-#         run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
+#         run: ./scripts/lunchbox package deb --arch ${{ matrix.arch }} --out dist/pkg
 #
 #       - name: Assert the package is labelled for the right architecture
 #         # A cross build that silently fell back to the host would otherwise be
@@ -255,13 +260,13 @@
 #
 #   # --------------------------------------------------------------------------
 #   # config-editor: build the standalone config editor and publish it to
-#   # Cloudflare Pages, which serves it at config.shepherd.armeafamily.com.
-#   # (Its own subdomain, so shepherd.armeafamily.com is free for a landing and
+#   # Cloudflare Pages, which serves it at config.lunchbox-os.com.
+#   # (Its own subdomain, so lunchbox-os.com is free for a landing and
 #   # documentation site later. The hostname lives in the Pages project's custom
 #   # domain settings, not here — nothing in this job hardcodes it.)
 #   #
 #   # Tag-driven like everything else here, so the hosted editor matches the last
-#   # released shepherd rather than whatever is on main — it renders a schema
+#   # released lunchbox rather than whatever is on main — it renders a schema
 #   # (`config_version`) that ships with the daemon, and an editor ahead of the
 #   # release would offer fields the installed version cannot read.
 #   #
@@ -284,7 +289,7 @@
 #     env:
 #       # The Pages project. Its production branch must be `main` for the deploy
 #       # below to publish to production rather than to a preview URL.
-#       PAGES_PROJECT: shepherd-config-editor
+#       PAGES_PROJECT: lunchbox-config-editor
 #       # Pinned for the same reason bpf-linker, cargo-ndk and wasm-pack are: an
 #       # unpinned `npx wrangler` adopts whatever upstream published last.
 #       WRANGLER_VERSION: "4.125.0"
@@ -303,7 +308,7 @@
 #             ${{ runner.os }}-cargo-v2-
 #
 #       # wasm-pack builds crates/lunchbox-config-wasm, then rsbuild writes
-#       # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
+#       # lunchbox-webui/dist-standalone/. Never dist/ — that one is compiled into
 #       # lunchboxd by rust-embed.
 #       #
 #       # Building and uploading in one job is forced: Forgejo does not implement
@@ -312,7 +317,7 @@
 #       # satisfy wrangler's Node floor (>= 22) as well as carry the Rust
 #       # toolchain, which is one of the reasons it moved to 26.04.
 #       - name: Build the standalone bundle
-#         run: ./scripts/shepherd build config-editor
+#         run: ./scripts/lunchbox build config-editor
 #
 #       - name: Deploy to Cloudflare Pages
 #         if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
@@ -322,7 +327,7 @@
 #         run: |
 #           set -euo pipefail
 #           npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy \
-#             shepherd-webui/dist-standalone \
+#             lunchbox-webui/dist-standalone \
 #             --project-name "$PAGES_PROJECT" \
 #             --branch main \
 #             --commit-dirty=true
@@ -330,8 +335,8 @@
 #       - name: Dry run note
 #         if: ${{ !((github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true') }}
 #         run: |
-#           echo "Built shepherd-webui/dist-standalone; not deploying."
-#           du -sh shepherd-webui/dist-standalone
+#           echo "Built lunchbox-webui/dist-standalone; not deploying."
+#           du -sh lunchbox-webui/dist-standalone
 #
 #   # --------------------------------------------------------------------------
 #   # apk: one signed APK per Android module, built in parallel; each (on publish)
@@ -355,7 +360,7 @@
 #           - name: companion
 #             dir: companion-android
 #             gradle_module: app
-#             artifact: shepherd-companion
+#             artifact: lunchbox-companion
 #           # media is a NativeActivity app whose Gradle build cross-compiles a
 #           # Rust cdylib via cargo-ndk; rust: true gates the cargo cache below.
 #           - name: media
@@ -393,21 +398,21 @@
 #
 #       - name: Decode signing keystore
 #         env:
-#           KEYSTORE_B64: ${{ secrets.SHEPHERD_KEYSTORE_B64 }}
+#           KEYSTORE_B64: ${{ secrets.LUNCHBOX_KEYSTORE_B64 }}
 #         run: |
 #           if [ -z "$KEYSTORE_B64" ]; then
-#             echo "::error::SHEPHERD_KEYSTORE_B64 is not set; cannot produce a signed release APK"
+#             echo "::error::LUNCHBOX_KEYSTORE_B64 is not set; cannot produce a signed release APK"
 #             exit 1
 #           fi
-#           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shepherd-release.jks"
+#           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/lunchbox-release.jks"
 #
 #       - name: Assemble signed release APK
 #         working-directory: ${{ matrix.module.dir }}
 #         env:
-#           SHEPHERD_KEYSTORE_FILE: ${{ runner.temp }}/shepherd-release.jks
-#           SHEPHERD_KEYSTORE_PASSWORD: ${{ secrets.SHEPHERD_KEYSTORE_PASSWORD }}
-#           SHEPHERD_KEY_ALIAS: ${{ secrets.SHEPHERD_KEY_ALIAS }}
-#           SHEPHERD_KEY_PASSWORD: ${{ secrets.SHEPHERD_KEY_PASSWORD }}
+#           LUNCHBOX_KEYSTORE_FILE: ${{ runner.temp }}/lunchbox-release.jks
+#           LUNCHBOX_KEYSTORE_PASSWORD: ${{ secrets.LUNCHBOX_KEYSTORE_PASSWORD }}
+#           LUNCHBOX_KEY_ALIAS: ${{ secrets.LUNCHBOX_KEY_ALIAS }}
+#           LUNCHBOX_KEY_PASSWORD: ${{ secrets.LUNCHBOX_KEY_PASSWORD }}
 #         run: ./gradlew --no-daemon :${{ matrix.module.gradle_module }}:assembleRelease
 #
 #       - name: Stage APK with release name
@@ -416,7 +421,7 @@
 #           src="${{ matrix.module.dir }}/${{ matrix.module.gradle_module }}/build/outputs/apk/release"
 #           apk="$(find "$src" -name '*.apk' | head -n1)"
 #           [ -n "$apk" ] || { echo "::error::no release APK found under $src"; exit 1; }
-#           version="$(./scripts/shepherd version)"
+#           version="$(./scripts/lunchbox version)"
 #           mkdir -p dist/pkg
 #           cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
 #
@@ -444,7 +449,7 @@
 #           # that path over every other JDK present (including the image's
 #           # openjdk-21-jdk-headless), so the default has to be a JDK.
 #           apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
-#           ./scripts/shepherd package fdroid --apks dist/pkg
+#           ./scripts/lunchbox package fdroid --apks dist/pkg
 #
 #       - uses: actions/upload-artifact@v4
 #         with:

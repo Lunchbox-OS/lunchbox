@@ -1,4 +1,4 @@
-//! End-to-end test harness for shepherd-launcher.
+//! End-to-end test harness for lunchbox-launcher.
 //!
 //! Spins up a real headless Sway compositor, a real `lunchboxd` daemon, and
 //! optionally the launcher/HUD UIs, all wired through an isolated temp
@@ -8,7 +8,7 @@
 //! See the crate README for usage. The harness is intentionally Linux-only
 //! and assumes the workspace binaries have been built (`cargo build`).
 
-// The harness spawns `sway` and the shepherd binaries by name on purpose: it is
+// The harness spawns `sway` and the lunchbox binaries by name on purpose: it is
 // test scaffolding running as the developer, not a daemon on a device choosing a
 // helper through a `$PATH` the kiosk user wrote (issue #144). Tests also stub
 // binaries on `$PATH` precisely so they can be intercepted.
@@ -172,7 +172,7 @@ impl HarnessBuilder {
         self
     }
 
-    pub fn shepherdd_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn lunchboxd_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_env.push((key.into(), value.into()));
         self
     }
@@ -240,7 +240,7 @@ max_run_seconds = 0
 "#
 }
 
-/// A running shepherd stack: sway + lunchboxd (+ optional UIs), inside an
+/// A running lunchbox stack: sway + lunchboxd (+ optional UIs), inside an
 /// isolated temp directory. Drop kills everything.
 pub struct TestHarness {
     /// Held to keep the temp dir alive until drop.
@@ -268,7 +268,7 @@ impl TestHarness {
         init_tracing();
 
         let temp = tempfile::Builder::new()
-            .prefix("shepherd-e2e-")
+            .prefix("lunchbox-e2e-")
             .tempdir()
             .context("create temp dir")?;
         let temp_path = temp.path().to_path_buf();
@@ -280,7 +280,7 @@ impl TestHarness {
         fs::set_permissions(&xdg_runtime_dir, fs::Permissions::from_mode(0o700))?;
 
         let config_path = temp_path.join("config.toml");
-        let socket_path = temp_path.join("shepherd.sock");
+        let socket_path = temp_path.join("lunchbox.sock");
         let data_dir = temp_path.join("data");
         let log_dir = temp_path.join("log");
         let xdg_data_home = temp_path.join("xdg-data");
@@ -374,16 +374,16 @@ impl TestHarness {
         .await?;
 
         // ----- lunchboxd ---------------------------------------------------
-        let shepherdd_path = workspace_binary("lunchboxd");
-        if !shepherdd_path.exists() {
+        let lunchboxd_path = workspace_binary("lunchboxd");
+        if !lunchboxd_path.exists() {
             bail!(
                 "lunchboxd binary not found at {} — run `cargo build` first",
-                shepherdd_path.display()
+                lunchboxd_path.display()
             );
         }
 
-        let mut shepherdd_cmd = Command::new(&shepherdd_path);
-        shepherdd_cmd
+        let mut lunchboxd_cmd = Command::new(&lunchboxd_path);
+        lunchboxd_cmd
             .arg("-c")
             .arg(&config_path)
             .arg("-s")
@@ -420,13 +420,13 @@ impl TestHarness {
             // to ignore (issue #157).
             .arg("--no-state-custodian")
             // The suite stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH` and
-            // points `SHEPHERD_FIREWALL_HELPER` at a fake, so it needs the
+            // points `LUNCHBOX_FIREWALL_HELPER` at a fake, so it needs the
             // daemon to take binaries from the environment (issue #144). Its
             // own flag, deliberately: an ordinary dev session does not stub
             // anything and so resolves binaries exactly as a device does.
             .arg("--trust-environment")
             .arg("--log-level")
-            .arg(std::env::var("SHEPHERD_E2E_LOG").unwrap_or_else(|_| "info".into()))
+            .arg(std::env::var("LUNCHBOX_E2E_LOG").unwrap_or_else(|_| "info".into()))
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", std::env::var("HOME").unwrap_or_default())
@@ -442,24 +442,24 @@ impl TestHarness {
         // Optionally redirect lunchboxd's stdout/stderr to a path the test
         // can read (debugging firewall enforcement, BPF attach, etc.).
         // Default: silence.
-        match std::env::var("SHEPHERD_E2E_LOG_FILE") {
+        match std::env::var("LUNCHBOX_E2E_LOG_FILE") {
             Ok(path) => {
                 let f = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&path)
-                    .with_context(|| format!("open SHEPHERD_E2E_LOG_FILE {path}"))?;
+                    .with_context(|| format!("open LUNCHBOX_E2E_LOG_FILE {path}"))?;
                 let f2 = f.try_clone().context("clone log file fd")?;
-                shepherdd_cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
+                lunchboxd_cmd.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
             }
             Err(_) => {
-                shepherdd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                lunchboxd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }
         }
         for (k, v) in &builder.extra_env {
-            shepherdd_cmd.env(k, v);
+            lunchboxd_cmd.env(k, v);
         }
-        let lunchboxd = shepherdd_cmd.spawn().context("spawn lunchboxd")?;
+        let lunchboxd = lunchboxd_cmd.spawn().context("spawn lunchboxd")?;
 
         let http_client = HttpClient::new(http_port, auth_token.clone());
 
@@ -488,7 +488,7 @@ impl TestHarness {
         // ----- Optional UIs ------------------------------------------------
         let launcher = if builder.spawn_launcher {
             Some(spawn_ui(
-                "shepherd-launcher",
+                "lunchbox-launcher",
                 &xdg_runtime_dir,
                 &wayland_display,
                 &socket_path,
@@ -590,7 +590,7 @@ impl TestHarness {
     pub fn signal(&self, child: HarnessProcess, signal: Signal) -> Result<()> {
         let pid = match child {
             HarnessProcess::Sway => self.sway.as_ref().and_then(|c| c.id()),
-            HarnessProcess::Shepherdd => self.lunchboxd.as_ref().and_then(|c| c.id()),
+            HarnessProcess::Lunchboxd => self.lunchboxd.as_ref().and_then(|c| c.id()),
             HarnessProcess::Launcher => self.launcher.as_ref().and_then(|c| c.id()),
             HarnessProcess::Hud => self.hud.as_ref().and_then(|c| c.id()),
         };
@@ -607,7 +607,7 @@ impl TestHarness {
     ) -> Result<std::process::ExitStatus> {
         let slot = match child {
             HarnessProcess::Sway => &mut self.sway,
-            HarnessProcess::Shepherdd => &mut self.lunchboxd,
+            HarnessProcess::Lunchboxd => &mut self.lunchboxd,
             HarnessProcess::Launcher => &mut self.launcher,
             HarnessProcess::Hud => &mut self.hud,
         };
@@ -644,7 +644,7 @@ impl TestHarness {
 #[derive(Debug, Clone, Copy)]
 pub enum HarnessProcess {
     Sway,
-    Shepherdd,
+    Lunchboxd,
     Launcher,
     Hud,
 }
@@ -709,8 +709,8 @@ fn spawn_ui(
         .env("XDG_RUNTIME_DIR", xdg_runtime_dir)
         .env("WAYLAND_DISPLAY", wayland_display)
         .env("XDG_SESSION_TYPE", "wayland")
-        .env("SHEPHERD_SOCKET", socket_path)
-        .env("SHEPHERD_DATA_DIR", data_dir)
+        .env("LUNCHBOX_SOCKET", socket_path)
+        .env("LUNCHBOX_DATA_DIR", data_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .stdin(Stdio::null());

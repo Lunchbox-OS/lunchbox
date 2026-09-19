@@ -1,6 +1,6 @@
 # lunchbox-config
 
-Configuration parsing and validation for Shepherd.
+Configuration parsing and validation for Lunchbox.
 
 ## Overview
 
@@ -13,7 +13,7 @@ This crate handles loading, parsing, and validating the TOML configuration that 
 
 ## Configuration Format
 
-Shepherd uses TOML for configuration. Here's a complete example:
+Lunchbox uses TOML for configuration. Here's a complete example:
 
 ```toml
 config_version = 1
@@ -106,7 +106,7 @@ max_run_seconds = 3600  # 1 hour
 use lunchbox_config::{load_config, parse_config, Policy};
 use std::path::Path;
 
-// Load from file (typically ~/.config/shepherd/config.toml)
+// Load from file (typically ~/.config/lunchbox/config.toml)
 let policy = load_config("config.toml")?;
 
 // Parse from string
@@ -137,8 +137,8 @@ kind = { type = "steam", app_id = 504230 }
 kind = { type = "vm", driver = "qemu", args = { disk = "game.qcow2" } }
 
 # Media library, played by `lunchbox-media` (docs/lunchbox-media.md)
-kind = { type = "media", library = "~/.config/shepherd/movies.toml" }
-kind = { type = "media", library = "~/.config/shepherd/movies.toml", mode = "play", item = "big-buck-bunny" }
+kind = { type = "media", library = "~/.config/lunchbox/movies.toml" }
+kind = { type = "media", library = "~/.config/lunchbox/movies.toml", mode = "play", item = "big-buck-bunny" }
 
 # Emulated game, played through RetroArch. Saves state on close and restores
 # it on open; `content` must be absolute or start with `~/`. The HUD offers a

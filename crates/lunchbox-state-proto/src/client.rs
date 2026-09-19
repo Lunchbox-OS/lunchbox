@@ -35,10 +35,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDate};
-use serde::de::DeserializeOwned;
 use lunchbox_api::{AudioOutput, AudioOutputRecord, DailyOverride};
 use lunchbox_store::{AuditEvent, StateSnapshot, Store, StoreError, StoreResult, TokenState};
 use lunchbox_util::{EntryId, LimitSubject};
+use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::methods::{trait_ty, wire_send, with_store_methods};
@@ -291,7 +291,7 @@ pub struct SupervisionStream {
 }
 
 impl SupervisionStream {
-    /// Tell the custodian shepherd is still supervising.
+    /// Tell the custodian lunchbox is still supervising.
     ///
     /// Keeps the write timeout the connection was opened with: a beat that
     /// blocks forever would leave the custodian waiting on a deadline that

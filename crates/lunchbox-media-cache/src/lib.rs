@@ -1,7 +1,7 @@
 //! On-disk video cache for `lunchbox-media`.
 //!
 //! Remote library sources — YouTube URLs and plain HTTP files — are downloaded
-//! to `$XDG_CACHE_HOME/shepherd/media/videos/` so a later play comes off local
+//! to `$XDG_CACHE_HOME/lunchbox/media/videos/` so a later play comes off local
 //! disk: no buffering, no bandwidth, and the item stays watchable offline.
 //!
 //! This lives in its own crate because **two processes use it**. `lunchbox-media`
@@ -67,7 +67,7 @@ pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 /// hands to both its own prefetcher and every media activity it launches.
 /// Setting this on only one of the two processes sharing a cache directory will
 /// have them trimming it to different sizes.
-pub const MAX_BYTES_ENV: &str = "SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES";
+pub const MAX_BYTES_ENV: &str = "LUNCHBOX_MEDIA_VIDEO_CACHE_MAX_BYTES";
 
 /// Default watched grace, in whole days — the unit the config and the CLI use.
 pub const DEFAULT_WATCHED_GRACE_DAYS: u64 = 30;

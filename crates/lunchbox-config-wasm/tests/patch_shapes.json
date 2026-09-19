@@ -2,7 +2,7 @@
   "_comment": [
     "The wire shape of every patch operation, pinned from both sides.",
     "",
-    "The editor's TypeScript builds these objects (shepherd-webui/src/config/doc/patches.ts)",
+    "The editor's TypeScript builds these objects (lunchbox-webui/src/config/doc/patches.ts)",
     "and this crate's serde deserializes them. Nothing else checks that the two agree:",
     "the Rust tests construct Patch values directly, the TypeScript never leaves the browser,",
     "and a renamed serde tag would leave both suites green while the editor broke at runtime.",

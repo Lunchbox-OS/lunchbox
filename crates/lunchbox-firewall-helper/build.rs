@@ -1,6 +1,6 @@
 //! Build the sibling `lunchbox-firewall-bpf` crate (target
 //! `bpfel-unknown-none`, nightly toolchain) and emit
-//! `SHEPHERD_FIREWALL_BPF_OBJ` so `main.rs` can `include_bytes!` the result.
+//! `LUNCHBOX_FIREWALL_BPF_OBJ` so `main.rs` can `include_bytes!` the result.
 //!
 //! That crate is excluded from the workspace, so a plain `cargo build` for
 //! the helper would otherwise leave us without a BPF object.
@@ -66,7 +66,7 @@ fn main() {
     );
 
     println!(
-        "cargo:rustc-env=SHEPHERD_FIREWALL_BPF_OBJ={}",
+        "cargo:rustc-env=LUNCHBOX_FIREWALL_BPF_OBJ={}",
         bpf_obj.display()
     );
 }

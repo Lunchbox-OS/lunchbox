@@ -66,7 +66,7 @@ pub fn find_desktop_app(id: &str) -> Option<DesktopEntry> {
 /// terminal-only program without one produces a process with nowhere to draw,
 /// which looks to the caregiver exactly like a launch that silently failed.
 pub fn terminal_command(argv: &[String]) -> Option<Vec<String>> {
-    // `-e` is the one flag all of these agree on. Ordered by what a shepherd
+    // `-e` is the one flag all of these agree on. Ordered by what a lunchbox
     // device is most likely to have: foot is what the dev session uses, and
     // the rest are the usual desktop defaults.
     const TERMINALS: [&str; 6] = [

@@ -56,7 +56,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for RotatedLabel {
-        const NAME: &'static str = "ShepherdRotatedLabel";
+        const NAME: &'static str = "LunchboxRotatedLabel";
         type Type = super::RotatedLabel;
         type ParentType = gtk4::Widget;
     }

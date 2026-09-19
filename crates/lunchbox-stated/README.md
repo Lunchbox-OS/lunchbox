@@ -1,6 +1,6 @@
 # lunchbox-stated
 
-Custodian for shepherd's policy and state, at a uid the activities do not have
+Custodian for lunchbox's policy and state, at a uid the activities do not have
 (issue [#157]).
 
 ## The problem it exists for
@@ -10,7 +10,7 @@ launches — and so do its files. On a stock install:
 
 | file | contents |
 | --- | --- |
-| `~/.config/shepherd/config.toml` | every entry, limit, availability window, firewall spec |
+| `~/.config/lunchbox/config.toml` | every entry, limit, availability window, firewall spec |
 | `<data_dir>/lunchboxd.db` | usage, token balances, cooldowns, daily overrides, the audit log |
 | `<data_dir>/admin.toml` | the BLE admin record and the minted HTTP token |
 | `<data_dir>/.factory-reset-ble` | the factory-reset sentinel |
@@ -45,7 +45,7 @@ Moves the files to a uid the activities do not have, and serves them to
 
 ```
 ┌───────────────────── system manager ─────────────────────┐
-│ lunchbox-stated@kiosk.service     User=shepherd-state    │
+│ lunchbox-stated@kiosk.service     User=lunchbox-state    │
 │   owns  /var/lib/lunchboxd/state/kiosk/   0700           │
 │   reads /run/lunchboxd/state/kiosk.sock   (fd from PID 1)│
 └──────────────────────────▲───────────────────────────────┘
@@ -82,17 +82,17 @@ Measured on a device running GDM, the kiosk uid's sessions are:
 | the previous session, after a display-manager restart | `user` | `wayland` | `seat0` | `closing` | refused |
 
 `Class=user` alone would admit the SSH row, which is a second way into the same
-uid rather than the session shepherd runs in. The last row is the one only a
+uid rather than the session lunchbox runs in. The last row is the one only a
 device showed: after `systemctl restart gdm` the outgoing session was still
 listed, still seated, and still owned a live cgroup, while logind had it as
 `closing`. Two sessions matched, the daemon refused to guess — correctly — and
 the custodian would not start at all.
 
 `online` is accepted alongside `active`: a kiosk whose VT is switched away is
-still the session shepherd runs in.
+still the session lunchbox runs in.
 
 Refusing is measured too: an activity in
-`…/app.slice/shepherd-<session-id>.scope` connects, is refused at accept before
+`…/app.slice/lunchbox-<session-id>.scope` connects, is refused at accept before
 a byte is parsed, and the log names it by its session id.
 
 ## Why the service manager owns the socket
@@ -122,7 +122,7 @@ defeats it without killing anything at all: a stopped daemon never exits, so the
 wrapper's `||` never fires, while the engine that counts a child's time has
 stopped.
 
-This daemon is the only part of shepherd that is outside the session, at a uid
+This daemon is the only part of lunchbox that is outside the session, at a uid
 nothing inside it can signal, and it already knows which session is the kiosk's.
 So it holds the dead man's switch.
 
@@ -138,7 +138,7 @@ lunchboxd ──Supervise──▶ custodian     "will anything happen if I die?
 
 The escalation is `KillUser`, not `KillSession`, and the difference matters:
 the session scope holds sway, the launcher and the HUD, while the activities are
-in `shepherd-<id>.scope` under the user manager's `app.slice` (or a snap's or
+in `lunchbox-<id>.scope` under the user manager's `app.slice` (or a snap's or
 flatpak's own scope). Killing the session scope in the one case this escalation
 exists for would take the compositor and leave the game running. `KillUser`
 covers both and needs no second polkit grant. A firewalled Process entry is a
@@ -162,7 +162,7 @@ then kill the daemon. Every disarm comes from logind, none from the wire.
 ### Measured on a device
 
 An installed kiosk (Ubuntu 26.04, systemd 259), this branch's release binaries,
-`shepherd-kiosk` autologged into the Shepherd session:
+`lunchbox-kiosk` autologged into the Lunchbox session:
 
 | | |
 | --- | --- |
@@ -199,8 +199,8 @@ device.
 ### The authority, and what it widens
 
 `TerminateSession` from a uid that does not own the session needs polkit's
-`org.freedesktop.login1.manage`, granted to `shepherd-state` by
-`dist/polkit/50-shepherd-session-guard.rules`. polkit passes no details for that
+`org.freedesktop.login1.manage`, granted to `lunchbox-state` by
+`dist/polkit/50-lunchbox-session-guard.rules`. polkit passes no details for that
 call, so the grant **cannot be narrowed to one session**: it covers any session
 on the machine, an administrator's SSH login included. What keeps it acceptable
 is the shape of the thing holding it — no network, no subprocesses,
@@ -217,7 +217,7 @@ protection.
 ## What it is not
 
 * **Not root.** It opens a SQLite file it owns, reads TOML it owns, and asks
-  logind a read-only question. A parser bug yields `shepherd-state`, which holds
+  logind a read-only question. A parser bug yields `lunchbox-state`, which holds
   exactly the files this protects and nothing else.
 * **Not a policy engine.** It never learns what a limit means or whether a child
   may launch something; that stays in `lunchbox-core`. Custody, not judgment.
@@ -234,8 +234,8 @@ and no view of `/home` at all.
 
 ## Running it
 
-Installed and enabled by `shepherd install state --user <kiosk-user>`, which
-`shepherd install all` calls. Per-user, as a systemd template:
+Installed and enabled by `lunchbox install state --user <kiosk-user>`, which
+`lunchbox install all` calls. Per-user, as a systemd template:
 
 ```sh
 systemctl status lunchbox-stated@kiosk.socket   # always up, owns the name
@@ -267,7 +267,7 @@ verified on an installed kiosk after a clean boot: `lunchboxd` connects to the
 custodian, the exploit that opened this issue is refused at every step, and the
 device's existing state is migrated rather than abandoned.
 
-That migration is reversible: `shepherd uninstall state --restore-to-home` moves
+That migration is reversible: `lunchbox uninstall state --restore-to-home` moves
 the database and the admin record back to `~/.local/share/lunchboxd/` before
 removing the units. Without it a downgrade to a build that predates this daemon
 would find an empty home, start from zero usage, and — with no `admin.toml` —
@@ -296,7 +296,7 @@ protection was never there to lose*.
 ### There is one policy, and a signpost
 
 `config.toml` is **moved** into the protected directory, and a signpost takes
-its place at `~/.config/shepherd/config.toml` naming where it went and how to
+its place at `~/.config/lunchbox/config.toml` naming where it went and how to
 change it. One file decides what a child may do, and it is the one at a uid no
 activity has.
 
@@ -315,7 +315,7 @@ that still launches games would be a device that looks fine and is not.
 
 Three ways to set a policy, all landing on the same file and reloading within a
 second — `sudoedit /var/lib/lunchboxd/state/<user>/config.toml`,
-`shepherd install policy --user <user> --source PATH`, or the config editor in
+`lunchbox install policy --user <user> --source PATH`, or the config editor in
 the web management UI (issue #185), which writes through `lunchboxd` and so
 through this daemon's `WriteFile`. The second and third are what a hardened
 device needs: `harden apply` leaves the kiosk user with `nologin` and no SSH,

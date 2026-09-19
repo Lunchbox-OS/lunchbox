@@ -3,7 +3,7 @@
 # companion serializers needs these belt-and-suspenders rules when R8 is
 # eventually enabled.
 -keepclassmembers class **$$serializer { *; }
--keepclasseswithmembers class com.armeafamily.shepherd.companion.** {
+-keepclasseswithmembers class com.lunchbox_os.companion.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class com.armeafamily.shepherd.companion.**$$serializer { *; }
+-keep,includedescriptorclasses class com.lunchbox_os.companion.**$$serializer { *; }

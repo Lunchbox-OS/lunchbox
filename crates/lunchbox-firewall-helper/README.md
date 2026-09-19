@@ -21,7 +21,7 @@ the system manager can attach BPF programs to.
 ## Trust boundary
 
 * The helper is invoked via pkexec under a polkit rule that grants the
-  caller's user the action `org.shepherd.firewall.apply-process` without a
+  caller's user the action `com.lunchbox-os.firewall.apply-process` without a
   password prompt (see [`dist/polkit/`](../../dist/polkit/)).
 * The helper validates every argument with a strict allowlist: numeric uid /
   gid, IP address tokens (`any`, `localhost`, `link-local`, `multicast`),
@@ -72,7 +72,7 @@ So `apply-process` adds two properties (`lifetime_args`):
 | `--property=BindsTo=`/`After=` the caller's session scope | ends it when *that session* ends, which is the sharper statement: a device with two kiosk users has one slice each but a session per login, and an activity belongs to a session |
 
 **The session is derived, never passed.** The polkit rule admits the
-`shepherd-firewall` group, which is the kiosk user, so an argument would be
+`lunchbox-firewall` group, which is the kiosk user, so an argument would be
 attacker-chosen. It is read from this process's own cgroup — the caller's,
 inherited through `pkexec`, before `systemd-run` moves anything — and validated
 to logind's shape (`session-`, alphanumeric, `.scope`) because it ends up in an
@@ -90,7 +90,7 @@ custody rather than judgment.
 ## Install
 
 The helper is installed by `scripts/integration-tests/setup-firewall-dev.sh`
-(dev) or by `shepherd install` (production, follow-up). It must live at
+(dev) or by `lunchbox install` (production, follow-up). It must live at
 `/usr/libexec/lunchbox-firewall-helper` -- that path is hardcoded into the
 polkit policy file.
 

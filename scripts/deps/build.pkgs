@@ -1,4 +1,4 @@
-# Build-time system packages for shepherd-launcher
+# Build-time system packages for lunchbox-launcher
 # These are required to compile the Rust code
 # One package per line, comments start with #
 

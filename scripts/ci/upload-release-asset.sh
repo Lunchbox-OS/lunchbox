@@ -7,7 +7,7 @@
 # so no job needs the others' files.
 #
 # Reads from the environment (set by the workflow):
-#   SERVER_URL     e.g. https://git.armeafamily.com
+#   SERVER_URL     e.g. https://apt.lunchbox-os.com
 #   REPO           owner/repo (github.repository)
 #   RELEASE_TOKEN  repo-write token
 #   RELEASE_ID     numeric release id (from the create-release job)

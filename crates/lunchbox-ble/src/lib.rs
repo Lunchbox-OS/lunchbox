@@ -16,8 +16,8 @@ pub use admin::{AdminRecord, AdminRole, AdminStore, check_reset_sentinel};
 pub use agent::{NoopPairingDisplay, PairingDisplay, PairingMethod};
 pub use claim::{AuthDecision, ClaimMachine, ClaimOutcome, ClaimState, PeerIdentity};
 pub use protocol::{
-    ErrorCode, RpcError, RpcRequest, RpcResponse, SHEPHERD_DEVICE_INFO_CHAR_UUID,
-    SHEPHERD_EVENTS_CHAR_UUID, SHEPHERD_MANAGEMENT_SERVICE_UUID, SHEPHERD_REQUEST_CHAR_UUID,
-    SHEPHERD_RESPONSE_CHAR_UUID,
+    ErrorCode, LUNCHBOX_DEVICE_INFO_CHAR_UUID, LUNCHBOX_EVENTS_CHAR_UUID,
+    LUNCHBOX_MANAGEMENT_SERVICE_UUID, LUNCHBOX_REQUEST_CHAR_UUID, LUNCHBOX_RESPONSE_CHAR_UUID,
+    RpcError, RpcRequest, RpcResponse,
 };
 pub use server::{BleServer, BleServerConfig};

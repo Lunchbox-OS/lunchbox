@@ -3,7 +3,7 @@
 //!
 //! Ending a session this daemon's uid does not own needs polkit's
 //! `org.freedesktop.login1.manage`, granted by
-//! `dist/polkit/50-shepherd-session-guard.rules`. Without the rule everything
+//! `dist/polkit/50-lunchbox-session-guard.rules`. Without the rule everything
 //! else still works — the connection is watched, the deadline runs, the log
 //! line is written — and then `TerminateSession` comes back with an
 //! authorisation error and the session carries on unsupervised.
@@ -53,7 +53,7 @@ impl Authority {
             Self::Denied => Some(format!(
                 "polkit refuses {ACTION} to this daemon's uid, so the session watchdog cannot \
                  end the session when lunchboxd stops supervising it. Install \
-                 /etc/polkit-1/rules.d/50-shepherd-session-guard.rules (issue #172)"
+                 /etc/polkit-1/rules.d/50-lunchbox-session-guard.rules (issue #172)"
             )),
             Self::Unknown(why) => Some(format!(
                 "could not ask polkit whether the session watchdog may end this session ({why}); \

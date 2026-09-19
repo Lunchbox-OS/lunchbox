@@ -4,11 +4,11 @@ The on-disk video cache for media activities: what is cached, under what name,
 who is allowed to download it, and what gets thrown away when the disk fills.
 
 Remote library sources — YouTube URLs and plain HTTP files — are downloaded to
-`$XDG_CACHE_HOME/shepherd/media/videos/` so a later play comes off local disk:
+`$XDG_CACHE_HOME/lunchbox/media/videos/` so a later play comes off local disk:
 no buffering, no bandwidth, and the item stays watchable offline.
 
 It also owns the YouTube playlist metadata cache
-(`$XDG_CACHE_HOME/shepherd/media/playlists/`), for the same reason: lunchboxd
+(`$XDG_CACHE_HOME/lunchbox/media/playlists/`), for the same reason: lunchboxd
 has to know what is in a playlist before it can prefetch it.
 
 It also fetches **SponsorBlock buckets** (issue #159), for the same reason: the
@@ -153,7 +153,7 @@ The scoring is `lunchbox_media_app::lru` and the markers behind it are
 `lunchbox_media_app::interest` — both shared with the Android cache, so the two
 front-ends spend disk the same way.
 
-The cap is 10 GiB, or `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES`. Every committed
+The cap is 10 GiB, or `LUNCHBOX_MEDIA_VIDEO_CACHE_MAX_BYTES`. Every committed
 file is scored on one time axis and the lowest score is evicted first:
 
 ```

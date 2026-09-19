@@ -8,7 +8,7 @@
 //! work keeps running, and the screen cannot be touched until an administrator
 //! unlocks it from the companion or web app.
 //!
-//! # Why this is not GTK, unlike every other shepherd surface
+//! # Why this is not GTK, unlike every other lunchbox surface
 //!
 //! It has to be a *real* session lock — `ext-session-lock-v1` — rather than a
 //! `gtk4-layer-shell` overlay like the HUD and the pairing display.
@@ -19,7 +19,7 @@
 //! window: anything that can reach the compositor can close it, and #148
 //! recorded that happening for real —
 //!
-//! > an activity that issued `[app_id=org.shepherd.hud] kill` removed the HUD
+//! > an activity that issued `[app_id=com.lunchbox-os.hud] kill` removed the HUD
 //! > for the rest of the session
 //!
 //! The same command against a layer-shell "lock" would unlock the device. For a
@@ -73,7 +73,7 @@ extern "C" fn on_sigterm(_: i32) {
 
 #[derive(Parser, Debug)]
 #[command(name = "lunchbox-lock")]
-#[command(about = "Session lock for shepherd's administrator mode", long_about = None)]
+#[command(about = "Session lock for lunchbox's administrator mode", long_about = None)]
 struct Args {
     /// Headline shown on the lock screen.
     #[arg(long, default_value = "Locked")]
@@ -82,7 +82,7 @@ struct Args {
     /// Second line, naming who can end this and how.
     #[arg(
         long,
-        default_value = "Unlock from the Shepherd app on your phone or the management page"
+        default_value = "Unlock from the Lunchbox app on your phone or the management page"
     )]
     detail: String,
 

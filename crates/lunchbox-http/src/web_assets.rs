@@ -1,7 +1,7 @@
 //! Embedded web UI static assets.
 //!
-//! Files are embedded from `shepherd-webui/dist/` at compile time.
-//! If the web UI has not been built yet (`npm run build` in `shepherd-webui/`),
+//! Files are embedded from `lunchbox-webui/dist/` at compile time.
+//! If the web UI has not been built yet (`npm run build` in `lunchbox-webui/`),
 //! the binary embeds nothing and all UI routes return 404.
 
 use axum::{
@@ -12,7 +12,7 @@ use axum::{
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "../../shepherd-webui/dist"]
+#[folder = "../../lunchbox-webui/dist"]
 #[exclude = ".*"] // skip .gitkeep and other dotfiles
 struct Assets;
 

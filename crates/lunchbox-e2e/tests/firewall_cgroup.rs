@@ -15,7 +15,7 @@
 //!
 //! Run as root: `sudo -E cargo test -p lunchbox-e2e --test firewall_cgroup --
 //! --include-ignored --nocapture`, or via the CI firewall job. Set
-//! `SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` to turn the "not applicable here"
+//! `LUNCHBOX_FIREWALL_CGROUP_REQUIRED=1` to turn the "not applicable here"
 //! skips into failures — CI sets it, so a missing precondition is reported
 //! rather than passing quietly.
 
@@ -41,14 +41,14 @@ const SYNTHETIC_UID: u32 = 61000;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn required() -> bool {
-    std::env::var("SHEPHERD_FIREWALL_CGROUP_REQUIRED").is_ok_and(|v| v != "0")
+    std::env::var("LUNCHBOX_FIREWALL_CGROUP_REQUIRED").is_ok_and(|v| v != "0")
 }
 
 /// Report a precondition this host doesn't meet. A skip on a developer's
 /// laptop, a failure anywhere that promised to run the test.
 fn skip(reason: &str) -> Result<()> {
     if required() {
-        bail!("SHEPHERD_FIREWALL_CGROUP_REQUIRED is set but the test could not run: {reason}");
+        bail!("LUNCHBOX_FIREWALL_CGROUP_REQUIRED is set but the test could not run: {reason}");
     }
     eprintln!("[SKIP] cgroup_firewall_filters_real_packets: {reason}");
     Ok(())
@@ -66,7 +66,7 @@ fn repo_root() -> PathBuf {
 /// else the installed copy. Deliberately prefers the build tree — the point is
 /// to test what CI just compiled.
 fn helper_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("SHEPHERD_FIREWALL_HELPER") {
+    if let Ok(p) = std::env::var("LUNCHBOX_FIREWALL_HELPER") {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
     }
@@ -130,7 +130,7 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// The mount flags in `/proc/self/mountinfo` are a hint, not an answer — a
 /// read-write mount can still refuse in a restricted namespace.
 fn can_create_cgroups_in(root: &Path) -> bool {
-    let probe = root.join(format!(".shepherd-fw-probe-{}", std::process::id()));
+    let probe = root.join(format!(".lunchbox-fw-probe-{}", std::process::id()));
     match std::fs::create_dir(&probe) {
         Ok(()) => {
             let _ = std::fs::remove_dir(&probe);
@@ -167,7 +167,7 @@ fn open_write_view() -> Result<CgroupWriteView> {
     // same hierarchy, so what we create here is visible under /sys/fs/cgroup
     // for the helper to open.
     let dir = tempfile::Builder::new()
-        .prefix("shepherd-cgroup2-")
+        .prefix("lunchbox-cgroup2-")
         .tempdir()
         .context("temp dir for the private cgroup2 mount")?
         .keep();
@@ -270,12 +270,12 @@ fn run_probe_in_cgroup(cgroup: &Path, allow: &str, deny: &str, log: &Path) -> Re
             cgroup.display(),
             probe.display()
         ))
-        .env("SHEPHERD_FIREWALL_PROBE_LOG", log)
-        .env("SHEPHERD_FIREWALL_PROBE_ALLOW", allow)
-        .env("SHEPHERD_FIREWALL_PROBE_DENY", deny)
+        .env("LUNCHBOX_FIREWALL_PROBE_LOG", log)
+        .env("LUNCHBOX_FIREWALL_PROBE_ALLOW", allow)
+        .env("LUNCHBOX_FIREWALL_PROBE_DENY", deny)
         // The script's default is to linger for the orchestrator; nothing is
         // orchestrating here.
-        .env("SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS", "0")
+        .env("LUNCHBOX_FIREWALL_PROBE_HOLD_SECONDS", "0")
         .spawn()
         .context("spawn probe")?;
 
@@ -342,14 +342,14 @@ fn cgroup_firewall_filters_real_packets() -> Result<()> {
     // Not an error: the plain (unprivileged) CI container can neither write
     // cgroupfs nor mount cgroup2, and neither can a developer's container. That
     // is a host this test does not apply to, exactly like a missing helper —
-    // and `SHEPHERD_FIREWALL_CGROUP_REQUIRED` is what makes it fatal on the
+    // and `LUNCHBOX_FIREWALL_CGROUP_REQUIRED` is what makes it fatal on the
     // hosts that promised to run it.
     let view = match open_write_view() {
         Ok(view) => view,
         Err(e) => return skip(&format!("{e:#}")),
     };
     let (write_cgroup, helper_cgroup, created) =
-        make_cgroup(&view, "shepherd-firewall-cgroup-test")?;
+        make_cgroup(&view, "lunchbox-firewall-cgroup-test")?;
 
     let result = (|| -> Result<()> {
         let out = Command::new(&helper)

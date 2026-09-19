@@ -36,9 +36,9 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use serde_json::Value;
 use lunchbox_config::FileManagerConfig;
 use lunchbox_http::{AppState, FileService, handlers};
+use serde_json::Value;
 use tower::ServiceExt;
 
 mod support;
@@ -47,22 +47,22 @@ use support::make_service;
 /// Where the setup script mounts the writable image.
 fn mount() -> PathBuf {
     PathBuf::from(
-        std::env::var("SHEPHERD_TEST_FAT_MOUNT").unwrap_or_else(|_| "/media/shepherd-fat".into()),
+        std::env::var("LUNCHBOX_TEST_FAT_MOUNT").unwrap_or_else(|_| "/media/lunchbox-fat".into()),
     )
 }
 
 /// And the read-only one, which exists to exercise the `EROFS` path.
 fn mount_ro() -> PathBuf {
     PathBuf::from(
-        std::env::var("SHEPHERD_TEST_FAT_MOUNT_RO")
-            .unwrap_or_else(|_| "/media/shepherd-fat-ro".into()),
+        std::env::var("LUNCHBOX_TEST_FAT_MOUNT_RO")
+            .unwrap_or_else(|_| "/media/lunchbox-fat-ro".into()),
     )
 }
 
 /// `Some(reason)` when this host cannot run the test.
 ///
 /// Checks `/proc/mounts` rather than just the directory, because an *unmounted*
-/// `/media/shepherd-fat` is an ordinary ext4 directory that would pass every
+/// `/media/lunchbox-fat` is an ordinary ext4 directory that would pass every
 /// assertion below for the wrong reason — which is exactly the failure this
 /// whole file exists to stop happening.
 fn skip_reason(point: &Path, want_writable: bool) -> Option<String> {

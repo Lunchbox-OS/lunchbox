@@ -4,7 +4,7 @@
 //! cargo run -p lunchbox-media-android --example desktop_preview
 //! ```
 //!
-//! Settings persist to a `shepherd-media-preview/settings.toml` under the
+//! Settings persist to a `lunchbox-media-preview/settings.toml` under the
 //! system temp dir so repeated runs keep their state without touching any real
 //! config.
 
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use lunchbox_media_android::MediaApp;
 
 fn main() -> eframe::Result<()> {
-    let dir = std::env::temp_dir().join("shepherd-media-preview");
+    let dir = std::env::temp_dir().join("lunchbox-media-preview");
     std::fs::create_dir_all(&dir).ok();
     let settings_path: PathBuf = dir.join("settings.toml");
     let cache_dir: PathBuf = dir.join("cache");

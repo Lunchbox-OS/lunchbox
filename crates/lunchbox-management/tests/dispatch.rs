@@ -10,7 +10,6 @@
 //! framing/`ErrorCode` mapping, and so on.
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
 use lunchbox_api::{
     AddressFamily, Connectivity, EntryKind, Event, NetworkAddressView, NetworkInterfaceKind,
     NetworkInterfaceView, NetworkSource, WifiView,
@@ -34,6 +33,7 @@ use lunchbox_store::SqliteStore;
 use lunchbox_util::{
     DaysOfWeek, EntryId, LimitSubject, LocalProtectedFiles, TimeWindow, WallClock,
 };
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1051,7 +1051,7 @@ fn make_custodial_svc(local_signpost: &Path) -> (DefaultManagementService, TempD
     (svc, dir)
 }
 
-/// The signpost `shepherd install state` leaves behind: a valid policy that
+/// The signpost `lunchbox install state` leaves behind: a valid policy that
 /// grants nothing, at the path the policy used to live at.
 fn temp_signpost() -> NamedTempFile {
     let f = NamedTempFile::new().unwrap();
@@ -1130,7 +1130,7 @@ async fn write_policy_refuses_a_stale_version() {
     let (svc, dir) = make_custodial_svc(signpost.path());
     let stale = svc.read_policy().unwrap().version;
 
-    // Someone else — `sudoedit`, or `shepherd install policy` — got there
+    // Someone else — `sudoedit`, or `lunchbox install policy` — got there
     // first.
     std::fs::write(dir.path().join("config.toml"), policy_toml(&["z"])).unwrap();
 

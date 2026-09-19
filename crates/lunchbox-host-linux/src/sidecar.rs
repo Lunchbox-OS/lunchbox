@@ -8,15 +8,15 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use lunchbox_api::{InputCompatMode, InputCompatOptions};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use lunchbox_api::{InputCompatMode, InputCompatOptions};
 use tracing::{debug, info, warn};
 
 /// Locate a sidecar binary by name.
 ///
 /// Resolution order:
-/// 1. The matching `SHEPHERD_*_BIN` env var override — **development only**,
+/// 1. The matching `LUNCHBOX_*_BIN` env var override — **development only**,
 ///    gated by [`crate::helpers::env_override`]. It names a binary the daemon
 ///    will exec as a direct child, and on a device the environment is chosen by
 ///    the kiosk user (issue #144).
@@ -36,17 +36,17 @@ fn sidecar_binary(name: &str, env_override: &str) -> PathBuf {
 
 /// Locate the `lunchbox-touch-bridge` binary.
 pub fn touch_bridge_binary() -> PathBuf {
-    sidecar_binary("lunchbox-touch-bridge", "SHEPHERD_TOUCH_BRIDGE_BIN")
+    sidecar_binary("lunchbox-touch-bridge", "LUNCHBOX_TOUCH_BRIDGE_BIN")
 }
 
 /// Locate the `lunchbox-tablet-bridge` binary.
 pub fn tablet_bridge_binary() -> PathBuf {
-    sidecar_binary("lunchbox-tablet-bridge", "SHEPHERD_TABLET_BRIDGE_BIN")
+    sidecar_binary("lunchbox-tablet-bridge", "LUNCHBOX_TABLET_BRIDGE_BIN")
 }
 
 /// Locate the `lunchbox-gamepad-bridge` binary.
 pub fn gamepad_bridge_binary() -> PathBuf {
-    sidecar_binary("lunchbox-gamepad-bridge", "SHEPHERD_GAMEPAD_BRIDGE_BIN")
+    sidecar_binary("lunchbox-gamepad-bridge", "LUNCHBOX_GAMEPAD_BRIDGE_BIN")
 }
 
 /// A command for a sidecar binary whose path is already resolved.

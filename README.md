@@ -1,4 +1,4 @@
-# shepherd-launcher
+# lunchbox-launcher
 
 A child-friendly, parent-guided desktop environment *alternative* for Wayland,
 allowing supervised access to applications and content that you define.
@@ -11,7 +11,7 @@ not software or hardware vendors, by providing:
 * with granular access controls inspired by and exceeding those in iOS Screen Time
 
 While this repository provides some examples for existing software packages
-(including non-free software and abandonware), `shepherd-launcher` is
+(including non-free software and abandonware), `lunchbox-launcher` is
 *non-prescriptive*: as the end user, you are free to use them, not use them,
 or write your own.
 
@@ -19,7 +19,7 @@ or write your own.
 
 ### Home screen
 
-`shepherd-launcher` presents a list of activities for the user to pick from.
+`lunchbox-launcher` presents a list of activities for the user to pick from.
 
 ![Home screen at 3:00 PM showing the following set of activities: Tux Math, Putt Putt Joins the Circus, Secret of Monkey Island, GCompris, Minecraft, Celeste, A Short Hike, Big Buck Bunny, and Lofi Beats.](./docs/readme/home-normal.png)
 
@@ -46,9 +46,9 @@ Activities can have configurable time limits, including:
 ### Anything on Linux
 
 If it can run on Linux in *any way, shape, or form*, it can be supervised by
-`shepherd-launcher`.
+`lunchbox-launcher`.
 
-!["Big Buck Bunny" hosted within shepherd-launcher UI](./docs/readme/apps-media.jpg)
+!["Big Buck Bunny" hosted within lunchbox-launcher UI](./docs/readme/apps-media.jpg)
 
 > [Big Buck Bunny](https://peach.blender.org/) playing locally via `mpv`
 
@@ -66,32 +66,32 @@ resumed save state otherwise makes unreachable.
 the child stopped at, in a reader locked down to reading it — no file dialog, no
 settings, no menubar or toolbar, just the page.
 
-!["Putt Putt Joins the Circus" hosted within shepherd-launcher UI](./docs/readme/apps-puttputt.png)
+!["Putt Putt Joins the Circus" hosted within lunchbox-launcher UI](./docs/readme/apps-puttputt.png)
 
 > [Putt Putt Joins the Circus](https://humongous.fandom.com/wiki/Putt-Putt_Joins_the_Circus)
 > running via [ScummVM](https://www.scummvm.org/)
 
-!["The Secret of Monkey Island" hosted within shepherd-launcher UI](./docs/readme/apps-monkey.png)
+!["The Secret of Monkey Island" hosted within lunchbox-launcher UI](./docs/readme/apps-monkey.png)
 
 > [The Secret of Monkey Island](https://en.wikipedia.org/wiki/The_Secret_of_Monkey_Island)
 > running via [ScummVM](https://www.scummvm.org/)
 
-![Minecraft hosted within shepherd-launcher UI](./docs/readme/apps-minecraft.jpg)
+![Minecraft hosted within lunchbox-launcher UI](./docs/readme/apps-minecraft.jpg)
 
 > [Minecraft](https://www.minecraft.net/) running via the
 > [Prism Launcher Flatpak](https://flathub.org/en/apps/org.prismlauncher.PrismLauncher)
 
-![Celeste hosted within shepherd-launcher UI](./docs/readme/apps-celeste.png)
+![Celeste hosted within lunchbox-launcher UI](./docs/readme/apps-celeste.png)
 
 > [Celeste](https://www.celestegame.com/) running via Steam
 
-![A Short Hike hosted within shepherd-launcher UI](./docs/readme/apps-ashorthike.png)
+![A Short Hike hosted within lunchbox-launcher UI](./docs/readme/apps-ashorthike.png)
 
 > [A Short Hike](https://ashorthike.com/) running via Steam
 
 ### Local management
 
-`shepherd-launcher` optionally runs a management UI and API that can be used to
+`lunchbox-launcher` optionally runs a management UI and API that can be used to
 apply temporary overrides.
 
 !["Now" screen showing time adjustment and "Stop Session" buttons](./docs/readme/management-now.png)
@@ -116,7 +116,7 @@ apply temporary overrides.
 
 ### Regarding age verification
 
-`shepherd-launcher` may be considered "operating system software" under the
+`lunchbox-launcher` may be considered "operating system software" under the
 [Digital Age Assurance Act][age-california] and similar legislation,
 and therefore subject to an age verification requirement.
 
@@ -124,7 +124,7 @@ and therefore subject to an age verification requirement.
 
 As legislated, such requirements are fundamentally incompatible with non-goals 3, 4, and 5.
 
-`shepherd-launcher` will *never* collect telemetry or PII, and as such, it will never implement this type of age verification.
+`lunchbox-launcher` will *never* collect telemetry or PII, and as such, it will never implement this type of age verification.
 
 Usage in California is explicitly allowed under [AB1856][age-california-2],
 which exempts applications distributed "under license terms that permit a
@@ -133,11 +133,11 @@ recipient to copy, redistribute, and modify the software", such as the
 
 ## Installation
 
-`shepherd-launcher` is pre-alpha and in active development. The helper at
-`./scripts/shepherd` can be used to build and install a *fully functional*
+`lunchbox-launcher` is pre-alpha and in active development. The helper at
+`./scripts/lunchbox` can be used to build and install a *fully functional*
 local kiosk setup from source:
 
-Check out this repository and run `./scripts/shepherd --help` or see
+Check out this repository and run `./scripts/lunchbox --help` or see
 [INSTALL.md](./docs/INSTALL.md) for more.
 
 ## Example configuration

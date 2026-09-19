@@ -53,7 +53,7 @@ pub struct SponsorBlockCache {
 }
 
 impl SponsorBlockCache {
-    /// A cache under `$XDG_CACHE_HOME/shepherd/media/sponsorblock/`, talking to
+    /// A cache under `$XDG_CACHE_HOME/lunchbox/media/sponsorblock/`, talking to
     /// `api`.
     pub fn new(api: impl Into<String>) -> Self {
         Self::with_dir(crate::media_cache_dir("sponsorblock"), api)

@@ -1,11 +1,11 @@
 # lunchbox-http
 
-HTTP management API server for Shepherd.
+HTTP management API server for Lunchbox.
 
 ## Overview
 
 Exposes a local/LAN JSON-RPC endpoint that lets a parent or administrator manage
-Shepherd from a phone or browser on the same network, without needing direct
+Lunchbox from a phone or browser on the same network, without needing direct
 access to the launcher UI.
 
 The surface is three endpoints plus the login flow:
@@ -119,7 +119,7 @@ be a method that exists and cannot work. What the trait carries instead is
 by the macro. #156 kept the login exchange off the trait for the mirror reason.
 
 **`If-Match` is required, not optional.** A device's policy has three writers —
-`sudoedit`, `shepherd install policy`, and this — so forgetting the
+`sudoedit`, `lunchbox install policy`, and this — so forgetting the
 precondition answers `428 Precondition Required` rather than silently
 overwriting whoever got there first. A tag that no longer matches is `412`. A
 caller that means "overwrite whatever is there" says `If-Match: *`.
@@ -161,7 +161,7 @@ surface is absent rather than merely shut.
 can already `PUT /api/v1/config` with `kind = { type = "process", command = … }`,
 which runs anything as this user at the next launch — withholding a file write
 from that same credential would protect nothing. This is the argument
-`shepherd-webui/src/App.tsx` already records for the config editor.
+`lunchbox-webui/src/App.tsx` already records for the config editor.
 
 **Nothing is on `ManagementService`.** Like the policy routes, and for the same
 reason: `#[management_rpc]` carries every async trait method to BLE, whose
@@ -388,8 +388,8 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
   before the check, and a symlink out of the root is *listed* (so a person can
   delete it) with `unusable: "symlink_escapes"` but never followed. Any
   activity at the kiosk uid can plant such a link, so this is not hypothetical.
-- **Serve shepherd's own state, or an SSH key.** `~/.local/share/lunchboxd`
-  (the database), `$XDG_CACHE_HOME/shepherd` (the video cache, which keeps an
+- **Serve lunchbox's own state, or an SSH key.** `~/.local/share/lunchboxd`
+  (the database), `$XDG_CACHE_HOME/lunchbox` (the video cache, which keeps an
   index that hand-deletion desynchronises) and `~/.ssh` are refused, for
   reading and writing alike. The first two are about damage nobody would
   connect back to the edit; `~/.ssh` is there on its own merits, because a
@@ -431,7 +431,7 @@ travels. Three things are accepted, and they are not equals:
 
 | Credential | Who presents it | Can it sign a person in? |
 |---|---|---|
-| `shepherd_session` cookie | A browser | It *is* the signed-in state |
+| `lunchbox_session` cookie | A browser | It *is* the signed-in state |
 | Session token as `Authorization: Bearer` | A cross-origin browser, a script holding a session | Yes — same session |
 | Machine token as `Authorization: Bearer` | `curl`, the e2e harness, the companion | **No.** Authenticates the request, opens nothing |
 
@@ -610,4 +610,4 @@ pass just as happily if the file manager were open to the network), that
 `enabled` survives the trip from a config file through another crate, and that
 the refused directories are the ones the running daemon is actually using.
 
-`shepherd-webui/src/api/files.test.ts` pins the other end of the same wire.
+`lunchbox-webui/src/api/files.test.ts` pins the other end of the same wire.

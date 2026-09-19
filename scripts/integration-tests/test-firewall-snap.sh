@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manual end-to-end firewall enforcement test for Snap entries.
 #
-# Builds a tiny "shepherd-firewall-probe" snap from this repo, installs it
+# Builds a tiny "lunchbox-firewall-probe" snap from this repo, installs it
 # via `snap try` (classic confinement), then drives
 # `cargo test -p lunchbox-e2e --test firewall_real_snap` which boots a real
 # lunchboxd, configures an entry with kind=snap, and waits for the snap's
@@ -12,7 +12,7 @@
 #
 # Prerequisites (same as test-firewall.sh, plus snap):
 #   - lunchbox-firewall-helper installed (run setup-firewall-dev.sh)
-#   - The user a member of the shepherd-firewall group (re-login required)
+#   - The user a member of the lunchbox-firewall group (re-login required)
 #   - polkit running and the rule loaded
 #   - snapd installed and running
 #   - Outbound connectivity to the deny target (Google DNS)
@@ -24,9 +24,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
-POLKIT_ACTION="org.shepherd.firewall.apply-process"
-DENY_TARGET="${SHEPHERD_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
-SNAP_NAME="shepherd-firewall-probe"
+POLKIT_ACTION="com.lunchbox-os.firewall.apply-process"
+DENY_TARGET="${LUNCHBOX_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
+SNAP_NAME="lunchbox-firewall-probe"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -54,19 +54,19 @@ echo "[orchestrator] Pre-flight: $DENY_TARGET reachable from outside firewall...
 deny_host="${DENY_TARGET%:*}"
 deny_port="${DENY_TARGET##*:}"
 if ! timeout 3 bash -c "exec 3<>/dev/tcp/$deny_host/$deny_port" 2>/dev/null; then
-    fail "deny target $DENY_TARGET unreachable. Set SHEPHERD_INTEGRATION_DENY_TARGET to something reachable but outside the entry's allow list."
+    fail "deny target $DENY_TARGET unreachable. Set LUNCHBOX_INTEGRATION_DENY_TARGET to something reachable but outside the entry's allow list."
 fi
 exec 3<&- || true
 
 # ----- Stage the snap try directory ----------------------------------------
-SNAP_DIR="$(mktemp -d /tmp/shepherd-fw-snap.XXXXXX)"
-PROBE_LOG_DIR="$(mktemp -d /tmp/shepherd-fw-snap-log.XXXXXX)"
+SNAP_DIR="$(mktemp -d /tmp/lunchbox-fw-snap.XXXXXX)"
+PROBE_LOG_DIR="$(mktemp -d /tmp/lunchbox-fw-snap-log.XXXXXX)"
 # `snap try` requires the dir tree to be world-readable + executable; mktemp
 # defaults to 0700.
 chmod 0755 "$SNAP_DIR"
 chmod 0777 "$PROBE_LOG_DIR"
-export SHEPHERD_FIREWALL_PROBE_LOG="$PROBE_LOG_DIR/probe.log"
-PROBE_LOG_PATH="$SHEPHERD_FIREWALL_PROBE_LOG"
+export LUNCHBOX_FIREWALL_PROBE_LOG="$PROBE_LOG_DIR/probe.log"
+PROBE_LOG_PATH="$LUNCHBOX_FIREWALL_PROBE_LOG"
 
 cleanup() {
     set +e
@@ -82,7 +82,7 @@ chmod 0755 "$SNAP_DIR/bin/probe.sh"
 cat > "$SNAP_DIR/meta/snap.yaml" <<EOF
 name: $SNAP_NAME
 version: '1.0'
-summary: Test snap for shepherd-launcher firewall enforcement
+summary: Test snap for lunchbox-launcher firewall enforcement
 description: |
   Probes one allowed and one denied TCP target inside the snap's systemd
   scope. Used by crates/lunchbox-e2e/tests/firewall_real_snap.rs only.
@@ -96,12 +96,12 @@ EOF
 echo "[orchestrator] Installing snap via 'sudo snap try --classic $SNAP_DIR'..."
 sudo snap try --classic "$SNAP_DIR"
 
-echo "[orchestrator] Building shepherd binaries..."
-./scripts/shepherd build
+echo "[orchestrator] Building lunchbox binaries..."
+./scripts/lunchbox build
 
 echo "[orchestrator] Running cargo test..."
-SHEPHERD_FIREWALL_PROBE_LOG="$PROBE_LOG_PATH" \
-SHEPHERD_FIREWALL_PROBE_DENY="$DENY_TARGET" \
-SHEPHERD_FIREWALL_PROBE_SNAP="$SNAP_NAME" \
+LUNCHBOX_FIREWALL_PROBE_LOG="$PROBE_LOG_PATH" \
+LUNCHBOX_FIREWALL_PROBE_DENY="$DENY_TARGET" \
+LUNCHBOX_FIREWALL_PROBE_SNAP="$SNAP_NAME" \
     cargo test -p lunchbox-e2e --test firewall_real_snap -- \
     --include-ignored --test-threads=1 --nocapture

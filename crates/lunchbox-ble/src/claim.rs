@@ -17,10 +17,10 @@
 
 use crate::admin::{AdminRecord, AdminStore, AdminStoreError};
 use bluer::Address;
-use rand::RngCore;
 use lunchbox_management::{
     AdminAuthority, AdminRoster, AdminRosterError, AdminSummary, EnrolmentRequestInfo,
 };
+use rand::RngCore;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;

@@ -61,7 +61,7 @@ always = true
 /// running the suite.
 fn fake_home() -> Result<tempfile::TempDir> {
     let home = tempfile::Builder::new()
-        .prefix("shepherd-e2e-home-")
+        .prefix("lunchbox-e2e-home-")
         .tempdir()?;
     std::fs::create_dir_all(home.path().join("Books"))?;
     std::fs::write(
@@ -89,9 +89,9 @@ fn fake_home() -> Result<tempfile::TempDir> {
 async fn harness(home: &std::path::Path, enabled: bool) -> Result<TestHarness> {
     TestHarness::builder()
         .config_toml(FILES_CONFIG.replace("{ENABLED}", if enabled { "true" } else { "false" }))
-        .shepherdd_env("HOME", home.to_string_lossy().to_string())
+        .lunchboxd_env("HOME", home.to_string_lossy().to_string())
         // So the daemon's database really is under the home it is offering.
-        .shepherdd_env(
+        .lunchboxd_env(
             "XDG_DATA_HOME",
             home.join(".local/share").to_string_lossy().to_string(),
         )

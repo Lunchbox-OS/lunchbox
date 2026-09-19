@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configuration validation logic for shepherd-launcher
+# Configuration validation logic for lunchbox-launcher
 # Validates lunchboxd configuration files
 
 # Get the directory containing this script
@@ -10,31 +10,31 @@ CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$CONFIG_LIB_DIR/common.sh"
 
 # Default configuration paths
-# Uses XDG_CONFIG_HOME or ~/.config/shepherd/config.toml
+# Uses XDG_CONFIG_HOME or ~/.config/lunchbox/config.toml
 get_default_config_path() {
     if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
-        echo "$XDG_CONFIG_HOME/shepherd/config.toml"
+        echo "$XDG_CONFIG_HOME/lunchbox/config.toml"
     else
-        echo "$HOME/.config/shepherd/config.toml"
+        echo "$HOME/.config/lunchbox/config.toml"
     fi
 }
 
 EXAMPLE_CONFIG_NAME="config.example.toml"
 
-# Get path to the shepherd-validate-config binary
+# Get path to the lunchbox-validate-config binary
 get_validate_binary() {
     local release="${1:-false}"
     local repo_root
     repo_root="$(get_repo_root)"
     
     if [[ "$release" == "true" ]]; then
-        echo "$repo_root/target/release/shepherd-validate-config"
+        echo "$repo_root/target/release/lunchbox-validate-config"
     else
-        echo "$repo_root/target/debug/shepherd-validate-config"
+        echo "$repo_root/target/debug/lunchbox-validate-config"
     fi
 }
 
-# Build the shepherd-validate-config binary if needed
+# Build the lunchbox-validate-config binary if needed
 build_validate_binary() {
     local release="${1:-false}"
     local repo_root
@@ -46,11 +46,11 @@ build_validate_binary() {
     cd "$repo_root" || die "Failed to change directory to $repo_root"
     
     if [[ "$release" == "true" ]]; then
-        info "Building shepherd-validate-config (release mode)..."
-        cargo build --release --bin shepherd-validate-config
+        info "Building lunchbox-validate-config (release mode)..."
+        cargo build --release --bin lunchbox-validate-config
     else
-        info "Building shepherd-validate-config..."
-        cargo build --bin shepherd-validate-config
+        info "Building lunchbox-validate-config..."
+        cargo build --bin lunchbox-validate-config
     fi
 }
 
@@ -83,7 +83,7 @@ validate_config_file() {
 # Show config help
 config_usage() {
     cat <<EOF
-Usage: shepherd config <command> [options]
+Usage: lunchbox config <command> [options]
 
 Commands:
     validate [path]    Validate a configuration file
@@ -101,13 +101,13 @@ The validate command checks a configuration file for:
 
 Examples:
     # Validate the installed config
-    shepherd config validate
+    lunchbox config validate
 
     # Validate a specific file
-    shepherd config validate /path/to/config.toml
+    lunchbox config validate /path/to/config.toml
 
     # Validate the example config in the repo
-    shepherd config validate config.example.toml
+    lunchbox config validate config.example.toml
 
 Default paths:
     Installed:  $(get_default_config_path)

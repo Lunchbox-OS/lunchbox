@@ -1,7 +1,7 @@
-# Test-time system packages for shepherd-launcher
+# Test-time system packages for lunchbox-launcher
 # These are needed in addition to the build deps to run the
 # `lunchbox-e2e` end-to-end suite, which boots a real headless
-# Sway compositor and the shepherd binaries inside a temp environment.
+# Sway compositor and the lunchbox binaries inside a temp environment.
 # One package per line, comments start with #
 
 # Sway compositor (the harness drives a real Sway, not a mock)
@@ -25,5 +25,5 @@ dosfstools
 
 # `mountpoint` and `findmnt`, which the same scripts use to refuse to run
 # against an unmounted directory -- a check that matters, because an empty
-# /media/shepherd-fat on ext4 would pass the tests for the wrong reason.
+# /media/lunchbox-fat on ext4 would pass the tests for the wrong reason.
 util-linux

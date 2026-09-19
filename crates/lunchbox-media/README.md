@@ -20,7 +20,7 @@ Linux binary for the `lunchbox-media` library-launcher. Wraps
   per-frame position; the decisions are `lunchbox-media-core`'s. With no
   categories there is no watcher and nothing reaches the network.
 - The `--resume` option (default off): per-library playback positions kept under
-  `$XDG_STATE_HOME/shepherd/media/resume/`, so an item re-opens where it stopped
+  `$XDG_STATE_HOME/lunchbox/media/resume/`, so an item re-opens where it stopped
   and browse mode offers to continue the last one watched. The state model is
   shared with the Android app (`lunchbox-media-app`'s `resume` module); see
   `docs/lunchbox-media.md`.

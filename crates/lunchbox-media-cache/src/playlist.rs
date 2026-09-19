@@ -9,7 +9,7 @@
 //! is returned rather than a panic.
 //!
 //! Fetched playlist metadata is cached in
-//! `$XDG_CACHE_HOME/shepherd/media/playlists/<list-id>.json` (falling back to
+//! `$XDG_CACHE_HOME/lunchbox/media/playlists/<list-id>.json` (falling back to
 //! `~/.cache/…`). The cache is valid for [`CACHE_TTL_SECS`] seconds; a stale
 //! or absent cache causes a fresh yt-dlp fetch and a new cache write. If the
 //! live fetch fails (typically because the network is unreachable) but a
@@ -20,9 +20,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use lunchbox_media_app::cache::{self, Freshness};
 use lunchbox_media_core::{PlaylistInfo, YoutubePlaylistEntry, parse_flat_playlist};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
 

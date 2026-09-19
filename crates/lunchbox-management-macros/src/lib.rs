@@ -94,7 +94,7 @@ pub fn management_rpc(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         /// Machine-readable schema for the trait's RPCs, meant for
         /// external codegen (companion-android's Kotlin client,
-        /// shepherd-webui's TypeScript client). The shape is a JSON
+        /// lunchbox-webui's TypeScript client). The shape is a JSON
         /// object `{ "methods": [{ "name", "params": [...], "result": {..} }, ...] }`.
         /// Each param has `{ "name", "type", "required" }`; the result
         /// carries `{ "type", "wrap_field": <optional> }`. Types are

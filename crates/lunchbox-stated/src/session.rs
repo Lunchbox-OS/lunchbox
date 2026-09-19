@@ -20,10 +20,10 @@
 //! | an SSH login | `user` | `tty` | — |
 //!
 //! `Class=user` alone would admit an SSH login, which is a second way into the
-//! same uid rather than the session shepherd runs in. Requiring **`Class=user`,
+//! same uid rather than the session lunchbox runs in. Requiring **`Class=user`,
 //! `Type=wayland`, and a seat** admits exactly the one GDM started.
 //!
-//! `shepherd harden apply` denies the kiosk user SSH and console login, so on a
+//! `lunchbox harden apply` denies the kiosk user SSH and console login, so on a
 //! hardened device that second session cannot exist at all. This check does not
 //! rely on that — it is what makes the rule correct on a device where hardening
 //! was skipped.
@@ -66,14 +66,14 @@ trait LogindManager {
 
     /// End a session (issue #172). Needs polkit's
     /// `org.freedesktop.login1.manage` from a uid that does not own the
-    /// session, which is what `dist/polkit/50-shepherd-session-guard.rules`
+    /// session, which is what `dist/polkit/50-lunchbox-session-guard.rules`
     /// grants and what [`crate::polkit`] checks for at startup.
     fn terminate_session(&self, session_id: &str) -> zbus::Result<()>;
 
     /// Kill everything a uid is running, for when asking did not work.
     ///
     /// `KillUser` rather than `KillSession` deliberately: the session scope
-    /// holds the compositor and shepherd's own UI, while the activities live in
+    /// holds the compositor and lunchbox's own UI, while the activities live in
     /// the user manager's `app.slice`. See [`crate::guard::Terminator::kill_user`].
     fn kill_user(&self, uid: u32, signal_number: i32) -> zbus::Result<()>;
 
@@ -302,7 +302,7 @@ pub async fn resolve(conn: &zbus::Connection, uid: u32) -> Result<TrustedSession
         ),
         n => bail!(
             "uid {uid} has {n} graphical sessions ({}); refusing to guess which one is \
-             shepherd's",
+             lunchbox's",
             found
                 .iter()
                 .map(|s| s.id.as_str())
@@ -353,7 +353,7 @@ pub async fn watch_for_loss(
     })
 }
 
-/// Whether a logind session is the one shepherd runs in.
+/// Whether a logind session is the one lunchbox runs in.
 ///
 /// Split out from [`resolve`] because it is the whole security-relevant part of
 /// the filter and the only part testable without a bus. The rows it has to get
@@ -367,7 +367,7 @@ pub async fn watch_for_loss(
 /// leaves the one that is actually the session.
 ///
 /// `active` and `online` are both accepted: a kiosk whose VT is switched away
-/// is `online`, and it is still the session shepherd is running in.
+/// is `online`, and it is still the session lunchbox is running in.
 fn is_graphical(class: &str, kind: &str, seat: &str, state: &str) -> bool {
     class == "user" && kind == "wayland" && !seat.is_empty() && state != "closing"
 }
@@ -504,7 +504,7 @@ mod tests {
         // is what makes a second session a downgrade that outlasts it.
         let ambiguous = anyhow::anyhow!(
             "uid 1001 has 2 graphical sessions (7, 9); refusing to guess which \
-                             one is shepherd's"
+                             one is lunchbox's"
         );
         assert!(is_unresolved(&ambiguous));
 
@@ -528,7 +528,7 @@ mod tests {
         );
         assert!(
             !is_graphical("manager", "unspecified", "", "active"),
-            "the user manager is not a session shepherd runs in"
+            "the user manager is not a session lunchbox runs in"
         );
         assert!(
             !is_graphical("user", "tty", "", "active"),
@@ -544,7 +544,7 @@ mod tests {
         // refused to guess, and the custodian would not start.
         assert!(
             !is_graphical("user", "wayland", "seat0", "closing"),
-            "a session logind is tearing down is not the one shepherd runs in"
+            "a session logind is tearing down is not the one lunchbox runs in"
         );
         // But a kiosk whose VT is switched away is `online`, and is still it.
         assert!(is_graphical("user", "wayland", "seat0", "online"));

@@ -799,7 +799,7 @@ mod tests {
             NetworkSource::NetworkManager,
             vec![NetworkInterfaceView {
                 wifi: Some(WifiView {
-                    ssid: Some("SHEPHERD-04-HP OfficeJet 250".into()),
+                    ssid: Some("LUNCHBOX-04-HP OfficeJet 250".into()),
                     signal_percent: Some(60),
                     frequency_mhz: Some(5_220),
                 }),

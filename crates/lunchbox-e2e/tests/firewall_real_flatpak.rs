@@ -15,8 +15,8 @@
 #![allow(clippy::disallowed_methods)]
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body};
+use serde_json::json;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "org.shepherd.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
 
 fn skip_reason(app_id: &str) -> Option<String> {
     if !Path::new(HELPER_PATH).exists() {
@@ -72,10 +72,10 @@ fn deny_target_reachable(target: &str) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn flatpak_firewall_enforcement_with_real_helper() -> Result<()> {
-    let app_id = std::env::var("SHEPHERD_FIREWALL_PROBE_FLATPAK")
-        .unwrap_or_else(|_| "org.shepherd.firewall.Probe".into());
+    let app_id = std::env::var("LUNCHBOX_FIREWALL_PROBE_FLATPAK")
+        .unwrap_or_else(|_| "com.lunchbox-os.firewall.Probe".into());
     let deny_target =
-        std::env::var("SHEPHERD_FIREWALL_PROBE_DENY").unwrap_or_else(|_| "8.8.8.8:53".into());
+        std::env::var("LUNCHBOX_FIREWALL_PROBE_DENY").unwrap_or_else(|_| "8.8.8.8:53".into());
 
     if let Some(reason) = skip_reason(&app_id) {
         eprintln!(
@@ -114,11 +114,11 @@ async fn flatpak_firewall_enforcement_with_real_helper() -> Result<()> {
 
     // Probe log path under /tmp -- the test flatpak's manifest declares
     // `--filesystem=/tmp` so the sandboxed app can write here.
-    let probe_log_path: PathBuf = std::env::var("SHEPHERD_FIREWALL_PROBE_LOG")
+    let probe_log_path: PathBuf = std::env::var("LUNCHBOX_FIREWALL_PROBE_LOG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             tempfile::Builder::new()
-                .prefix("shepherd-fw-fp-")
+                .prefix("lunchbox-fw-fp-")
                 .tempdir_in("/tmp")
                 .unwrap()
                 .keep()
@@ -154,15 +154,15 @@ app_id = "{app_id}"
 # $TEMPDIR/flatpak/app and fails ("app/<id>/x86_64/master not installed").
 # Override back to the real user dir so `flatpak run` finds the test app.
 XDG_DATA_HOME = "{xdg_data_home}"
-SHEPHERD_FIREWALL_PROBE_LOG = "{log}"
-SHEPHERD_FIREWALL_PROBE_ALLOW = "{allow}"
-SHEPHERD_FIREWALL_PROBE_DENY = "{deny}"
-SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS = "120"
+LUNCHBOX_FIREWALL_PROBE_LOG = "{log}"
+LUNCHBOX_FIREWALL_PROBE_ALLOW = "{allow}"
+LUNCHBOX_FIREWALL_PROBE_DENY = "{deny}"
+LUNCHBOX_FIREWALL_PROBE_HOLD_SECONDS = "120"
 # 5s gives lunchboxd's wait_for_scope poll loop and the
 # pkexec→helper→BPF-attach round trip time to land before the probe
 # starts testing. flatpak-run startup itself usually consumes most of
 # this already, but the explicit delay makes the test deterministic.
-SHEPHERD_FIREWALL_PROBE_INITIAL_DELAY = "5"
+LUNCHBOX_FIREWALL_PROBE_INITIAL_DELAY = "5"
 [entries.availability]
 always = true
 [entries.limits]

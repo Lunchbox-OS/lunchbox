@@ -24,11 +24,11 @@ use axum::{
     http::{HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::json;
 use lunchbox_management::{
     LoginPoll, MintedSession, WebAuthError, WebAuthStatus, WebSessionInfo, label_from_user_agent,
 };
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::json;
 
 use crate::auth::{AuthSources, Identity, clear_cookie_header, peer_of, session_cookie_header};
 use crate::state::AppState;

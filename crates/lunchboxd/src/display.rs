@@ -680,7 +680,7 @@ mod tests {
     ) -> DisplayManager {
         // A real IpcServer isn't needed for logic: broadcast_event only pushes
         // onto a channel, so an unbound server (never `run()`) is fine.
-        let ipc = Arc::new(IpcServer::new("/tmp/shepherd-display-test.sock"));
+        let ipc = Arc::new(IpcServer::new("/tmp/lunchbox-display-test.sock"));
         let (tx, _rx) = broadcast::channel(16);
         DisplayManager::new(backend, mirror, audio, true, ipc, tx)
     }

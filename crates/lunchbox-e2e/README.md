@@ -1,6 +1,6 @@
 # lunchbox-e2e
 
-End-to-end integration tests that exercise the full shepherd stack against a
+End-to-end integration tests that exercise the full lunchbox stack against a
 real, headless Sway compositor. Each test starts its own private Sway,
 lunchboxd, and (optionally) launcher/HUD processes inside an isolated temp
 environment, then drives the daemon through its HTTP management API and IPC
@@ -59,19 +59,19 @@ flatpak ran unfiltered. Run it with
 Each of these prints `[SKIP] <reason>` and passes when its host cannot run it —
 including the plain E2E job, which runs the whole crate with `--include-ignored`
 in an unprivileged container that can neither write cgroupfs nor mount cgroup2.
-Set `SHEPHERD_FIREWALL_CGROUP_REQUIRED=1` for `firewall_cgroup` to turn that
+Set `LUNCHBOX_FIREWALL_CGROUP_REQUIRED=1` for `firewall_cgroup` to turn that
 skip into a failure — CI sets it, so an unmet precondition is reported rather
 than read as a pass.
 
 ## Running locally
 
-The harness needs `sway`, `dbus-daemon`, and the shepherd binaries (built
+The harness needs `sway`, `dbus-daemon`, and the lunchbox binaries (built
 in debug mode). Install runtime deps and a few extras:
 
 ```sh
-./scripts/shepherd deps install run
-./scripts/shepherd deps install test
-./scripts/shepherd build
+./scripts/lunchbox deps install run
+./scripts/lunchbox deps install test
+./scripts/lunchbox build
 cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1
 ```
 

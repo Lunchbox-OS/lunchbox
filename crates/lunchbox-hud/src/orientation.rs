@@ -27,7 +27,7 @@
 use gtk4::glib::object::IsA;
 use lunchbox_api::HudOrientation;
 
-/// Parse the `--anchor` flag / `SHEPHERD_HUD_ANCHOR`.
+/// Parse the `--anchor` flag / `LUNCHBOX_HUD_ANCHOR`.
 ///
 /// Unknown values fall back to `Top` rather than failing: the HUD is the
 /// surface a child ends a session from, so a typo must not be able to take it

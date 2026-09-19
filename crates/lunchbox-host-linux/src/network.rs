@@ -563,8 +563,8 @@ mod tests {
         // 802.11 carries 32 arbitrary octets. Mojibake in the one field a
         // parent uses to recognise their network is worse than a blank.
         assert_eq!(
-            decode_ssid(b"SHEPHERD-04-HP OfficeJet 250").as_deref(),
-            Some("SHEPHERD-04-HP OfficeJet 250")
+            decode_ssid(b"LUNCHBOX-04-HP OfficeJet 250").as_deref(),
+            Some("LUNCHBOX-04-HP OfficeJet 250")
         );
         assert_eq!(decode_ssid(&[0xff, 0xfe, 0x00]), None);
         assert_eq!(decode_ssid(b""), None, "a hidden network beacons no SSID");

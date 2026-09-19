@@ -52,7 +52,7 @@ static DENY_V6: LpmTrie<[u8; 16], u8> = LpmTrie::with_max_entries(64, 0);
 static DEFAULT: Array<u8> = Array::with_max_entries(1, 0);
 
 #[cgroup_skb]
-pub fn shepherd_firewall(ctx: SkBuffContext) -> i32 {
+pub fn lunchbox_firewall(ctx: SkBuffContext) -> i32 {
     match try_filter(&ctx) {
         Ok(verdict) => verdict,
         // On parse error we fall back to the default verdict; never panic

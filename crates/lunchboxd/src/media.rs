@@ -776,7 +776,7 @@ fn warn_about_missing_ytdlp(media_entries: &[(String, String)]) {
     warn!(
         entries = ?youtube_entries,
         "yt-dlp is not installed, but these media activities reference YouTube; \
-         they will fail to load or play. Install it with `shepherd-admin media-deps install`."
+         they will fail to load or play. Install it with `lunchbox-admin media-deps install`."
     );
 }
 
@@ -911,7 +911,7 @@ mod tests {
         label = "Movies"
         [entries.kind]
         type = "media"
-        library = "/etc/shepherd/movies.toml"
+        library = "/etc/lunchbox/movies.toml"
     "#;
 
     /// Prefetch warms the segment buckets only for entries that skip. An entry
@@ -1062,7 +1062,7 @@ mod tests {
     fn target() -> PrefetchTarget {
         PrefetchTarget {
             entry_id: "movies".into(),
-            library: "/etc/shepherd/movies.toml".into(),
+            library: "/etc/lunchbox/movies.toml".into(),
             quality: MediaQuality::Best,
             only_item: None,
             sponsorblock: false,

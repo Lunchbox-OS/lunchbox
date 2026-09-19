@@ -222,7 +222,7 @@ fn media_argv(
 }
 
 /// Resolve the base directory under which browser policy/profile dirs are
-/// materialized: the user's home, or `SHEPHERD_BROWSER_ROOT` where the
+/// materialized: the user's home, or `LUNCHBOX_BROWSER_ROOT` where the
 /// environment is trusted.
 ///
 /// Gated, because redirecting this is a policy bypass rather than a
@@ -236,7 +236,7 @@ fn media_argv(
 /// redirect writes away from the real `~/.var/app/...`, and that harness passes
 /// `--trust-environment`.
 fn resolve_browser_root() -> PathBuf {
-    if let Some(root) = crate::helpers::env_override("SHEPHERD_BROWSER_ROOT") {
+    if let Some(root) = crate::helpers::env_override("LUNCHBOX_BROWSER_ROOT") {
         return root;
     }
     dirs::home_dir().unwrap_or_default()
@@ -413,7 +413,7 @@ struct EscapedActivity {
     reported: bool,
 }
 
-/// Every pid shepherd is accountable for, snapshotted so a window can be
+/// Every pid lunchbox is accountable for, snapshotted so a window can be
 /// attributed to whatever is (or is not) supervising it.
 ///
 /// The compositor only knows which process drew a surface. Turning that into
@@ -429,9 +429,9 @@ struct SupervisedPids {
     activity_steam: Vec<u32>,
     /// Per-activity input sidecars (touch bridge and friends).
     sidecars: HashSet<u32>,
-    /// Shepherd's own background processes — today, the preloaded Steam
+    /// Lunchbox's own background processes — today, the preloaded Steam
     /// client that sits on the scratchpad between launches.
-    shepherd: HashSet<u32>,
+    lunchbox: HashSet<u32>,
     /// Activities that outlived teardown, as `(pid, pgid)`.
     escaped: Vec<(u32, u32)>,
     /// Steam game pids belonging to an escaped Steam session.
@@ -446,7 +446,7 @@ impl SupervisedPids {
     /// `escaped`, and "this got away from us" is the more urgent truth.
     fn owner_of(&self, w: &WindowInfo) -> WindowOwner {
         if LinuxHost::is_infrastructure(w) {
-            return WindowOwner::Shepherd;
+            return WindowOwner::Lunchbox;
         }
         // Nothing to match on. Reported as unowned rather than assumed
         // harmless: a surface we cannot attribute is exactly what this field
@@ -463,8 +463,8 @@ impl SupervisedPids {
         {
             return WindowOwner::Activity;
         }
-        if self.shepherd.contains(&pid) {
-            return WindowOwner::Shepherd;
+        if self.lunchbox.contains(&pid) {
+            return WindowOwner::Lunchbox;
         }
         WindowOwner::Unowned
     }
@@ -917,13 +917,13 @@ impl LinuxHost {
         }
     }
 
-    /// `app_id`s that are shepherd's own furniture rather than an activity.
+    /// `app_id`s that are lunchbox's own furniture rather than an activity.
     /// A window matching one of these is expected to outlive every session.
     fn is_infrastructure(window: &WindowInfo) -> bool {
         const INFRA: &[&str] = &[
-            "org.shepherd.launcher",
-            "org.shepherd.hud",
-            "org.shepherd.pairing",
+            "com.lunchbox-os.launcher",
+            "com.lunchbox-os.hud",
+            "com.lunchbox-os.pairing",
             "at.yrlf.wl_mirror",
         ];
         window
@@ -939,7 +939,7 @@ impl LinuxHost {
     /// late Steam game arriving after we stopped watching. Neither shows up in
     /// `processes`, so only the compositor knows they exist.
     ///
-    /// Deliberately **report-only** for pids shepherd did not spawn. Closing an
+    /// Deliberately **report-only** for pids lunchbox did not spawn. Closing an
     /// unrecognized window is a policy call with real blast radius (a system
     /// dialog, something an admin started deliberately), and getting it wrong
     /// on a kiosk a child depends on is worse than the visibility gap. Windows
@@ -1028,7 +1028,7 @@ impl LinuxHost {
                 .flatten()
                 .map(|c| c.id())
                 .collect(),
-            shepherd: steam_preload_pids.lock().unwrap().clone(),
+            lunchbox: steam_preload_pids.lock().unwrap().clone(),
             escaped: escaped_snapshot
                 .iter()
                 .map(|(pid, a)| (*pid, a.pgid))
@@ -1060,7 +1060,7 @@ impl LinuxHost {
     /// Send every kill we have at an activity, hardest first. Shared by the
     /// stop paths and by the reconciliation sweep.
     ///
-    /// `protected_pgids` is every *other* session shepherd is currently
+    /// `protected_pgids` is every *other* session lunchbox is currently
     /// tracking. Only the by-name last resort consults it, and it must: this
     /// runs every two seconds for as long as an activity refuses to die, and
     /// `pkill`ing `retroarch` would take out the game a child launched
@@ -1108,7 +1108,7 @@ impl LinuxHost {
     /// Subscribe to sway's `window` events and turn them into sweeps.
     ///
     /// Reconciliation used to be a sampling detector: a 2s sweep asking "is
-    /// there a surface on screen that shepherd does not own?". For a problem
+    /// there a surface on screen that lunchbox does not own?". For a problem
     /// whose entire symptom is an unexpected window, sampling is the wrong
     /// shape — an orphan went unnoticed for up to 2s, and one that mapped and
     /// unmapped inside a single sweep was never noticed at all (issue #147).
@@ -1205,7 +1205,7 @@ impl LinuxHost {
                         code: DiagnosticCode::CompositorUnreachable,
                         subject: DiagnosticSubject::Service,
                         severity: DiagnosticSeverity::Critical,
-                        message: "shepherd cannot see the compositor, so it cannot tell what is \
+                        message: "lunchbox cannot see the compositor, so it cannot tell what is \
                                   on screen or close a window that escaped supervision"
                             .to_string(),
                         remedy: Some(
@@ -2160,7 +2160,7 @@ impl HostAdapter for LinuxHost {
         // itself is a child of the preloaded client rather than of this
         // process. The scope this creates empties out at that hand-off and
         // `--collect` reaps it. It is kept because the alternative is an
-        // invariant with a hole in it: "an activity is never in shepherd's
+        // invariant with a hole in it: "an activity is never in lunchbox's
         // cgroup" should hold because of what this function does, not because
         // snapd usually moves the process quickly enough. `preload_steam` wraps
         // the client for the same reason, and that is the launch a game
@@ -2184,7 +2184,7 @@ impl HostAdapter for LinuxHost {
                         command = ?final_argv.first(),
                         reason = %reason,
                         "Cannot give this activity a cgroup of its own; it will share \
-                         shepherd's, and the management socket cannot tell it from the launcher"
+                         lunchbox's, and the management socket cannot tell it from the launcher"
                     );
                     final_argv
                 }
@@ -2876,7 +2876,7 @@ mod tests {
 
     fn media(mode: MediaMode, item: Option<&str>) -> EntryKind {
         EntryKind::Media {
-            library: "/etc/shepherd/movies.toml".into(),
+            library: "/etc/lunchbox/movies.toml".into(),
             mode,
             item: item.map(str::to_string),
             quality: MediaQuality::Q1080,
@@ -2896,7 +2896,7 @@ mod tests {
                 "lunchbox-media",
                 "browse",
                 "--library",
-                "/etc/shepherd/movies.toml",
+                "/etc/lunchbox/movies.toml",
                 "--quality",
                 "1080p",
                 "--sort-by",
@@ -3172,7 +3172,7 @@ mod tests {
         assert_eq!(media_argv(&kind, None, None, None, None)[3], url);
 
         let kind = EntryKind::Media {
-            library: "~/.config/shepherd/movies.toml".into(),
+            library: "~/.config/lunchbox/movies.toml".into(),
             mode: MediaMode::Browse,
             item: None,
             quality: MediaQuality::Q1080,
@@ -3185,7 +3185,7 @@ mod tests {
         let expanded = &media_argv(&kind, None, None, None, None)[3];
         assert!(!expanded.starts_with('~'), "{expanded}");
         assert!(
-            expanded.ends_with("/.config/shepherd/movies.toml"),
+            expanded.ends_with("/.config/lunchbox/movies.toml"),
             "{expanded}"
         );
     }
@@ -3276,7 +3276,7 @@ mod tests {
         let host = LinuxHost::new();
         let mut rx = host.subscribe();
 
-        let token = "shepherd-firewall-guard-test-alpha";
+        let token = "lunchbox-firewall-guard-test-alpha";
         let (mut survivor, pid, pgid) = spawn_survivor(token);
         let session_id = SessionId::new();
         let handle = HostSessionHandle::new(session_id, HostHandlePayload::Linux { pid, pgid });
@@ -3287,7 +3287,7 @@ mod tests {
             handle,
             pid,
             pgid,
-            "shepherd-no-such-scope-".to_string(),
+            "lunchbox-no-such-scope-".to_string(),
             deny_all(),
             firewall_test_info(token),
             Duration::from_millis(200),
@@ -3333,7 +3333,7 @@ mod tests {
         let host = LinuxHost::new();
         let mut rx = host.subscribe();
 
-        let token = "shepherd-firewall-guard-test-beta";
+        let token = "lunchbox-firewall-guard-test-beta";
         let (mut survivor, pid, pgid) = spawn_survivor(token);
         let _ = survivor.kill();
         let _ = survivor.wait();
@@ -3350,7 +3350,7 @@ mod tests {
             handle,
             pid,
             pgid,
-            "shepherd-no-such-scope-".to_string(),
+            "lunchbox-no-such-scope-".to_string(),
             deny_all(),
             firewall_test_info(token),
             Duration::from_millis(200),
@@ -3382,7 +3382,7 @@ mod tests {
         let mut rx = host.subscribe();
         let mut unowned = HashSet::new();
 
-        let token = "shepherd-reconcile-test-alpha";
+        let token = "lunchbox-reconcile-test-alpha";
         let (mut survivor, pid, pgid) = spawn_survivor(token);
         let session_id = SessionId::new();
         let info = Some(SessionInfo {
@@ -3546,7 +3546,7 @@ mod tests {
         let pids = SupervisedPids {
             activities: vec![(100, 100)],
             sidecars: [103].into_iter().collect(),
-            shepherd: [104].into_iter().collect(),
+            lunchbox: [104].into_iter().collect(),
             escaped: vec![(105, 105)],
             activity_steam: vec![106],
             escaped_steam: vec![107],
@@ -3559,8 +3559,8 @@ mod tests {
             WindowOwner::Activity
         );
         assert_eq!(
-            owners(window(101, "org.shepherd.launcher")),
-            WindowOwner::Shepherd,
+            owners(window(101, "com.lunchbox-os.launcher")),
+            WindowOwner::Lunchbox,
             "our own furniture is recognised by app_id, whatever its pid"
         );
         assert_eq!(
@@ -3571,7 +3571,7 @@ mod tests {
             owners(window(103, "org.example.Bridge")),
             WindowOwner::Activity
         );
-        assert_eq!(owners(window(104, "steam")), WindowOwner::Shepherd);
+        assert_eq!(owners(window(104, "steam")), WindowOwner::Lunchbox);
         assert_eq!(
             owners(window(105, "org.example.Stubborn")),
             WindowOwner::Escaped
@@ -3640,7 +3640,7 @@ mod tests {
 
         let windows = vec![
             window(100, "org.example.TrackedActivity"), // a tracked activity
-            window(101, "org.shepherd.launcher"),       // our own furniture
+            window(101, "com.lunchbox-os.launcher"),    // our own furniture
             window(102, "org.example.Orphan"),          // the one that matters
         ];
 

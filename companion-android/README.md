@@ -1,6 +1,6 @@
-# shepherd-companion-android
+# lunchbox-companion-android
 
-The Android companion app for managing one or more shepherd-launcher
+The Android companion app for managing one or more lunchbox-launcher
 devices over Bluetooth LE. It is the primary admin interface: it pairs
 with a device using Numeric Comparison, claims it (TOFU single-admin),
 and then drives the full management RPC catalog over the bonded GATT
@@ -18,7 +18,7 @@ the app updated) and attached to each release as an APK. See
 [Installing the Android apps](../docs/INSTALL.md#installing-the-android-apps).
 App listing metadata lives in [`dist/fdroid/`](../dist/fdroid/README.md).
 
-`shepherd-admin apps install companion` does the sideload for you, onto whatever
+`lunchbox-admin apps install companion` does the sideload for you, onto whatever
 Android device is attached over `adb` — building the APK from this Gradle
 project in a source checkout, and downloading the version-matched signed release
 asset on a packaged install.
@@ -28,7 +28,7 @@ asset on a packaged install.
 The Android SDK and a JDK are installed by the parent repo's tooling:
 
 ```sh
-./scripts/shepherd deps install android   # JDK 21 + Android SDK -> /opt/android-sdk
+./scripts/lunchbox deps install android   # JDK 21 + Android SDK -> /opt/android-sdk
 ```
 
 Then, from this directory:
@@ -47,17 +47,17 @@ sideload-friendly (`adb install`).
 | Layer | Where | Notes |
 |---|---|---|
 | Wire (UUIDs, framing, RPC envelope, error codes) | `ble/Protocol.kt`, `ble/Framing.kt`, `ble/Rpc.kt` | `u16`-LE length-prefix framing; JSON-RPC over GATT. |
-| Transport | `ble/ShepherdConnection.kt` | Wraps a Kable `Peripheral`: chunked writes, frame reassembly, request/response correlation by `id`, hot event stream. |
-| Scanning / bonding | `ble/ShepherdScanner.kt`, `ble/BondManager.kt` | Kable for GATT; the raw Android `createBond` + bond-state broadcast for Numeric Comparison. |
+| Transport | `ble/DeviceConnection.kt` | Wraps a Kable `Peripheral`: chunked writes, frame reassembly, request/response correlation by `id`, hot event stream. |
+| Scanning / bonding | `ble/DeviceScanner.kt`, `ble/BondManager.kt` | Kable for GATT; the raw Android `createBond` + bond-state broadcast for Numeric Comparison. |
 | Domain types | `domain/Models.kt` | Kotlin mirrors of `lunchbox-api`; snake_case via `JsonNamingStrategy`. |
 | Typed client | `domain/ManagementClient.kt` | Mirrors the device's `ManagementService` trait. |
-| Persistence | `persistence/AdminRecordStore.kt`, `domain/ShepherdRepository.kt` | Per-device record + secret HTTP token, encrypted at rest. |
-| UI | `ui/**` | Jetpack Compose + Material 3, single activity, one shared `ShepherdViewModel`. |
+| Persistence | `persistence/AdminRecordStore.kt`, `domain/DeviceRepository.kt` | Per-device record + secret HTTP token, encrypted at rest. |
+| UI | `ui/**` | Jetpack Compose + Material 3, single activity, one shared `DeviceViewModel`. |
 | Windows panel | `ui/windows/**` | Maintenance view over `list_windows`/`act_on_window`: close, hide to the scratchpad, show. Polls while open — nothing pushes window changes. Windows the device is not supervising (`owner` `escaped`/`unowned`) lead the list under their own heading and banner. |
 
 ### Decisions (spec §11 open questions)
 
-1. **Package / name** — `com.armeafamily.shepherd.companion` / "Shepherd Companion".
+1. **Package / name** — `com.lunchbox_os.companion` / "Lunchbox Companion".
 2. **BLE library** — **Kable** (coroutine-native), not Nordic, per the
    project owner's instruction. Apache-2.0, GPL-compatible. Bonding
    itself is OS-driven (`BluetoothDevice.createBond`); Kable handles
@@ -69,7 +69,7 @@ sideload-friendly (`adb install`).
 5. **Charts** — a small hand-rolled Compose bar chart; no chart library.
 6. **Reconnect backoff** — 1s → 2s → 5s, then the link is surfaced as
    dropped. A vanished bond short-circuits to a "re-pair needed" state.
-7. **Reconnect handle** — `ShepherdRecord.androidIdentifier` stores the
+7. **Reconnect handle** — `DeviceRecord.androidIdentifier` stores the
    scan MAC so `Peripheral(identifier)` reconnects without re-scanning;
    it is a client-side field, never sent on the wire.
 
@@ -98,6 +98,6 @@ against real hardware with the **`companion-pairing` skill**
 (<.claude/skills/companion-pairing/SKILL.md>), which drives a
 USB-attached phone through pair → claim → reconnect → re-pair against the
 headless dev session and records what to check on both sides. Treat a
-pass through it as required for changes to `ShepherdConnection` or
+pass through it as required for changes to `DeviceConnection` or
 `BondManager`; the operator-facing version of the same flow is "Pairing
 your phone with a device" in <docs/INSTALL.md>.

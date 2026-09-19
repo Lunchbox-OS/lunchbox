@@ -14,9 +14,9 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use serde_json::Value;
 use lunchbox_config::FileManagerConfig;
 use lunchbox_http::{AppState, FileService, handlers};
+use serde_json::Value;
 use tower::ServiceExt;
 
 mod support;
@@ -101,7 +101,7 @@ async fn listing_sorts_folders_first_and_flags_hidden_files() {
     let entries = body["entries"].as_array().unwrap();
     assert_eq!(entries[0]["name"], "Books");
     assert_eq!(entries[0]["kind"], "dir");
-    // Hidden, but present: `~/.config/shepherd/movies.toml` is a file a parent
+    // Hidden, but present: `~/.config/lunchbox/movies.toml` is a file a parent
     // genuinely edits, so the flag is the client's business and not a filter.
     let hidden = entries.iter().find(|e| e["name"] == ".hidden").unwrap();
     assert_eq!(hidden["hidden"], true);
@@ -294,7 +294,7 @@ async fn a_read_only_folder_says_so_before_it_is_used() {
     assert_eq!(body["writable"], false);
 }
 
-/// shepherd's own directories are listed — they are in the home, and hiding
+/// lunchbox's own directories are listed — they are in the home, and hiding
 /// them would be a lie about what is on the disk — with the reason they cannot
 /// be opened.
 #[tokio::test]
@@ -1058,10 +1058,10 @@ async fn the_top_of_a_root_cannot_be_deleted() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn shepherds_own_data_directory_is_not_browsable() {
+async fn lunchboxs_own_data_directory_is_not_browsable() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".local/share/lunchboxd")).unwrap();
-    std::fs::write(dir.path().join(".local/share/lunchboxd/shepherd.db"), b"db").unwrap();
+    std::fs::write(dir.path().join(".local/share/lunchboxd/lunchbox.db"), b"db").unwrap();
     std::fs::create_dir_all(dir.path().join(".local/state/lunchboxd")).unwrap();
     std::fs::write(
         dir.path().join(".local/state/lunchboxd/lunchboxd.log"),
@@ -1085,7 +1085,7 @@ async fn shepherds_own_data_directory_is_not_browsable() {
 
     let (status, _, _) = send(
         &app,
-        get("/api/v1/files/content?root=home&path=.local/share/lunchboxd/shepherd.db"),
+        get("/api/v1/files/content?root=home&path=.local/share/lunchboxd/lunchbox.db"),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);

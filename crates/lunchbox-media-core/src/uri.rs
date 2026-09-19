@@ -74,7 +74,7 @@ impl std::fmt::Display for DrmRejection {
             f,
             "URI `{}` matches DRM/subscription rule `{}`. \
              Subscription/DRM services are out of scope for lunchbox-media. \
-             See shepherd-launcher issues #2 and #10.",
+             See lunchbox-launcher issues #2 and #10.",
             self.uri, self.rule
         )
     }

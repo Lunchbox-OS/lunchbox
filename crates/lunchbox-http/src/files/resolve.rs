@@ -110,7 +110,7 @@ pub fn resolve(root: &Path, rel: &str, denied: &[PathBuf]) -> Result<PathBuf, Fi
     Ok(path)
 }
 
-/// Refuse a path inside one of shepherd's own directories.
+/// Refuse a path inside one of lunchbox's own directories.
 ///
 /// Not about the remote caller's privilege — they can already rewrite the
 /// policy, which is strictly more power than reading the database. It is about
@@ -121,7 +121,7 @@ pub fn resolve(root: &Path, rel: &str, denied: &[PathBuf]) -> Result<PathBuf, Fi
 pub fn check_denied(path: &Path, denied: &[PathBuf]) -> Result<(), FileError> {
     if denied.iter().any(|d| path.starts_with(d)) {
         return Err(FileError::Forbidden(
-            "that folder belongs to shepherd itself and is not editable here".into(),
+            "that folder belongs to lunchbox itself and is not editable here".into(),
         ));
     }
     Ok(())
@@ -253,12 +253,12 @@ mod tests {
         let (_d, root) = fixture();
         let denied = vec![root.join(".local/share/lunchboxd")];
         fs::create_dir_all(root.join(".local/share/lunchboxd")).unwrap();
-        fs::write(root.join(".local/share/lunchboxd/shepherd.db"), b"db").unwrap();
-        assert!(resolve(&root, ".local/share/lunchboxd/shepherd.db", &denied).is_err());
+        fs::write(root.join(".local/share/lunchboxd/lunchbox.db"), b"db").unwrap();
+        assert!(resolve(&root, ".local/share/lunchboxd/lunchbox.db", &denied).is_err());
 
         // And by a symlink pointing at it from somewhere innocuous, which is
         // the version a check on the *unresolved* path would have missed.
         symlink(root.join(".local/share/lunchboxd"), root.join("state")).unwrap();
-        assert!(resolve(&root, "state/shepherd.db", &denied).is_err());
+        assert!(resolve(&root, "state/lunchbox.db", &denied).is_err());
     }
 }

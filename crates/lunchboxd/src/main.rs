@@ -1,4 +1,4 @@
-//! lunchboxd - The shepherd background service
+//! lunchboxd - The lunchbox background service
 //!
 //! This is the main entry point for the lunchboxd service.
 //! It wires together all the components:
@@ -11,7 +11,6 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use lunchbox_api::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
     EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response,
@@ -40,6 +39,7 @@ use lunchbox_util::{
     LocalProtectedFiles, MonotonicInstant, ProtectedFile, ProtectedFiles, RateLimiter,
     default_config_path,
 };
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,16 +132,16 @@ const AUDIO_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 #[command(name = "lunchboxd")]
 #[command(about = "Policy enforcement service for child-focused computing", long_about = None)]
 struct Args {
-    /// Configuration file path (default: ~/.config/shepherd/config.toml)
+    /// Configuration file path (default: ~/.config/lunchbox/config.toml)
     #[arg(short, long, default_value_os_t = default_config_path())]
     config: PathBuf,
 
-    /// Socket path override (or set SHEPHERD_SOCKET env var)
-    #[arg(short, long, env = "SHEPHERD_SOCKET")]
+    /// Socket path override (or set LUNCHBOX_SOCKET env var)
+    #[arg(short, long, env = "LUNCHBOX_SOCKET")]
     socket: Option<PathBuf>,
 
-    /// Data directory override (or set SHEPHERD_DATA_DIR env var)
-    #[arg(short, long, env = "SHEPHERD_DATA_DIR")]
+    /// Data directory override (or set LUNCHBOX_DATA_DIR env var)
+    #[arg(short, long, env = "LUNCHBOX_DATA_DIR")]
     data_dir: Option<PathBuf>,
 
     /// Log level
@@ -158,7 +158,7 @@ struct Args {
     // Deliberately no `env =` (issue #144). This is the most dangerous of the
     // development switches to leave environment-settable: the others disarm a
     // check, this one *hands out a working compositor socket* at a path the
-    // caller picks, and sway's IPC grants `exec` — a process outside shepherd's
+    // caller picks, and sway's IPC grants `exec` — a process outside lunchbox's
     // supervision and outside the cgroup the firewall is attached to. On a
     // device the environment belongs to the kiosk user, so a flag it is.
     #[arg(long)]
@@ -168,7 +168,7 @@ struct Args {
     /// of unlinking it once lunchboxd has connected.
     ///
     /// Hardening is the default because sway's IPC hands any process running as
-    /// this uid `exec`, which starts a process outside shepherd's supervision
+    /// this uid `exec`, which starts a process outside lunchbox's supervision
     /// *and* outside the cgroup the per-entry firewall is attached to
     /// (issue #144) — a device that ships unhardened is a device where
     /// `default_deny` means nothing.
@@ -203,11 +203,11 @@ struct Args {
     #[arg(long = "no-restrict-ipc-peers")]
     no_restrict_ipc_peers: bool,
 
-    /// Trust the environment: honour `SHEPHERD_*_BIN`,
-    /// `SHEPHERD_FIREWALL_HELPER` and `SHEPHERD_BROWSER_ROOT`, and search
+    /// Trust the environment: honour `LUNCHBOX_*_BIN`,
+    /// `LUNCHBOX_FIREWALL_HELPER` and `LUNCHBOX_BROWSER_ROOT`, and search
     /// `$PATH` ahead of the compiled-in trusted directories.
     ///
-    /// Off by default, because on a device the environment is not shepherd's to
+    /// Off by default, because on a device the environment is not lunchbox's to
     /// trust: GDM's PAM stack reads `~/.pam_environment`, a file the kiosk user
     /// owns, so every activity can choose what `$PATH` says (issue #144). A
     /// substituted `systemd-run` would run as a direct child of the daemon, in
@@ -227,7 +227,7 @@ struct Args {
     ///
     /// On a device the files an activity must not reach — `lunchboxd.db`, and
     /// later `config.toml` and the BLE admin record — are owned by
-    /// `shepherd-state` and served over a socket that admits only this
+    /// `lunchbox-state` and served over a socket that admits only this
     /// session's cgroup. This flag keeps them where they used to be: in the
     /// home directory of the uid every activity runs as, where an activity can
     /// reset today's usage and rewrite the policy. Measured, not theoretical —
@@ -237,7 +237,7 @@ struct Args {
     /// for the reason those two were split: they are different risks wanted at
     /// different times. One decides who may *drive* the daemon, one decides
     /// which code it *runs*, and this one decides whether its state is
-    /// reachable by the software it supervises. `shepherd install sway-config`
+    /// reachable by the software it supervises. `lunchbox install sway-config`
     /// strips all three and refuses to finish if a strip did not take.
     #[arg(long = "no-state-custodian")]
     no_state_custodian: bool,
@@ -336,7 +336,7 @@ enum IpcPeerHardening {
     Degraded(String),
 }
 
-/// Where shepherd's state ended up living, and why.
+/// Where lunchbox's state ended up living, and why.
 ///
 /// Three outcomes for the same reason [`IpcPeerHardening`] has three: "the
 /// operator asked for the old behaviour" and "the protection was wanted and
@@ -468,7 +468,7 @@ impl StateSource {
                     StateProtection::Degraded(
                         "the custodian holds no policy file, so the policy is still read from \
                          this user's home where every activity can rewrite it; migrate it with \
-                         `shepherd install state --user <user>`, or `shepherd-admin setup-user \
+                         `lunchbox install state --user <user>`, or `lunchbox-admin setup-user \
                          <user>` on a packaged system"
                             .to_string(),
                     )
@@ -577,7 +577,7 @@ impl Service {
     /// rather than of the connection that just failed (issue #157).
     ///
     /// `/var/lib/lunchboxd/state/<user>/` is `0700` and owned by
-    /// `shepherd-state`, so nothing here can read it — but its parents are
+    /// `lunchbox-state`, so nothing here can read it — but its parents are
     /// root-owned and world-executable, so this `stat` is allowed, and an
     /// activity can neither create the directory nor remove it.
     ///
@@ -680,7 +680,7 @@ impl Service {
                 path = %stale.display(),
                 "State is served by the custodian, but an old database is still in this \
                  user's home. Nothing reads it, and every activity can read and rewrite it. \
-                 The protected copy is the live one, so `shepherd install state` will not \
+                 The protected copy is the live one, so `lunchbox install state` will not \
                  migrate over it: if this file holds usage worth keeping, move it \
                  deliberately, then remove it (issue #157)"
             );
@@ -827,13 +827,13 @@ impl Service {
             subject: DiagnosticSubject::Service,
             severity: DiagnosticSeverity::Critical,
             message: format!(
-                "shepherd's usage, quota and audit state is a file owned by the user every \
+                "lunchbox's usage, quota and audit state is a file owned by the user every \
                  activity runs as, so an activity can reset today's usage or grant itself \
                  time — {reason}"
             ),
             remedy: Some(
-                "Install and enable the state custodian (`shepherd install state --user \
-                 <user>`, or `shepherd-admin setup-user <user>` on a packaged system), and \
+                "Install and enable the state custodian (`lunchbox install state --user \
+                 <user>`, or `lunchbox-admin setup-user <user>` on a packaged system), and \
                  do not pass --no-state-custodian on a device."
                     .to_string(),
             ),
@@ -921,8 +921,8 @@ impl Service {
             ),
             remedy: Some(
                 "Install the polkit rule that lets the state custodian end a session \
-                 (/etc/polkit-1/rules.d/50-shepherd-session-guard.rules, shipped with the \
-                 package and installed by `shepherd install state`), then restart the \
+                 (/etc/polkit-1/rules.d/50-lunchbox-session-guard.rules, shipped with the \
+                 package and installed by `lunchbox install state`), then restart the \
                  session."
                     .to_string(),
             ),
@@ -1110,7 +1110,7 @@ impl Service {
     ///
     /// Sway's IPC grants any process running as lunchboxd's own uid — which is
     /// every activity — the whole compositor: `exec` starts a process outside
-    /// shepherd's supervision *and* outside the cgroup the per-entry firewall
+    /// lunchbox's supervision *and* outside the cgroup the per-entry firewall
     /// is attached to, `exit` ends the kiosk session, and `kill` closes the HUD.
     /// Sway has no access control to turn on (its `ipc` permission blocks went
     /// away in 1.0), and no permission or path scheme can help while everything
@@ -1158,7 +1158,7 @@ impl Service {
         // connect.
         if let Err(e) = lunchbox_host_linux::sway_ipc::client().connect_now().await {
             warn!(error = %e, "Not hardening the sway IPC socket: no connection to keep alive");
-            report(format!("shepherd could not reach the compositor: {e}"));
+            report(format!("lunchbox could not reach the compositor: {e}"));
             return;
         }
 
@@ -1219,16 +1219,16 @@ impl Service {
                 // client, including the launcher. Staying open is the same
                 // trade the compositor hardening makes: an unhardened kiosk
                 // beats a dead one, as long as it is said out loud.
-                warn!(error = %e, "Could not read shepherd's own cgroup; leaving the management socket open to this uid");
+                warn!(error = %e, "Could not read lunchbox's own cgroup; leaving the management socket open to this uid");
                 return IpcPeerHardening::Degraded(format!(
-                    "shepherd could not read its own cgroup, so it cannot tell its own \
+                    "lunchbox could not read its own cgroup, so it cannot tell its own \
                      clients from an activity: {e}"
                 ));
             }
         };
         ipc.set_peer_policy(policy);
 
-        // Armed — but only a boundary where shepherd's cgroup is one an
+        // Armed — but only a boundary where lunchbox's cgroup is one an
         // activity cannot get into. Inside the user manager's delegated
         // subtree every cgroup is owned by this uid, so any process at this
         // uid can move itself into any other: the allow-list still refuses a
@@ -1240,14 +1240,14 @@ impl Service {
             Ok(path) if lunchbox_ipc::is_delegated_user_cgroup(&path) => {
                 warn!(
                     cgroup = %path,
-                    "shepherd is running inside the user manager's delegated cgroup subtree, \
+                    "lunchbox is running inside the user manager's delegated cgroup subtree, \
                      where a process at this uid can join any cgroup; the management socket's \
                      peer check is not a boundary here"
                 );
                 IpcPeerHardening::Degraded(format!(
-                    "shepherd is running inside the user manager's delegated cgroups \
+                    "lunchbox is running inside the user manager's delegated cgroups \
                      ({path}), where any process at this uid can join any cgroup — including \
-                     shepherd's own"
+                     lunchbox's own"
                 ))
             }
             Ok(path) => {
@@ -1264,13 +1264,13 @@ impl Service {
                     lunchbox_host_linux::ActivityIsolationStatus::Unsupported { reason } => {
                         IpcPeerHardening::Degraded(format!(
                             "activities cannot be given a cgroup of their own, so they share \
-                         shepherd's and the check cannot tell them from the launcher: {reason}"
+                         lunchbox's and the check cannot tell them from the launcher: {reason}"
                         ))
                     }
                 }
             }
             Err(e) => IpcPeerHardening::Degraded(format!(
-                "shepherd could not read its own cgroup path, so it cannot tell whether the \
+                "lunchbox could not read its own cgroup path, so it cannot tell whether the \
                  peer check is a boundary on this host: {e}"
             )),
         }
@@ -1303,12 +1303,12 @@ impl Service {
             subject: DiagnosticSubject::Service,
             severity: DiagnosticSeverity::Critical,
             message: format!(
-                "shepherd's own management socket can be driven by any process running as \
+                "lunchbox's own management socket can be driven by any process running as \
                  this user, so an activity can stop itself, launch another, or log the \
                  session out — {reason}"
             ),
             remedy: Some(
-                "Start the session from the installed \"Shepherd Kiosk\" desktop entry, \
+                "Start the session from the installed \"Lunchbox Kiosk\" desktop entry, \
                  which puts it in a session cgroup no activity can join, and do not pass \
                  --no-restrict-ipc-peers on a device."
                     .to_string(),
@@ -1343,7 +1343,7 @@ impl Service {
                         code: DiagnosticCode::IpcSocketReplaced,
                         subject: DiagnosticSubject::Service,
                         severity: DiagnosticSeverity::Critical,
-                        message: "Something replaced shepherd's management socket, so the \
+                        message: "Something replaced lunchbox's management socket, so the \
                                   launcher, the HUD and the screen-blank timer can no longer \
                                   reach the daemon. They refuse to talk to whatever bound it \
                                   instead, so nothing has been given away — but this session \
@@ -1382,7 +1382,7 @@ impl Service {
             subject: DiagnosticSubject::Service,
             severity: DiagnosticSeverity::Warning,
             message: format!(
-                "a process outside this session tried to drive shepherd and was refused{who}"
+                "a process outside this session tried to drive lunchbox and was refused{who}"
             ),
             remedy: Some(
                 "Nothing is broken: the request was denied. If it repeats, check what that \
@@ -1772,7 +1772,7 @@ impl Service {
                     device_name: ble_cfg.device_name,
                     firmware_version: env!("CARGO_PKG_VERSION").to_string(),
                     // The admin record carries the minted HTTP token, so when
-                    // the custodian is holding shepherd's state it holds this
+                    // the custodian is holding lunchbox's state it holds this
                     // too — otherwise the credential sits at the uid every
                     // activity runs as (issue #157).
                     //
@@ -3059,14 +3059,14 @@ mod policy_watch_tests {
         assert!(policy_event_matches(
             &event(
                 EventKind::Modify(ModifyKind::Any),
-                "/home/someone/shepherd/config.example.toml"
+                "/home/someone/lunchbox/config.example.toml"
             ),
             OsStr::new("config.example.toml"),
         ));
     }
 
     /// A rename-into-place — which is how `LocalProtectedFiles::write`,
-    /// `shepherd install policy` and every careful editor land a new policy —
+    /// `lunchbox install policy` and every careful editor land a new policy —
     /// arrives as a create on the target.
     #[test]
     fn a_rename_into_place_counts() {
@@ -3131,7 +3131,7 @@ mod harden_diagnostic_tests {
     /// for this is not looking at a broken device.
     #[test]
     fn opting_out_of_the_peer_check_reports_nothing() {
-        let mut ipc = IpcServer::new("/nonexistent-dir-for-shepherd-tests/ipc.sock");
+        let mut ipc = IpcServer::new("/nonexistent-dir-for-lunchbox-tests/ipc.sock");
         assert_eq!(
             Service::arm_ipc_peer_policy(&mut ipc, false),
             IpcPeerHardening::OptedOut
@@ -3139,7 +3139,7 @@ mod harden_diagnostic_tests {
     }
 
     /// The check being armed is not the same as the check being a boundary.
-    /// Where shepherd sits in a cgroup any process at this uid can join —
+    /// Where lunchbox sits in a cgroup any process at this uid can join —
     /// a stack started from a shell, which is every dev session — arming it
     /// changes nothing, and a device configured that way has to say so rather
     /// than look protected.
@@ -3178,14 +3178,14 @@ mod harden_diagnostic_tests {
     #[test]
     fn a_refused_peer_names_where_it_came_from() {
         let d = Service::ipc_peer_rejected_diagnostic(&lunchbox_ipc::Rejection {
-            reason: "not shepherd's own".into(),
-            peer_cgroup: Some("/system.slice/shepherd-abc-123.scope".into()),
+            reason: "not lunchbox's own".into(),
+            peer_cgroup: Some("/system.slice/lunchbox-abc-123.scope".into()),
             peer_pid: Some(4242),
         });
         assert_eq!(d.code, DiagnosticCode::IpcPeerRejected);
         assert_eq!(d.subject, DiagnosticSubject::Service);
         assert!(
-            d.message.contains("shepherd-abc-123.scope"),
+            d.message.contains("lunchbox-abc-123.scope"),
             "the report has to name the activity: {}",
             d.message
         );
@@ -3198,7 +3198,7 @@ mod harden_diagnostic_tests {
     /// the only thing these tests care about — and it keeps them from
     /// depending on whether the developer runs `cargo test` inside sway.
     fn impossible_alias() -> &'static Path {
-        Path::new("/nonexistent-dir-for-shepherd-tests/alias.sock")
+        Path::new("/nonexistent-dir-for-lunchbox-tests/alias.sock")
     }
 
     /// The regression this guards: every failure path returns early, leaves
@@ -3297,7 +3297,7 @@ mod harden_diagnostic_tests {
         assert!(
             d.remedy
                 .as_deref()
-                .is_some_and(|r| r.contains("50-shepherd-session-guard.rules")),
+                .is_some_and(|r| r.contains("50-lunchbox-session-guard.rules")),
             "the answer is a named file, not advice to investigate"
         );
     }

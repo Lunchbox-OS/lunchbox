@@ -145,7 +145,7 @@ impl IpcServer {
         // the takeover this file guards against with `socket_was_replaced`
         // would be impossible. But an abstract name ignores filesystem
         // permissions entirely, and that forecloses the fix that actually ends
-        // this whole class — separating shepherd's uid from the activities'
+        // this whole class — separating lunchbox's uid from the activities'
         // (#105/#157), after which a 0700 socket directory does the job that no
         // amount of peer checking can do while the uid is shared.
         let listener = UnixListener::bind(&self.socket_path)?;
@@ -606,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_does_not_delete_a_socket_another_daemon_has_bound() {
         let dir = tempdir().unwrap();
-        let socket_path = dir.path().join("shepherd.sock");
+        let socket_path = dir.path().join("lunchbox.sock");
 
         let mut outgoing = IpcServer::new(&socket_path);
         if outgoing.start().await.is_err() {
@@ -638,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_before_start_removes_nothing() {
         let dir = tempdir().unwrap();
-        let socket_path = dir.path().join("shepherd.sock");
+        let socket_path = dir.path().join("lunchbox.sock");
         std::fs::write(&socket_path, b"not ours").unwrap();
 
         // A server that never bound has no claim on the path, so it must not

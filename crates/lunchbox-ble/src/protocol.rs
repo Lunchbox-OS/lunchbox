@@ -6,33 +6,33 @@
 //! JSON, fragmented across ATT writes/notifies if needed. See
 //! [`framing`](crate::framing) for the reassembly buffer.
 
-use serde::{Deserialize, Serialize};
 use lunchbox_management::ManagementError;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Shepherd Management Service UUID. Stable across firmware versions;
+/// Lunchbox Management Service UUID. Stable across firmware versions;
 /// the companion app uses this to filter advertisements.
-pub const SHEPHERD_MANAGEMENT_SERVICE_UUID: Uuid =
+pub const LUNCHBOX_MANAGEMENT_SERVICE_UUID: Uuid =
     Uuid::from_u128(0x8c0c0001_3b21_4abc_9e3f_0a9c1f2e3d40);
 
 /// Readable pre-pairing; reports claim state, firmware version, and the
 /// supported protocol version.
-pub const SHEPHERD_DEVICE_INFO_CHAR_UUID: Uuid =
+pub const LUNCHBOX_DEVICE_INFO_CHAR_UUID: Uuid =
     Uuid::from_u128(0x8c0c0002_3b21_4abc_9e3f_0a9c1f2e3d40);
 
 /// Client writes length-prefixed JSON-RPC requests here. Encrypted-link
 /// required.
-pub const SHEPHERD_REQUEST_CHAR_UUID: Uuid =
+pub const LUNCHBOX_REQUEST_CHAR_UUID: Uuid =
     Uuid::from_u128(0x8c0c0003_3b21_4abc_9e3f_0a9c1f2e3d40);
 
 /// Server notifies length-prefixed JSON-RPC responses here, correlated
 /// to requests by `id`.
-pub const SHEPHERD_RESPONSE_CHAR_UUID: Uuid =
+pub const LUNCHBOX_RESPONSE_CHAR_UUID: Uuid =
     Uuid::from_u128(0x8c0c0004_3b21_4abc_9e3f_0a9c1f2e3d40);
 
 /// Server notifies serialized `lunchbox_api::Event` JSON here (mirror of
 /// the HTTP SSE stream).
-pub const SHEPHERD_EVENTS_CHAR_UUID: Uuid = Uuid::from_u128(0x8c0c0005_3b21_4abc_9e3f_0a9c1f2e3d40);
+pub const LUNCHBOX_EVENTS_CHAR_UUID: Uuid = Uuid::from_u128(0x8c0c0005_3b21_4abc_9e3f_0a9c1f2e3d40);
 
 /// Current BLE management protocol version. Bumped on backwards-
 /// incompatible wire changes; the companion app rejects unknown
@@ -238,7 +238,7 @@ mod tests {
         // future change rotates them, the companion app's filter
         // breaks. This test exists as a tripwire on that intent.
         assert_eq!(
-            SHEPHERD_MANAGEMENT_SERVICE_UUID.to_string(),
+            LUNCHBOX_MANAGEMENT_SERVICE_UUID.to_string(),
             "8c0c0001-3b21-4abc-9e3f-0a9c1f2e3d40"
         );
     }

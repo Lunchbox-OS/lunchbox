@@ -18,8 +18,8 @@
 //! (`engine.rs` gates on the entry's windows and again on its group's), so the
 //! effective result is their intersection.
 
-use serde::Serialize;
 use lunchbox_config::{RawAvailability, RawConfig, parse_days, parse_time};
+use serde::Serialize;
 
 pub const MINUTES_PER_DAY: u16 = 1440;
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dependency management for shepherd-launcher
+# Dependency management for lunchbox-launcher
 # Provides functions to read, union, and install package sets
 
 # Get the directory containing this script
@@ -9,12 +9,12 @@ DEPS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$DEPS_LIB_DIR/common.sh"
 # yt-dlp install/upgrade lives in the shared admin lib so `deps install run` and
-# `shepherd-admin yt-dlp install` share one implementation.
+# `lunchbox-admin yt-dlp install` share one implementation.
 # shellcheck source=admin.sh
 source "$DEPS_LIB_DIR/admin.sh"
 
 # For arch_to_triple: `deps install cross` adds the same Rust target that
-# `shepherd build --arch` will ask for, and the two must agree.
+# `lunchbox build --arch` will ask for, and the two must agree.
 # shellcheck source=build.sh
 source "$DEPS_LIB_DIR/build.sh"
 
@@ -318,7 +318,7 @@ install_android_sdk() {
 install_cargo_ndk() {
     if ! command_exists cargo; then
         warn "cargo not found; skipping cargo-ndk + Android Rust targets."
-        warn "Run 'shepherd deps install build' first to build lunchbox-media-android."
+        warn "Run 'lunchbox deps install build' first to build lunchbox-media-android."
         return 0
     fi
 
@@ -552,7 +552,7 @@ _deps_enable_foreign_arch() {
 
     info "Adding a $DEPS_PORTS_URI entry for $arch..."
     maybe_sudo tee "$ports_file" >/dev/null <<EOF
-# Added by \`shepherd deps install cross --arch $arch\`: the configured mirror
+# Added by \`lunchbox deps install cross --arch $arch\`: the configured mirror
 # does not carry $arch, so its packages come from Ubuntu's ports mirror.
 Types: deb
 URIs: $DEPS_PORTS_URI
@@ -606,7 +606,7 @@ can have one or the other, not both. Options:
   * Cross-compile in a container instead, and keep this host native. That is
     what CI does; see .ci/Dockerfile.cross.
   * Accept the trade and pass --allow-remove. Restore the native set afterwards
-    with: shepherd deps install build"
+    with: lunchbox deps install build"
 }
 
 # Read a package file, stripping comments and empty lines
@@ -651,7 +651,7 @@ get_packages() {
             ;;
         dev)
             # Union of build + run + test + agent + dev extras, deduplicated.
-            # `agent` is included so a dev checkout can drive `shepherd dev
+            # `agent` is included so a dev checkout can drive `lunchbox dev
             # headless` (grim/wtype/jq) out of the box.
             {
                 read_package_file "$DEPS_DIR/build.pkgs"
@@ -686,7 +686,7 @@ _deps_parse_args() {
                 shift
                 ;;
             *)
-                die "Unknown deps option: $1 (try: shepherd deps help)"
+                die "Unknown deps option: $1 (try: lunchbox deps help)"
                 ;;
         esac
     done
@@ -694,7 +694,7 @@ _deps_parse_args() {
     # The cross set is the only one that is per-architecture, and the only
     # architecture worth cross-compiling for is one that is not the host's.
     if [[ "$DEPS_SET" == "cross" ]]; then
-        [[ -n "$DEPS_ARCH" ]] || die "Usage: shepherd deps <cmd> cross --arch <debian-arch>"
+        [[ -n "$DEPS_ARCH" ]] || die "Usage: lunchbox deps <cmd> cross --arch <debian-arch>"
         if [[ "$DEPS_ARCH" == "$(dpkg --print-architecture)" ]]; then
             die "$DEPS_ARCH is this host's own architecture; build for it natively instead"
         fi
@@ -707,7 +707,7 @@ deps_print() {
     _deps_parse_args "$@"
     
     if [[ -z "$DEPS_SET" ]]; then
-        die "Usage: shepherd deps print <build|run|cross|dev>"
+        die "Usage: lunchbox deps print <build|run|cross|dev>"
     fi
     
     get_packages "$DEPS_SET" "$DEPS_ARCH"
@@ -720,7 +720,7 @@ deps_install() {
     local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps install <build|run|cross|dev>"
+        die "Usage: lunchbox deps install <build|run|cross|dev>"
     fi
     
     check_ubuntu_version
@@ -780,7 +780,7 @@ deps_install() {
     fi
 
     # The cross set needs rustc's own std for the target, which apt cannot
-    # provide. `shepherd build --arch` derives the same triple.
+    # provide. `lunchbox build --arch` derives the same triple.
     if [[ "$set_name" == "cross" ]]; then
         source "$HOME/.cargo/env" 2>/dev/null || true
         local triple
@@ -806,7 +806,7 @@ deps_check() {
     local set_name="$DEPS_SET"
     
     if [[ -z "$set_name" ]]; then
-        die "Usage: shepherd deps check <build|run|cross|dev>"
+        die "Usage: lunchbox deps check <build|run|cross|dev>"
     fi
     
     local packages
@@ -830,7 +830,7 @@ deps_check() {
     # For run and dev sets, also check yt-dlp.
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_ytdlp_installed; then
-            warn "yt-dlp is not installed (run: shepherd deps install run)"
+            warn "yt-dlp is not installed (run: lunchbox deps install run)"
             return 1
         fi
     fi
@@ -841,7 +841,7 @@ deps_check() {
         local component
         for component in clippy rustfmt; do
             if ! rustup component list --installed 2>/dev/null | grep -q "^$component"; then
-                warn "$component is not installed (run: shepherd deps install dev)"
+                warn "$component is not installed (run: lunchbox deps install dev)"
                 return 1
             fi
         done
@@ -853,7 +853,7 @@ deps_check() {
         triple="$(arch_to_triple "$DEPS_ARCH")"
         if command_exists rustup \
             && ! rustup target list --installed 2>/dev/null | grep -qx -- "$triple"; then
-            warn "The $triple Rust target is not installed (run: shepherd deps install cross --arch $DEPS_ARCH)"
+            warn "The $triple Rust target is not installed (run: lunchbox deps install cross --arch $DEPS_ARCH)"
             return 1
         fi
     fi
@@ -861,11 +861,11 @@ deps_check() {
     # For the android set, also check the SDK and (when Rust is present) cargo-ndk.
     if [[ "$set_name" == "android" ]]; then
         if ! is_android_sdk_installed; then
-            warn "Android SDK is not installed (run: shepherd deps install android)"
+            warn "Android SDK is not installed (run: lunchbox deps install android)"
             return 1
         fi
         if command_exists cargo && ! command_exists cargo-ndk; then
-            warn "cargo-ndk is not installed (run: shepherd deps install android)"
+            warn "cargo-ndk is not installed (run: lunchbox deps install android)"
             return 1
         fi
     fi
@@ -896,7 +896,7 @@ deps_main() {
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd deps <command> <set>
+Usage: lunchbox deps <command> <set>
 
 Commands:
     print   <set>    Print packages in the set (one per line)
@@ -909,9 +909,9 @@ Package sets:
     test     Extra packages needed for the lunchbox-e2e harness
     android  JDK + Android SDK + NDK for the companion-android and
              lunchbox-media-android apps
-    agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
+    agent    Headless-dev tooling for 'lunchbox dev headless' (grim/wtype/jq)
     cross    Cross-compilation toolchain and the target architecture's half of
-             the build set. Needs --arch <debian-arch>; see 'shepherd build --arch'.
+             the build set. Needs --arch <debian-arch>; see 'lunchbox build --arch'.
              Refuses to run if it would uninstall the native build set (the two
              are not always co-installable); --allow-remove overrides, and is
              what the CI cross image passes.
@@ -922,15 +922,15 @@ Note: The 'build' and 'dev' sets automatically install Rust via rustup.
       downloads the Android SDK + NDK into /opt/android-sdk.
 
 Examples:
-    shepherd deps print build
-    shepherd deps install dev
-    shepherd deps install android
-    shepherd deps install cross --arch arm64
-    shepherd deps check run
+    lunchbox deps print build
+    lunchbox deps install dev
+    lunchbox deps install android
+    lunchbox deps install cross --arch arm64
+    lunchbox deps check run
 EOF
             ;;
         *)
-            die "Unknown deps command: $subcmd (try: shepherd deps help)"
+            die "Unknown deps command: $subcmd (try: lunchbox deps help)"
             ;;
     esac
 }

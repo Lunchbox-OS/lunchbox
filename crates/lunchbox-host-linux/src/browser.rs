@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
 use lunchbox_api::BrowserMode;
 use lunchbox_host_api::BrowserSpec;
+use serde_json::{Value, json};
 
 /// The only Flatpak app id this browser support targets. The launch shim and
 /// the in-sandbox policy path (`/etc/opt/chrome/...`, `/app/bin/chrome`) are
@@ -45,15 +45,15 @@ pub const SUPPORTED_BROWSER_FLATPAK: &str = "com.google.Chrome";
 /// visible inside the sandbox at the same path) and is symlinked into the
 /// sandbox's `/etc/opt/chrome/policies/managed/` at launch — never written to
 /// the host's machine-wide `/etc`.
-const POLICY_FILE_SUBDIR: &str = ".var/app/com.google.Chrome/config/shepherd-policies";
+const POLICY_FILE_SUBDIR: &str = ".var/app/com.google.Chrome/config/lunchbox-policies";
 
 /// Shell run inside the sandbox by [`chrome_flatpak_argv`]: seed the sandbox's
 /// own (ephemeral) managed-policy dir with our file, then hand off to the
 /// Flatpak's normal launcher (`/app/bin/chrome`), which re-runs its host-policy
-/// merge harmlessly, sets up Widevine, and execs the browser. `$SHEPHERD_POLICY`
+/// merge harmlessly, sets up Widevine, and execs the browser. `$LUNCHBOX_POLICY`
 /// is passed via `--env=`; `"$@"` is the Chrome flag list.
 const POLICY_INJECT_SCRIPT: &str = "mkdir -p /etc/opt/chrome/policies/managed; \
-     ln -sf \"$SHEPHERD_POLICY\" /etc/opt/chrome/policies/managed/shepherd.json; \
+     ln -sf \"$LUNCHBOX_POLICY\" /etc/opt/chrome/policies/managed/lunchbox.json; \
      exec /app/bin/chrome \"$@\"";
 
 /// Per-profile user-data-dir parent, relative to the user's home, for the
@@ -156,7 +156,7 @@ pub fn chrome_flatpak_argv(
         crate::helpers::resolve_arg("flatpak"),
         "run".to_string(),
         "--command=bash".to_string(),
-        format!("--env=SHEPHERD_POLICY={}", policy_file.display()),
+        format!("--env=LUNCHBOX_POLICY={}", policy_file.display()),
     ];
     // Mirror the user env into the sandbox (sorted for determinism), matching
     // the plain-flatpak spawn path.
@@ -209,7 +209,7 @@ pub fn chrome_flags(spec: &BrowserSpec, user_data_dir: Option<&Path>) -> Vec<Str
     }
     match spec.mode {
         // Both kiosk and app open a *chromeless* window via `--app=<url>`. We
-        // deliberately avoid Chrome's `--kiosk` for kiosk mode: shepherd's sway
+        // deliberately avoid Chrome's `--kiosk` for kiosk mode: lunchbox's sway
         // compositor force-disables client fullscreen for every non-launcher
         // window (to keep the time-remaining HUD's exclusive zone visible), so
         // `--kiosk` only has its fullscreen request denied and then falls back to
@@ -413,7 +413,7 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let root =
-            std::env::temp_dir().join(format!("shepherd-wipe-test-{}-{n}", std::process::id()));
+            std::env::temp_dir().join(format!("lunchbox-wipe-test-{}-{n}", std::process::id()));
 
         // Populate a nested tree, then wipe it.
         std::fs::create_dir_all(root.join("Default/Cache")).unwrap();
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(
             p,
             Path::new(
-                "/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/chrome-school.json"
+                "/home/kid/.var/app/com.google.Chrome/config/lunchbox-policies/chrome-school.json"
             )
         );
     }
@@ -443,7 +443,7 @@ mod tests {
         env.insert("FOO".to_string(), "bar".to_string());
         let argv = chrome_flatpak_argv(
             "com.google.Chrome",
-            Path::new("/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/e.json"),
+            Path::new("/home/kid/.var/app/com.google.Chrome/config/lunchbox-policies/e.json"),
             &env,
             &["--user-data-dir=/x".to_string(), "--kiosk".to_string()],
         );
@@ -456,7 +456,7 @@ mod tests {
         );
         assert_eq!(&argv[1..3], &["run", "--command=bash"]);
         assert!(argv.contains(
-            &"--env=SHEPHERD_POLICY=/home/kid/.var/app/com.google.Chrome/config/shepherd-policies/e.json"
+            &"--env=LUNCHBOX_POLICY=/home/kid/.var/app/com.google.Chrome/config/lunchbox-policies/e.json"
                 .to_string()
         ));
         assert!(argv.contains(&"--env=FOO=bar".to_string()));
@@ -479,7 +479,7 @@ mod tests {
 
     // --- Real-Chrome gated test (manual; needs the com.google.Chrome flatpak) ---
     //
-    // Everything above verifies the shepherd side. This test verifies what only
+    // Everything above verifies the lunchbox side. This test verifies what only
     // real Chrome can confirm: that the per-user policy injection
     // ([`chrome_flatpak_argv`]) is actually honored (URL allow/blocklist
     // enforced) **without** touching the host's machine-wide /etc, and that
@@ -580,7 +580,7 @@ mod tests {
     #[ignore]
     fn real_flatpak_chrome_enforces_policy_and_user_data_dir() {
         let app_id =
-            std::env::var("SHEPHERD_CHROME_FLATPAK").unwrap_or_else(|_| "com.google.Chrome".into());
+            std::env::var("LUNCHBOX_CHROME_FLATPAK").unwrap_or_else(|_| "com.google.Chrome".into());
         if let Some(reason) = chrome_skip_reason(&app_id) {
             eprintln!("[SKIP] real_flatpak_chrome_enforces_policy_and_user_data_dir: {reason}");
             return;
@@ -592,13 +592,13 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let uid = format!(
-            "shepherd-real-{}-{}",
+            "lunchbox-real-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
 
-        let allow_port = spawn_marker_server("SHEPHERDALLOWMARK").unwrap();
-        let block_port = spawn_marker_server("SHEPHERDBLOCKMARK").unwrap();
+        let allow_port = spawn_marker_server("LUNCHBOXALLOWMARK").unwrap();
+        let block_port = spawn_marker_server("LUNCHBOXBLOCKMARK").unwrap();
 
         let spec = BrowserSpec {
             policy_id: uid.clone(),
@@ -648,11 +648,11 @@ mod tests {
         );
 
         assert!(
-            allow_dom.contains("SHEPHERDALLOWMARK"),
+            allow_dom.contains("LUNCHBOXALLOWMARK"),
             "allowlisted origin did NOT render — Chrome failed to launch or the policy over-blocks. allow DOM:\n{allow_dom}"
         );
         assert!(
-            !block_dom.contains("SHEPHERDBLOCKMARK"),
+            !block_dom.contains("LUNCHBOXBLOCKMARK"),
             "blocked origin rendered — URL allow/blocklist NOT enforced, so the per-user policy \
              injection failed. block DOM:\n{block_dom}"
         );

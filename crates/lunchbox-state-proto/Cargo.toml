@@ -3,7 +3,7 @@ name = "lunchbox-state-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wire protocol and client for shepherd's state custodian (issue #157)"
+description = "Wire protocol and client for lunchbox's state custodian (issue #157)"
 
 [dependencies]
 lunchbox-api = { workspace = true }

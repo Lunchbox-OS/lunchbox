@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
 use lunchbox_api::{EntryKind, Event};
 use lunchbox_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
@@ -35,6 +34,7 @@ use lunchbox_http::{AppState, handlers};
 use lunchbox_management::{AutoBrightnessState, DefaultManagementService, WebListenerHandle};
 use lunchbox_store::SqliteStore;
 use lunchbox_util::EntryId;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -973,7 +973,7 @@ async fn a_cookie_authed_cross_origin_write_is_refused() {
             .uri("/api/v1/rpc")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::COOKIE, &cookie)
-            .header(header::HOST, "shepherd.local:7890")
+            .header(header::HOST, "lunchbox.local:7890")
             .header(header::ORIGIN, "https://evil.example")
             .body(Body::from(
                 serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
@@ -1000,8 +1000,8 @@ async fn a_same_origin_write_with_an_origin_header_is_allowed() {
             .uri("/api/v1/rpc")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::COOKIE, &cookie)
-            .header(header::HOST, "shepherd.local:7890")
-            .header(header::ORIGIN, "https://shepherd.local:7890")
+            .header(header::HOST, "lunchbox.local:7890")
+            .header(header::ORIGIN, "https://lunchbox.local:7890")
             .body(Body::from(
                 serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
             ))
@@ -1028,7 +1028,7 @@ async fn a_bearer_client_is_not_subject_to_the_origin_check() {
             .uri("/api/v1/rpc")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::AUTHORIZATION, "Bearer machine-token")
-            .header(header::HOST, "shepherd.local:7890")
+            .header(header::HOST, "lunchbox.local:7890")
             .header(header::ORIGIN, "https://elsewhere.example")
             .body(Body::from(
                 serde_json::to_vec(&json!({"method": "health", "params": {}})).unwrap(),
@@ -1308,7 +1308,7 @@ async fn a_stale_cookie_falls_through_to_unauthorized_rather_than_erroring() {
     let app = make_web_app(web, cfg.path().to_path_buf(), None);
     let (status, _) = send(
         &app,
-        get_with_cookie("/api/v1/auth/session", "shepherd_session=long-gone"),
+        get_with_cookie("/api/v1/auth/session", "lunchbox_session=long-gone"),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

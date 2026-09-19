@@ -1,7 +1,7 @@
 //! The daemon's half of the time and day format contract.
 //!
 //! Every case in `time_formats.json` must parse the way the fixture says. The
-//! editor's half is `shepherd-webui/src/config/model/windows.test.ts`, which
+//! editor's half is `lunchbox-webui/src/config/model/windows.test.ts`, which
 //! asserts its TypeScript re-implementation against the same file.
 //!
 //! Without the pairing the two drift silently, and had: `"16:5"` loaded on the
@@ -13,8 +13,8 @@
 //! sits beside `patch_shapes.json` because this is the directory the editor's
 //! tests already reach into for cross-language fixtures.
 
-use serde::Deserialize;
 use lunchbox_config::{RawDays, parse_days, parse_time};
+use serde::Deserialize;
 
 const FIXTURE: &str = include_str!("time_formats.json");
 

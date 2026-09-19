@@ -164,7 +164,7 @@ fn doc_comment(schema: &Value, indent: &str) -> String {
 }
 
 /// snake_case (the wire form) -> camelCase (Kotlin properties). The naming
-/// strategy on `ShepherdJson` performs the same mapping at runtime.
+/// strategy on `LunchboxJson` performs the same mapping at runtime.
 ///
 /// Public because `rpc-codegen` renders RPC method and parameter names with it
 /// too, and two implementations of this would be two chances to disagree.
@@ -430,7 +430,7 @@ fn render_sealed(name: &str, variants: &[Value], tag: &str, schema: &Value) -> S
     // how four missing ReasonCode variants broke the companion's entry list.
     out.push_str(&format!(
         "    /**\n     * A [{kname}] this build doesn't know about.\n     *\n\
-         \x20    * Registered as the polymorphic default in `ShepherdWireModule`, so a\n\
+         \x20    * Registered as the polymorphic default in `LunchboxWireModule`, so a\n\
          \x20    * newer device degrades this one value instead of failing the decode of\n\
          \x20    * everything around it.\n     */\n"
     ));
@@ -466,7 +466,7 @@ pub fn render(defs: &Map<String, Value>) -> String {
     out.push_str("// types listed as hand-written in `kotlin_types.rs`) live in\n");
     out.push_str("// `Models.kt` alongside this file.\n\n");
     out.push_str("@file:OptIn(ExperimentalSerializationApi::class)\n\n");
-    out.push_str("package com.armeafamily.shepherd.companion.domain\n\n");
+    out.push_str("package com.lunchbox_os.companion.domain\n\n");
     out.push_str("import kotlinx.serialization.ExperimentalSerializationApi\n");
     out.push_str("import kotlinx.serialization.KSerializer\n");
     out.push_str("import kotlinx.serialization.SerialName\n");
@@ -552,9 +552,9 @@ pub fn render(defs: &Map<String, Value>) -> String {
     // One module registering every tagged enum's fallback.
     out.push('\n');
     out.push_str("/**\n * Polymorphic defaults for every tagged enum above.\n *\n");
-    out.push_str(" * Installed on `ShepherdJson`; without it an unrecognised discriminator\n");
+    out.push_str(" * Installed on `LunchboxJson`; without it an unrecognised discriminator\n");
     out.push_str(" * throws and fails the decode of the entire enclosing response.\n */\n");
-    out.push_str("val ShepherdWireModule: SerializersModule = SerializersModule {\n");
+    out.push_str("val LunchboxWireModule: SerializersModule = SerializersModule {\n");
     for t in &sealed_types {
         out.push_str(&format!(
             "    polymorphic({t}::class) {{ defaultDeserializer {{ {t}.Unknown.serializer() }} }}\n"

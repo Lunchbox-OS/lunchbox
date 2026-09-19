@@ -1,5 +1,5 @@
 #!/bin/bash
-# Drive the Shepherd Companion pairing flow on a USB-attached Android
+# Drive the Lunchbox Companion pairing flow on a USB-attached Android
 # phone, unattended. See SKILL.md for the whole procedure and the
 # gotchas this script exists to avoid.
 #
@@ -9,18 +9,18 @@
 #
 # Env: PKG (package id), SWAYLOG (daemon log), SHOTDIR (screenshot output),
 #      DEVICE (which scan row to tap — a label or the controller address,
-#      for when more than one shepherd is in range).
+#      for when more than one lunchbox is in range).
 set -uo pipefail
 
-PKG=${PKG:-com.armeafamily.shepherd.companion}
+PKG=${PKG:-com.lunchbox_os.companion}
 REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 SWAYLOG=${SWAYLOG:-$REPO/dev-runtime/headless/sway.log}
-SHOTDIR=${SHOTDIR:-${TMPDIR:-/tmp}/shepherd-pairing}
-# Every device advertises as "shepherd", and the advertised name is capped at
-# 8 bytes so they cannot be told apart by name. With a second shepherd in
+SHOTDIR=${SHOTDIR:-${TMPDIR:-/tmp}/lunchbox-pairing}
+# Every device advertises as "lunchbox", and the advertised name is capped at
+# 8 bytes so they cannot be told apart by name. With a second lunchbox in
 # range, set DEVICE to the serving controller address — the app prints it
 # under the row — or the run taps whichever one the scan listed first.
-DEVICE=${DEVICE:-shepherd}
+DEVICE=${DEVICE:-lunchbox}
 UIXML=$SHOTDIR/ui.xml
 mkdir -p "$SHOTDIR"
 
@@ -52,8 +52,8 @@ for m in re.finditer(r"<node[^>]*>", xml):
 PY
 }
 
-# Exact label match wins over substring, so "shepherd" picks the device
-# row and not the "Make sure the shepherd device's TV is on…" blurb.
+# Exact label match wins over substring, so "lunchbox" picks the device
+# row and not the "Make sure the lunchbox device's TV is on…" blurb.
 find_text() {
   texts | python3 -c '
 import sys

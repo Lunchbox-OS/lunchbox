@@ -22,7 +22,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 # Emit JSON Schema for the types the editor decodes back out of this module,
-# from which `shepherd-webui/src/config/model/wasm-types.generated.ts` is
+# from which `lunchbox-webui/src/config/model/wasm-types.generated.ts` is
 # rendered (see lunchbox-wire-codegen). Off by default so schemars never
 # reaches the browser artifact — the same arrangement lunchbox-config uses.
 schema = ["dep:schemars"]

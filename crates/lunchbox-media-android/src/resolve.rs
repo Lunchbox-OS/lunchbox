@@ -145,7 +145,7 @@ mod tests {
     use std::io::Write;
 
     fn temp_file(name: &str, body: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("shepherd-media-resolve-test");
+        let dir = std::env::temp_dir().join("lunchbox-media-resolve-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();

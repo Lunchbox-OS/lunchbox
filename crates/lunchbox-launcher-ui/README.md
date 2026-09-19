@@ -1,10 +1,10 @@
 # lunchbox-launcher-ui
 
-Main launcher grid interface for Shepherd.
+Main launcher grid interface for Lunchbox.
 
 ## Overview
 
-`lunchbox-launcher-ui` is the primary user-facing shell for the Shepherd kiosk environment. It presents a grid of available entries (applications, games, media) and allows users to launch them. 
+`lunchbox-launcher-ui` is the primary user-facing shell for the Lunchbox kiosk environment. It presents a grid of available entries (applications, games, media) and allows users to launch them. 
 
 This is what users see when no session is active—the "home screen" of the environment.
 
@@ -46,10 +46,10 @@ This is what users see when no session is active—the "home screen" of the envi
 
 ```bash
 # With default socket path
-shepherd-launcher
+lunchbox-launcher
 
 # With custom socket path
-shepherd-launcher --socket /custom/path/lunchboxd.sock
+lunchbox-launcher --socket /custom/path/lunchboxd.sock
 ```
 
 ### Command-Line Options
@@ -161,7 +161,7 @@ If the service is not running at startup:
 │                                        │
 │          System Not Ready              │
 │                                        │
-│    Waiting for shepherd service...     │
+│    Waiting for lunchbox service...     │
 │                                        │
 │           [Retry]                      │
 │                                        │
@@ -217,7 +217,7 @@ The launcher uses a child-friendly design:
 cargo build --release -p lunchbox-launcher-ui
 ```
 
-The resulting binary is named `shepherd-launcher`.
+The resulting binary is named `lunchbox-launcher`.
 
 ## Relationship to Service
 

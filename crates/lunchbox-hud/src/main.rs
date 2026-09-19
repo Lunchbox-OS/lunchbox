@@ -1,4 +1,4 @@
-//! Shepherd HUD - Always-visible overlay
+//! Lunchbox HUD - Always-visible overlay
 //!
 //! This is the heads-up display that remains visible during active sessions.
 //! It shows time remaining, battery, volume, and provides session controls.
@@ -20,13 +20,13 @@ use lunchbox_util::default_socket_path;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-/// Shepherd HUD - Always-visible overlay for lunchboxd sessions
+/// Lunchbox HUD - Always-visible overlay for lunchboxd sessions
 #[derive(Parser, Debug)]
 #[command(name = "lunchbox-hud")]
 #[command(about = "GTK4 layer-shell HUD for lunchboxd", long_about = None)]
 struct Args {
-    /// Socket path for lunchboxd connection (or set SHEPHERD_SOCKET env var)
-    #[arg(short, long, env = "SHEPHERD_SOCKET")]
+    /// Socket path for lunchboxd connection (or set LUNCHBOX_SOCKET env var)
+    #[arg(short, long, env = "LUNCHBOX_SOCKET")]
     socket: Option<PathBuf>,
 
     /// Log level
@@ -42,9 +42,9 @@ struct Args {
     /// from lunchboxd**, which resolves `[service.hud]` against the running
     /// activity's own `hud_orientation` and pushes changes as they happen.
     /// Passing this pins the bar and makes the HUD ignore those, which is what
-    /// makes it useful for development (`SHEPHERD_HUD_ANCHOR=left`) and a
+    /// makes it useful for development (`LUNCHBOX_HUD_ANCHOR=left`) and a
     /// footgun on a device.
-    #[arg(short, long, env = "SHEPHERD_HUD_ANCHOR")]
+    #[arg(short, long, env = "LUNCHBOX_HUD_ANCHOR")]
     anchor: Option<String>,
 
     /// Thickness of the HUD bar in pixels — its height when the bar is
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    tracing::info!("Starting Shepherd HUD");
+    tracing::info!("Starting Lunchbox HUD");
 
     // Determine socket path with fallback to default
     let socket_path = args.socket.unwrap_or_else(default_socket_path);

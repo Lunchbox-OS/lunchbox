@@ -15,8 +15,8 @@
 //! `cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1`.
 
 use anyhow::Result;
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body};
+use serde_json::json;
 
 const EBOOK_CONFIG: &str = r#"
 config_version = 1
@@ -108,7 +108,7 @@ async fn a_missing_book_reaches_clients_as_a_per_entry_diagnostic() -> Result<()
                 .replace("{BOOK}", &book.to_string_lossy())
                 .replace("{READER}", &reader.to_string_lossy()),
         )
-        .shepherdd_env("QT_PLUGIN_PATH", plugins.to_string_lossy().to_string())
+        .lunchboxd_env("QT_PLUGIN_PATH", plugins.to_string_lossy().to_string())
         .start()
         .await?;
     let http = h.http();
@@ -176,11 +176,11 @@ async fn launching_materializes_the_readers_kiosk_configuration() -> Result<()> 
                 .replace("{BOOK}", &book.to_string_lossy())
                 .replace("{READER}", &reader.to_string_lossy()),
         )
-        .shepherdd_env(
-            "SHEPHERD_EBOOK_ROOT",
+        .lunchboxd_env(
+            "LUNCHBOX_EBOOK_ROOT",
             state_root.to_string_lossy().to_string(),
         )
-        .shepherdd_env("QT_PLUGIN_PATH", plugins.to_string_lossy().to_string())
+        .lunchboxd_env("QT_PLUGIN_PATH", plugins.to_string_lossy().to_string())
         .start()
         .await?;
     let http = h.http();

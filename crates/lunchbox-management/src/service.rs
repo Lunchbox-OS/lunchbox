@@ -159,7 +159,7 @@ pub trait ManagementService: Send + Sync {
 
     /// Turn the displays on or off, refusing to blank while an activity is up.
     ///
-    /// Called by `swayidle` through `shepherd-launcher --screen-off/--screen-on`
+    /// Called by `swayidle` through `lunchbox-launcher --screen-off/--screen-on`
     /// (issue #144): the compositor socket has no name on a hardened device, so
     /// the blanking has to run on the connection lunchboxd holds.
     ///
@@ -242,7 +242,7 @@ pub trait ManagementService: Send + Sync {
     /// **Does not reload.** The write lands through a rename, which the state
     /// custodian's watch — or lunchboxd's own, on a device without one — turns
     /// into a reload within a second. That is the same path `sudoedit` and
-    /// `shepherd install policy` already take, and going around it here would
+    /// `lunchbox install policy` already take, and going around it here would
     /// only add a second `PolicyLoaded` row to the audit log a moment before
     /// the watcher's arrives.
     fn write_policy(&self, text: &str, if_match: Option<&str>) -> ManagementResult<PolicyDocument> {
@@ -1734,7 +1734,7 @@ impl ManagementService for DefaultManagementService {
             return Ok(false);
         }
 
-        // Shepherd's own furniture — the launcher, the HUD — is always mapped,
+        // Lunchbox's own furniture — the launcher, the HUD — is always mapped,
         // so "nothing is open" means nothing the caregiver opened. A window
         // stashed on the scratchpad counts as open: it is somebody's work, and
         // it comes back.
@@ -1744,7 +1744,7 @@ impl ManagementService for DefaultManagementService {
             .await
             .map_err(|e| ManagementError::Internal(e.to_string()))?
             .into_iter()
-            .filter(|w| w.owner != WindowOwner::Shepherd)
+            .filter(|w| w.owner != WindowOwner::Lunchbox)
             .count();
         if open > 0 {
             // Decision 10 of the design: with work still on screen the timeout

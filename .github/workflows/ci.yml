@@ -149,11 +149,11 @@ jobs:
             ${{ runner.os }}-cargo-target-build-v2-
 
       - name: Build
-        run: ./scripts/shepherd build
+        run: ./scripts/lunchbox build
 
       # Hand target/debug to the two jobs that were compiling this same
       # workspace again: `e2e`, which opened with its own
-      # `./scripts/shepherd build`, and `firewall`, which cannot reach
+      # `./scripts/lunchbox build`, and `firewall`, which cannot reach
       # actions/cache at all from inside its privileged container and so paid a
       # full cold build on every run -- 6m42s, the longest job in the suite.
       #
@@ -260,7 +260,7 @@ jobs:
         # dpkg-architecture and passes --target on the command line, which is
         # what keeps CARGO_BUILD_TARGET out of the environment and so out of
         # the sibling eBPF build. See crates/lunchbox-firewall-helper/build.rs.
-        run: ./scripts/shepherd build --arch arm64
+        run: ./scripts/lunchbox build --arch arm64
 
       - name: Assert the binaries are actually arm64
         # A cross build that silently fell back to the host would otherwise
@@ -269,7 +269,7 @@ jobs:
         run: |
           set -euo pipefail
           dir=target/aarch64-unknown-linux-gnu/debug
-          for bin in lunchboxd shepherd-launcher lunchbox-hud lunchbox-media; do
+          for bin in lunchboxd lunchbox-launcher lunchbox-hud lunchbox-media; do
             out="$(file -b "$dir/$bin")"
             echo "$bin: $out"
             grep -q "ARM aarch64" <<<"$out" || {
@@ -364,7 +364,7 @@ jobs:
             "PATH=$PATH" \
             "CARGO_HOME=$CARGO_HOME" \
             "RUSTUP_HOME=$RUSTUP_HOME" \
-            "SHEPHERD_REQUIRE_PEER_CGROUP=$SHEPHERD_REQUIRE_PEER_CGROUP" \
+            "LUNCHBOX_REQUIRE_PEER_CGROUP=$LUNCHBOX_REQUIRE_PEER_CGROUP" \
             cargo test --workspace --all-targets
         env:
           # Insist that the peer-cgroup check in lunchbox-ipc actually runs
@@ -374,7 +374,7 @@ jobs:
           # invisible, because cargo captures a passing test's output, so a
           # green run would say nothing about whether the check was exercised.
           # With this set the skip becomes a failure naming the reason instead.
-          SHEPHERD_REQUIRE_PEER_CGROUP: "1"
+          LUNCHBOX_REQUIRE_PEER_CGROUP: "1"
 
   e2e:
     name: E2E
@@ -415,14 +415,14 @@ jobs:
       - name: Unpack target/debug
         run: |
           tar -xf /tmp/target-debug.tar.gz -C "$GITHUB_WORKSPACE"
-          ls -l target/debug/lunchboxd target/debug/shepherd-launcher
+          ls -l target/debug/lunchboxd target/debug/lunchbox-launcher
 
       - name: Run e2e tests
         run: cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1
         env:
           # As in the `test` job: a kernel too old for the peer check must fail
           # here rather than skip quietly (issue #144).
-          SHEPHERD_REQUIRE_PEER_CGROUP: "1"
+          LUNCHBOX_REQUIRE_PEER_CGROUP: "1"
 
   fmt:
     name: Rustfmt
@@ -466,7 +466,7 @@ jobs:
       image: node:22-bookworm
     defaults:
       run:
-        working-directory: shepherd-webui
+        working-directory: lunchbox-webui
     steps:
       - uses: actions/checkout@v4
 
@@ -494,7 +494,7 @@ jobs:
     name: Package (.deb smoke build, ${{ matrix.arch }})
     # Builds the .deb on every push/PR to catch packaging breakage before a
     # release tag ever runs release.yml. Nothing is published — this only
-    # proves `shepherd package deb` (release build → DESTDIR stage → dpkg-deb)
+    # proves `lunchbox package deb` (release build → DESTDIR stage → dpkg-deb)
     # still works. Runs as root in the container, so no fakeroot is needed.
     #
     # Matrixed over both architectures so the arm64 package -- which is what
@@ -570,7 +570,7 @@ jobs:
             ${{ runner.os }}-cargo-target-package-${{ matrix.arch }}-v2-
 
       - name: Build .deb
-        run: ./scripts/shepherd package deb --arch ${{ matrix.arch }} --out dist/pkg
+        run: ./scripts/lunchbox package deb --arch ${{ matrix.arch }} --out dist/pkg
 
       - name: Inspect package metadata
         run: dpkg-deb -I dist/pkg/*.deb
@@ -627,7 +627,7 @@ jobs:
           echo "OK: control.tar.xz + data.tar.xz"
 
       - name: Assert the .deb declares no conffiles
-        # Issue #177: every file this package ships is shepherd's, not the
+        # Issue #177: every file this package ships is lunchbox's, not the
         # admin's — the sway config is generated and verified as it is written,
         # the udev and polkit rules go to their vendor directories, and the
         # bluetoothd drop-in is rendered by the postinst because its ExecStart
@@ -648,14 +648,14 @@ jobs:
             exit 1
           fi
           # The drop-in must not be *shipped* either: the postinst renders it
-          # from the template staged under /usr/share/shepherd/systemd/.
+          # from the template staged under /usr/share/lunchbox/systemd/.
           if dpkg-deb -c "$deb" | grep -q 'bluetooth\.service\.d/'; then
             echo "::error::$deb ships a bluetooth.service.d drop-in; the postinst should render it"
             exit 1
           fi
           echo "OK: no conffiles, and no shipped bluetoothd drop-in"
 
-      # Everything above asserted against exactly what `shepherd package deb`
+      # Everything above asserted against exactly what `lunchbox package deb`
       # produced; the rename happens only now, so the checks never see a name
       # this project would not ship.
       #
@@ -663,7 +663,7 @@ jobs:
       # control file, so `Version:` stays 0.5.1 and nothing installing this is
       # misled. It exists because the name dpkg generates carries only version
       # and architecture -- every PR produces an identical
-      # `shepherd-launcher_0.5.1_amd64.deb`, and two of them in a downloads
+      # `lunchbox-launcher_0.5.1_amd64.deb`, and two of them in a downloads
       # folder are indistinguishable.
       - name: Name the .deb after the PR that built it
         shell: bash
@@ -703,14 +703,14 @@ jobs:
   versions:
     name: Version harmony
     # No custom image needed: the default job container (node:20-bookworm) has
-    # bash + node + grep, which is all `shepherd version check` requires. This
+    # bash + node + grep, which is all `lunchbox version check` requires. This
     # fails if any synced version literal drifts from the canonical VERSION file.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Check version harmony
-        run: ./scripts/shepherd version check
+        run: ./scripts/lunchbox version check
 
   firewall:
     name: Firewall E2E
@@ -802,18 +802,18 @@ jobs:
           docker exec -i "$cid" tar -xzf - -C "$ws" < /tmp/target-debug.tar.gz
           docker exec "$cid" ls -l "$ws/target/debug/lunchboxd"
 
-          # lunchboxd, shepherd-launcher, lunchbox-hud and the firewall helper
+          # lunchboxd, lunchbox-launcher, lunchbox-hud and the firewall helper
           # are already under target/debug, unpacked above from `build`'s
           # artifact -- this job no longer builds them. Install the helper via
           # the project's own installer (drops polkit policy + rule, creates
-          # the shepherd-firewall group, adds the test user to it).
+          # the lunchbox-firewall group, adds the test user to it).
           #
           # The helper rejects `--uid 0` to prevent a polkit-blessed user
           # from launching activities as root through it, so lunchboxd —
           # and therefore the test process that boots lunchboxd — must
           # run as a non-root user. Create a `tester` account and run
           # cargo test under it via `runuser`, which re-execs with the
-          # full supplementary group set (incl. shepherd-firewall just
+          # full supplementary group set (incl. lunchbox-firewall just
           # added by the installer) so polkit's isInGroup() check passes.
           docker exec "$cid" bash -c '
             set -euo pipefail
@@ -830,7 +830,7 @@ jobs:
             # BPF) and needs no polkit, user session, flatpak or snapd.
             # REQUIRED=1 turns an unmet precondition into a failure, so a
             # sidecar that cannot run it says so instead of passing quietly.
-            SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+            LUNCHBOX_FIREWALL_CGROUP_REQUIRED=1 \
               cargo test -p lunchbox-e2e --test firewall_cgroup -- \
                 --include-ignored --test-threads=1 --nocapture
 
@@ -847,12 +847,12 @@ jobs:
               set -euo pipefail
               mount --bind /sys/fs/cgroup /sys/fs/cgroup
               mount -o remount,bind,ro /sys/fs/cgroup
-              if mkdir /sys/fs/cgroup/shepherd-ro-check 2>/dev/null; then
-                rmdir /sys/fs/cgroup/shepherd-ro-check
+              if mkdir /sys/fs/cgroup/lunchbox-ro-check 2>/dev/null; then
+                rmdir /sys/fs/cgroup/lunchbox-ro-check
                 echo ::error::could-not-make-cgroupfs-read-only-fallback-not-exercised
                 exit 1
               fi
-              SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+              LUNCHBOX_FIREWALL_CGROUP_REQUIRED=1 \
                 cargo test -p lunchbox-e2e --test firewall_cgroup -- \
                   --include-ignored --test-threads=1 --nocapture 2>&1 \
                 | tee /tmp/firewall-cgroup-readonly.log
@@ -862,7 +862,7 @@ jobs:
             "
 
             useradd --create-home --user-group tester
-            ./scripts/shepherd install firewall --debug --user tester
+            ./scripts/lunchbox install firewall --debug --user tester
             systemctl restart polkit
 
             # Hand the workspace to tester so cargo can write target/. The
@@ -1014,10 +1014,10 @@ jobs:
       # static bundle. Typechecking lives here rather than in the `webui` job
       # because `src/config/wasm/` is generated by this step and tsc needs it.
       - name: Build the standalone config editor
-        run: ./scripts/shepherd build config-editor
+        run: ./scripts/lunchbox build config-editor
 
       - name: Typecheck
-        working-directory: shepherd-webui
+        working-directory: lunchbox-webui
         run: npm run typecheck
 
       # The bundle is uploaded now. It could not be on Forgejo: that runner
@@ -1040,17 +1040,17 @@ jobs:
       # from the embedded build, which this job does not run.)
       - name: Check the bundle landed in dist-standalone/
         run: |
-          test -f shepherd-webui/dist-standalone/index.html
-          test -d shepherd-webui/dist-standalone/static
+          test -f lunchbox-webui/dist-standalone/index.html
+          test -d lunchbox-webui/dist-standalone/static
           # dist/ ships a tracked .gitkeep, so "untouched" means nothing else.
-          stray=$(ls -A shepherd-webui/dist 2>/dev/null | grep -v '^\.gitkeep$' || true)
+          stray=$(ls -A lunchbox-webui/dist 2>/dev/null | grep -v '^\.gitkeep$' || true)
           test -z "$stray" || { echo "standalone build wrote into dist/: $stray" >&2; exit 1; }
           echo "[OK] standalone bundle built, dist/ untouched"
 
       - uses: actions/upload-artifact@v4
         with:
           name: config-editor-standalone
-          path: shepherd-webui/dist-standalone
+          path: lunchbox-webui/dist-standalone
           # A static bundle: no executables, so the lost executable bit that
           # forces the target/debug handoff to be tarred does not matter here.
           retention-days: 7
@@ -1078,7 +1078,7 @@ jobs:
           # is older than yours".
           shellcheck --version | sed -n '2p'
           # SC1091: Not following sourced files (info only, safe to ignore)
-          shellcheck -e SC1091 scripts/shepherd scripts/shepherd-admin scripts/dev scripts/admin
+          shellcheck -e SC1091 scripts/lunchbox scripts/lunchbox-admin scripts/dev scripts/admin
           shellcheck -e SC1091 scripts/lib/*.sh scripts/ci/*.sh
           shellcheck -e SC1091 run-dev
 
@@ -1093,7 +1093,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A plain `shepherd package deb` must target the host. Every other job
+      # A plain `lunchbox package deb` must target the host. Every other job
       # passes --arch on an amd64 runner, so a hardcoded amd64 default passes
       # them all -- and on an arm64 host silently cross-builds a consistent,
       # wrong amd64 package. This fakes `dpkg --print-architecture` and runs
@@ -1102,7 +1102,7 @@ jobs:
         run: ./scripts/ci/check-default-arch.sh
 
       # Fails on an amd64/x86_64 literal in the scripts -- chiefly the libs and
-      # shepherd-admin the .deb installs, which run on the device and are only
+      # lunchbox-admin the .deb installs, which run on the device and are only
       # ever staged, never run, in CI. Lexical, so a backstop, not a proof.
       - name: Check the shipped scripts have no amd64 literals
         run: ./scripts/ci/check-arch-neutral.sh

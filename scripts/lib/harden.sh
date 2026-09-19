@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# User hardening logic for shepherd-launcher
+# User hardening logic for lunchbox-launcher
 # Applies and reverts kiosk-style user restrictions
 
 # Get the directory containing this script
@@ -101,8 +101,8 @@ remove_marked_block() {
     fi
 }
 
-block_begin() { echo "# BEGIN shepherd hardening for user: $1"; }
-block_end()   { echo "# END shepherd hardening for user: $1"; }
+block_begin() { echo "# BEGIN lunchbox hardening for user: $1"; }
+block_end()   { echo "# END lunchbox hardening for user: $1"; }
 
 # Get the state directory for a user
 get_user_state_dir() {
@@ -205,12 +205,12 @@ apply_global_hardening() {
 
     # -- getty auto-login override (inert; documents how to turn it on) -----
     local getty_override_dir="/etc/systemd/system/getty@tty1.service.d"
-    local getty_override="$getty_override_dir/shepherd-autologin.conf"
+    local getty_override="$getty_override_dir/lunchbox-autologin.conf"
 
     global_save_for_restore "$getty_override"
     mkdir -p "$getty_override_dir"
     cat > "$getty_override" <<EOF
-# Shepherd hardening: auto-login for the kiosk user
+# Lunchbox hardening: auto-login for the kiosk user
 # Uncomment the following lines to enable auto-login to tty1
 # [Service]
 # ExecStart=
@@ -304,7 +304,7 @@ harden_apply() {
     user_home="$(get_user_home "$user")"
     
     if is_hardened "$user"; then
-        warn "User $user is already hardened. Use 'shepherd harden revert' first."
+        warn "User $user is already hardened. Use 'lunchbox harden revert' first."
         return 0
     fi
     
@@ -341,9 +341,9 @@ harden_apply() {
     # Append restriction to bashrc (if not in sway, exit)
     cat >> "$bashrc" <<'EOF'
 
-# Shepherd hardening: restrict to sway session only
+# Lunchbox hardening: restrict to sway session only
 if [[ -z "${WAYLAND_DISPLAY:-}" ]] && [[ -z "${SWAYSOCK:-}" ]]; then
-    echo "This account is restricted to the Shepherd kiosk environment."
+    echo "This account is restricted to the Lunchbox kiosk environment."
     exit 1
 fi
 EOF
@@ -355,18 +355,18 @@ EOF
     # =========================================================================
     info "Restricting SSH access..."
     
-    local shepherd_sshd_config="/etc/ssh/sshd_config.d/shepherd-$user.conf"
+    local lunchbox_sshd_config="/etc/ssh/sshd_config.d/lunchbox-$user.conf"
     
-    save_for_restore "$user" "$shepherd_sshd_config"
+    save_for_restore "$user" "$lunchbox_sshd_config"
     
     # Create a drop-in config to deny this user
     mkdir -p /etc/ssh/sshd_config.d
-    cat > "$shepherd_sshd_config" <<EOF
-# Shepherd hardening: deny SSH access for kiosk user
+    cat > "$lunchbox_sshd_config" <<EOF
+# Lunchbox hardening: deny SSH access for kiosk user
 DenyUsers $user
 EOF
-    chmod 0644 "$shepherd_sshd_config"
-    record_action "$user" "file" "$shepherd_sshd_config"
+    chmod 0644 "$lunchbox_sshd_config"
+    record_action "$user" "file" "$lunchbox_sshd_config"
     
     # Reload sshd if running
     if systemctl is-active --quiet sshd 2>/dev/null || systemctl is-active --quiet ssh 2>/dev/null; then
@@ -393,12 +393,12 @@ EOF
     # =========================================================================
     info "Restricting sudo access..."
     
-    local sudoers_file="/etc/sudoers.d/shepherd-$user"
+    local sudoers_file="/etc/sudoers.d/lunchbox-$user"
     save_for_restore "$user" "$sudoers_file"
     
     # Explicitly deny sudo for this user
     cat > "$sudoers_file" <<EOF
-# Shepherd hardening: deny sudo access for kiosk user
+# Lunchbox hardening: deny sudo access for kiosk user
 $user ALL=(ALL) !ALL
 EOF
     chmod 0440 "$sudoers_file"
@@ -437,7 +437,7 @@ EOF
     info "  - Home directory secured (mode 0700)"
     info "  - PAM no longer reads ~/.pam_environment (system-wide, issue #144)"
     info ""
-    info "To revert: shepherd harden revert --user $user"
+    info "To revert: lunchbox harden revert --user $user"
 }
 
 # Revert hardening from a user
@@ -563,25 +563,25 @@ harden_main() {
     case "$subcmd" in
         apply)
             if [[ -z "$user" ]]; then
-                die "Usage: shepherd harden apply --user USER"
+                die "Usage: lunchbox harden apply --user USER"
             fi
             harden_apply "$user"
             ;;
         revert)
             if [[ -z "$user" ]]; then
-                die "Usage: shepherd harden revert --user USER"
+                die "Usage: lunchbox harden revert --user USER"
             fi
             harden_revert "$user"
             ;;
         status)
             if [[ -z "$user" ]]; then
-                die "Usage: shepherd harden status --user USER"
+                die "Usage: lunchbox harden status --user USER"
             fi
             harden_status "$user"
             ;;
         ""|help|-h|--help)
             cat <<EOF
-Usage: shepherd harden <command> --user USER
+Usage: lunchbox harden <command> --user USER
 
 Commands:
     apply     Apply kiosk hardening to a user
@@ -601,13 +601,13 @@ Hardening includes:
 State is preserved in: $HARDENING_STATE_DIR/<user>/
 
 Examples:
-    shepherd harden apply --user kiosk
-    shepherd harden status --user kiosk
-    shepherd harden revert --user kiosk
+    lunchbox harden apply --user kiosk
+    lunchbox harden status --user kiosk
+    lunchbox harden revert --user kiosk
 EOF
             ;;
         *)
-            die "Unknown harden command: $subcmd (try: shepherd harden help)"
+            die "Unknown harden command: $subcmd (try: lunchbox harden help)"
             ;;
     esac
 }

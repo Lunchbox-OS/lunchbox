@@ -5,8 +5,8 @@
 //! reacts to them differently. A syntax error has a caret position and blocks
 //! everything; semantic errors are individually attributable to an activity.
 
-use serde::Serialize;
 use lunchbox_config::{CURRENT_CONFIG_VERSION, RawConfig, ValidationError, validate_config};
+use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

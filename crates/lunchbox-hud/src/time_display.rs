@@ -23,7 +23,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for TimeDisplay {
-        const NAME: &'static str = "ShepherdTimeDisplay";
+        const NAME: &'static str = "LunchboxTimeDisplay";
         type Type = super::TimeDisplay;
         type ParentType = gtk4::Box;
     }

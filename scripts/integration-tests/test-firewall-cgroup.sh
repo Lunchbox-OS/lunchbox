@@ -50,5 +50,5 @@ for line in sys.stdin:
 
 echo "[orchestrator] Running as root: $test_bin"
 # REQUIRED=1: report an unmet precondition instead of skipping quietly.
-sudo env SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
+sudo env LUNCHBOX_FIREWALL_CGROUP_REQUIRED=1 \
     "$test_bin" --include-ignored --test-threads=1 --nocapture

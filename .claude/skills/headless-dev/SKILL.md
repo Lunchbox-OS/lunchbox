@@ -1,7 +1,7 @@
 ---
 name: headless-dev
 description: >-
-  Run and visually verify shepherd-launcher end-to-end during development without
+  Run and visually verify lunchbox-launcher end-to-end during development without
   a graphical login session. Use whenever you need to launch/start/run the app,
   take a screenshot, or confirm a UI change (launcher grid, HUD, media, browser,
   availability/bedtime, time limits) actually works in the real stack — not just
@@ -11,11 +11,11 @@ description: >-
   falling back to `./run-dev` (which needs a login session).
 ---
 
-# Headless end-to-end development for shepherd-launcher
+# Headless end-to-end development for lunchbox-launcher
 
-`shepherd-launcher` is a Sway-based kiosk. The normal `./run-dev` boots a
+`lunchbox-launcher` is a Sway-based kiosk. The normal `./run-dev` boots a
 **nested** compositor (`WLR_BACKENDS=wayland`) that needs a graphical login
-session — unusable headlessly. Instead, use `shepherd dev headless`, which boots
+session — unusable headlessly. Instead, use `lunchbox dev headless`, which boots
 the **same** stack (same `sway.conf`, `config.example.toml`, debug binaries)
 against the headless wlroots backend the e2e harness uses. It needs no login
 session, no parent compositor, and no GPU, and it exposes a virtual output you
@@ -24,18 +24,18 @@ can screenshot and drive.
 ## One-time setup
 
 ```sh
-./scripts/shepherd deps install agent    # grim + wtype + jq (also folded into `deps install dev`)
+./scripts/lunchbox deps install agent    # grim + wtype + jq (also folded into `deps install dev`)
 ```
 
 ## The loop
 
 ```sh
-./scripts/shepherd dev headless          # build + boot, detached; prints when ready
-./scripts/shepherd dev tree              # assert app_id "org.shepherd.launcher" is up/focused
-./scripts/shepherd dev shot home.png     # screenshot -> Read home.png to SEE the UI
+./scripts/lunchbox dev headless          # build + boot, detached; prints when ready
+./scripts/lunchbox dev tree              # assert app_id "com.lunchbox-os.launcher" is up/focused
+./scripts/lunchbox dev shot home.png     # screenshot -> Read home.png to SEE the UI
 # ...edit code...
-./scripts/shepherd dev headless --no-build   # respawn is cheap; or rebuild without --no-build
-./scripts/shepherd dev stop              # tear down when done
+./scripts/lunchbox dev headless --no-build   # respawn is cheap; or rebuild without --no-build
+./scripts/lunchbox dev stop              # tear down when done
 ```
 
 `dev headless` runs **detached** and writes connection details to
@@ -43,7 +43,7 @@ can screenshot and drive.
 automatically. Always `dev stop` when finished (or before starting a fresh one).
 
 **`SWAYSOCK` is not the socket sway made.** lunchboxd hard-links the compositor
-socket to `$XDG_RUNTIME_DIR/shepherd-dev-sway.<n>.sock` and `session.env` records
+socket to `$XDG_RUNTIME_DIR/lunchbox-dev-sway.<n>.sock` and `session.env` records
 *that* — because in production lunchboxd unlinks the original so no activity can
 reach the compositor (issue #144). Finding the socket yourself
 (`sway --get-socketpath`, globbing `sway-ipc.*`) is therefore not reliable; go
@@ -83,11 +83,11 @@ nothing you write by hand needs to remember a flag to keep it that way.
 
 - `--config PATH` — boot an arbitrary lunchboxd config instead of
   `./config.example.toml`. Good for minimal fixtures that isolate one entry/flow.
-- `--time "YYYY-MM-DD HH:MM:SS"` — sets `SHEPHERD_MOCK_TIME` so availability
+- `--time "YYYY-MM-DD HH:MM:SS"` — sets `LUNCHBOX_MOCK_TIME` so availability
   windows, the bedtime screen, HUD clock, and time-limit behavior are
   reproducible. **Use this** whenever the thing under test depends on the clock.
 - `--user NAME` — run the whole stack as another user (via sudo) for a realistic
-  session: their groups, `HOME`, and default `~/.config/shepherd/config.toml`.
+  session: their groups, `HOME`, and default `~/.config/lunchbox/config.toml`.
   The repo must be readable/executable by NAME (a checkout under a `0700 $HOME`
   is not — grant traversal, e.g. `setfacl -m u:NAME:x $HOME`). Reattach commands
   detect the owner and route through sudo automatically; `dev shot` still writes
@@ -110,9 +110,9 @@ Prefer observing behavior over trusting the build:
 Example (bedtime restriction):
 
 ```sh
-./scripts/shepherd dev headless --time "2025-12-25 21:00:00"
-./scripts/shepherd dev shot bedtime.png   # Read it: only the after-hours entries show
-./scripts/shepherd dev stop
+./scripts/lunchbox dev headless --time "2025-12-25 21:00:00"
+./scripts/lunchbox dev shot bedtime.png   # Read it: only the after-hours entries show
+./scripts/lunchbox dev stop
 ```
 
 ## Gotchas (read before trusting a screenshot)
@@ -124,12 +124,12 @@ Example (bedtime restriction):
   a different way:
   - **Launch/stop an activity** (and anything else lunchboxd exposes): send
     newline-delimited JSON-RPC to the daemon socket at
-    `./dev-runtime/shepherd.sock`, e.g.
-    `printf '{"request_id":1,"api_version":1,"method":"launch","params":{"id":"<entry-id>"}}\n' | nc -U dev-runtime/shepherd.sock`.
+    `./dev-runtime/lunchbox.sock`, e.g.
+    `printf '{"request_id":1,"api_version":1,"method":"launch","params":{"id":"<entry-id>"}}\n' | nc -U dev-runtime/lunchbox.sock`.
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
     `crates/lunchbox-ipc/src/client.rs`.
-  - **A page in the web UI** (`shepherd-webui`): `dev click` does not activate
+  - **A page in the web UI** (`lunchbox-webui`): `dev click` does not activate
     a link or a nav item in a browser either, and the SPA has no URL routing to
     deep-link with — so to render one page, temporarily change the initial
     `useState<Page>` in `src/App.tsx`, `npm run build`, and re-boot (the daemon
@@ -143,7 +143,7 @@ Example (bedtime restriction):
     running, but is not responding" — use the default profile. `Page_Down` does
     nothing without content focus; `wtype -M ctrl -k minus -m ctrl` (zoom out)
     is the reliable way to get more of a long page into one screenshot.
-  - **The vertical HUD** (issue #171): export `SHEPHERD_HUD_ANCHOR=left` before
+  - **The vertical HUD** (issue #171): export `LUNCHBOX_HUD_ANCHOR=left` before
     `dev headless`. That **pins** the bar, so it also stops the HUD following
     lunchboxd — which is what you want to look at the layout, and not what you
     want to test the config path. `headless.sh` forwards the variable
@@ -159,7 +159,7 @@ Example (bedtime restriction):
     headless session, so for anything you want to screenshot mid-session use a
     long-lived `process` entry (`command = "/usr/bin/sleep"`, `args = ["600"]`).
   - **The HUD's confirm popovers** have a permanent debug-build hook:
-    export `SHEPHERD_HUD_DEBUG_CONFIRM_TRIGGER=<path>` before `dev headless`
+    export `LUNCHBOX_HUD_DEBUG_CONFIRM_TRIGGER=<path>` before `dev headless`
     (env propagates from the invocation into the sway-spawned HUD), then
     `: > <path>` pops the "End session" prompt, `: > <path>.reset` pops the
     reset prompt (only for activities that offer it — `type = "retroarch"`),
@@ -168,7 +168,7 @@ Example (bedtime restriction):
     Every file is consumed, so open/close cycles are just two `touch`es.
   - **The reading layout** (page-turn buttons, and the bar's worst case for
     room) has its own permanent debug-build hook: export
-    `SHEPHERD_HUD_DEBUG_FORCE_PAGE_BUTTONS=1` before `dev headless`. Okular is
+    `LUNCHBOX_HUD_DEBUG_FORCE_PAGE_BUTTONS=1` before `dev headless`. Okular is
     not installed here, so there is no real `type = "ebook"` session to start,
     and both #171 and #178 previously had to add a throwaway override to look
     at this layout. The hook only forces the buttons *visible*; pressing one
@@ -204,7 +204,7 @@ Example (bedtime restriction):
   pids.
 - **A GUI app that ignores `SIGTERM` can be closed politely** with
   `swaymsg '[app_id="…"] kill'` (an `xdg_toplevel.close` *request*, not a
-  signal), which is how you verify save-on-close behaviour that shepherd's
+  signal), which is how you verify save-on-close behaviour that lunchbox's
   current graceful stop does not trigger. See the #160 scope note.
 - **Settle after "ready".** `dev headless` returns once the launcher *surface*
   maps, but async icon/tile loading can lag a beat (a tile may still say
@@ -259,7 +259,7 @@ Example (bedtime restriction):
   `--input-ipc-server`. This is what made an earlier session conclude the machine
   was "a VM with no GPU access" and ship an unverified fix
   (`docs/ai/history/2026-09-04 001 green-frames-after-a-seek.md`).
-- **Config edits.** `config.example.toml` must pass `./scripts/shepherd config
+- **Config edits.** `config.example.toml` must pass `./scripts/lunchbox config
   validate` (CI checks this). Test config-driven changes with `--config` against
   a fixture first.
 - **Never give a fixture entry `command = "sleep"`.** Stopping a session calls
@@ -328,7 +328,7 @@ Example (bedtime restriction):
   live headless session to stop" and every `dev` subcommand has nothing to
   reattach to while sway, lunchboxd, the launcher and the HUD all keep running.
   Confirm with `ls /run/user/1000/ | grep sway` (the alias is there) and
-  `ls -l dev-runtime/shepherd.sock` (live), then kill the pids from
+  `ls -l dev-runtime/lunchbox.sock` (live), then kill the pids from
   `ps -eo pid,cmd | grep -E "sway.*headless|lunchboxd"`, `rm
   dev-runtime/headless/session.env`, and boot again — the second boot is
   usually well inside the budget.
@@ -409,7 +409,7 @@ Gotchas here:
   is not.** Move the daemon from a loopback bind to a LAN bind and every
   `-b cookies.txt` request comes back 401, because curl silently stops sending
   a cookie saved under `127.0.0.1`. Send it explicitly —
-  `-H "Cookie: shepherd_session=$(awk '/shepherd_session/{print $7}' cookies.txt | tail -1)"`
+  `-H "Cookie: lunchbox_session=$(awk '/lunchbox_session/{print $7}' cookies.txt | tail -1)"`
   — before concluding anything about session lifetime or revocation.
 
 - **`pkill -f firefox` kills your own shell.** The Bash tool's wrapper carries
@@ -417,7 +417,7 @@ Gotchas here:
   profile path.
 
 - **`npm run build` alone does not reach the running daemon.** `rust_embed`
-  embeds `shepherd-webui/dist/` at compile time but does not make cargo consider
+  embeds `lunchbox-webui/dist/` at compile time but does not make cargo consider
   `lunchboxd` dirty when only `dist/` changed, so `dev headless` cheerfully
   reboots the *old* SPA. Touch the embedding source first:
   `touch crates/lunchbox-http/src/web_assets.rs && cargo build -p lunchboxd`.
@@ -430,7 +430,7 @@ Gotchas here:
 - **A session that is up but unreachable: check the socket.** If the launcher and
   HUD loop on `Failed to connect to lunchboxd: No such file or directory` while
   `[OK] Headless session up` and `pgrep lunchboxd` both say everything is fine,
-  look at `ls dev-runtime/shepherd.sock`. Two overlapping daemons used to end
+  look at `ls dev-runtime/lunchbox.sock`. Two overlapping daemons used to end
   this way — the outgoing one deleted the path the incoming one had bound — which
   `IpcServer::shutdown()` now guards against by only removing the socket file it
   bound itself. If you see it anyway, kill every `lunchboxd` and

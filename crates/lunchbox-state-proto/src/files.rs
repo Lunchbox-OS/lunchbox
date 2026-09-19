@@ -15,7 +15,7 @@ use lunchbox_util::{ProtectedFile, ProtectedFiles};
 use crate::StateRequest;
 use crate::client::Transport;
 
-/// Shepherd's protected files, served by the custodian.
+/// Lunchbox's protected files, served by the custodian.
 pub struct RemoteFiles {
     transport: Transport,
 }

@@ -1,6 +1,6 @@
 # lunchbox-host-linux
 
-Linux host adapter for Shepherd.
+Linux host adapter for Lunchbox.
 
 ## Overview
 
@@ -257,11 +257,11 @@ skips every group belonging to a session the host is still tracking
 pid drew each surface. `LinuxHost::list_windows` fills in `WindowInfo::owner`
 by matching every window against what the host is actually supervising —
 tracked processes and their groups, Steam game pids found by app id, input
-sidecars, shepherd's own furniture, and the `escaped` registry:
+sidecars, lunchbox's own furniture, and the `escaped` registry:
 
 | `owner` | Meaning |
 | --- | --- |
-| `shepherd` | Our own UI or a background process we keep warm. |
+| `lunchbox` | Our own UI or a background process we keep warm. |
 | `activity` | The session running right now. |
 | `escaped` | An activity that outlived teardown; the sweep is still killing it. |
 | `unowned` | Nothing we know about. |
@@ -272,7 +272,7 @@ process's environment, which is fine on an admin screen someone has open and
 wrong on a loop that runs every two seconds regardless. The sweep keeps its own
 cheaper check (`report_unowned_windows`), which only knows about pids it
 spawned. Closing an `unowned` window stays a human's call:
-shepherd will not kill a surface it does not recognize, because a system
+lunchbox will not kill a surface it does not recognize, because a system
 dialog on a kiosk a child depends on is worse than the visibility gap.
 ## Ebook
 
@@ -297,7 +297,7 @@ restores neither. The compositor refuses the fullscreen state to keep the HUD
 visible, which is exactly what makes Okular leave the mode, and the window keeps
 its ordinary geometry throughout. The `fullscreen` action must therefore stay
 unrestricted, since the chrome hiding hangs off it. Reading positions live in
-`<data>/okular/docdata/` and are never written by shepherd. See
+`<data>/okular/docdata/` and are never written by lunchbox. See
 `docs/ebooks.md`.
 
 ## Closing a window before signalling it
@@ -335,10 +335,10 @@ graceful-stop floor (`retroarch::STOP_TIMEOUT`), since their shutdown has to
 unload the core and write both kinds of save.
 
 The fragment is *appended* to the user's own `retroarch.cfg`, so controller
-bindings, video settings and per-core options configured outside shepherd carry
+bindings, video settings and per-core options configured outside lunchbox carry
 into supervised sessions. RetroArch applies per-core **overrides** after
 `--appendconfig`, though, so an override naming one of the settings above wins
-over shepherd — `retroarch::conflicting_overrides` detects that at launch and
+over lunchbox — `retroarch::conflicting_overrides` detects that at launch and
 warns rather than silently losing save-state resume or the menu lock. See
 `docs/emulators.md`.
 
@@ -409,7 +409,7 @@ every activity is somewhere else before it starts:
 - **Everything else, Steam included**: wrapped in
   `systemd-run --user --scope --collect` (`user_scope_argv_prefix`).
   Unprivileged — no helper, no polkit — because all this has to achieve is "not
-  shepherd's cgroup", which the *user* manager can do even though it cannot
+  lunchbox's cgroup", which the *user* manager can do even though it cannot
   attach BPF.
 
 Like the firewall helper's `systemd-run --scope`, this execs the command in its
@@ -426,21 +426,21 @@ keeping:
 - A Steam entry launches `snap run steam steam://rungameid/<id>`, which is a
   short-lived request to the **preloaded** client. `snap run` re-scopes itself
   into `snap.steam.steam-<uuid>.scope` almost immediately, so the
-  `shepherd-<session>.scope` around it empties and `--collect` reaps it. Measured:
+  `lunchbox-<session>.scope` around it empties and `--collect` reaps it. Measured:
   the scope is `inactive` within a second and no units accumulate.
 - The game is a child of the preloaded client, not of that request — so
   `preload_steam` is the launch a game actually inherits its cgroup from, and it
-  is wrapped too (`shepherd-steam-preload-<pid>.scope`).
+  is wrapped too (`lunchbox-steam-preload-<pid>.scope`).
 
 Both scopes empty out the moment `snap run` hands off. What the wrapping buys is
-that "nothing shepherd starts for an activity is ever in shepherd's cgroup"
+that "nothing lunchbox starts for an activity is ever in lunchbox's cgroup"
 holds because of what this crate does, rather than because snapd happens to move
 the process quickly enough. Removing either wrapper would restore a window —
 short, and not obviously reachable, but one whose width is set by a third party.
 
 Neither wrapper changes where Steam ends up: the client and its games live in
 snapd's `snap.steam.steam-*` scope under `user@<uid>.service/app.slice`, which is
-already outside shepherd's cgroup. `snap run` does not preserve the pid either,
+already outside lunchbox's cgroup. `snap run` does not preserve the pid either,
 with or without the wrapper, which is why Steam sessions are tracked by
 `find_steam_game_pids` rather than by the pid the adapter recorded.
 
@@ -451,10 +451,10 @@ lost — the trade the compositor hardening makes — and `lunchboxd` raises the
 `ipc_socket_not_hardened` diagnostic, because the socket check has nothing left
 to tell apart.
 
-## Shepherd's own helpers get one too (issue #144)
+## Lunchbox's own helpers get one too (issue #144)
 
 Being in lunchboxd's cgroup is what the management socket trusts, so it is worth
-knowing what else is in there. Most of shepherd's helper subprocesses are
+knowing what else is in there. Most of lunchbox's helper subprocesses are
 uninteresting — fixed argv, output read straight back: `wpctl`/`pactl`/`amixer`,
 `pw-dump`, `brightnessctl`, `pgrep`, `pkcheck`, `flatpak --version`.
 
@@ -466,8 +466,8 @@ invocations that touch the network — the download and the playlist fetch — a
 not to the `yt-dlp --version` liveness probe, which parses no remote input and
 runs on every diagnostics pass.
 
-The reasoning is not that yt-dlp is untrusted code: it is shepherd's own choice
-of binary with shepherd's own argv. It is that yt-dlp runs on a background
+The reasoning is not that yt-dlp is untrusted code: it is lunchbox's own choice
+of binary with lunchbox's own argv. It is that yt-dlp runs on a background
 prefetch timer, with no activity launched, parsing whatever a remote host
 returns — so a parser bug there would be a peer the daemon trusts. The URLs come
 from admin-configured libraries, so an activity cannot choose the target.
@@ -477,7 +477,7 @@ from admin-configured libraries, so an activity cannot choose the target.
 `launch_unsupervised` — the spawn behind administrator mode's `.desktop` picker
 — wraps its argv in `admin_scope_argv_prefix`, the same `systemd-run --user
 --scope` an activity gets. It is the launch path with the *weakest* claim to
-shepherd's cgroup, not the strongest: the program is arbitrary third-party code,
+lunchbox's cgroup, not the strongest: the program is arbitrary third-party code,
 chosen from `.desktop` files that an activity can itself write into
 `~/.local/share/applications`. As a plain child of the daemon it would be a peer
 the management socket believes, holding `unlock_device` and `launch` for as long
@@ -488,7 +488,7 @@ It keeps `setsid` as well: `systemd-run --scope` execs the program in the same
 process, so the pid the reaper waits on is still the application's.
 
 Still unscoped, and deliberately: the input-compat sidecars (`sidecar.rs`),
-`wl-mirror`, and the pairing overlay. All three are shepherd's own furniture
+`wl-mirror`, and the pairing overlay. All three are lunchbox's own furniture
 with no remote input, and two of them need the session's own devices.
 
 ## Helper binaries come from trusted directories, not `$PATH` (issue #144)
@@ -503,10 +503,10 @@ chooses the session's environment**: `/etc/pam.d/gdm-password` and
 `gdm-autologin` carry `pam_env.so … user_readenv=1`, and `libpam-modules` still
 honours it, so `~/.pam_environment` sets `PATH` outright. Every activity runs as
 that uid. An activity could write one file, drop its own `systemd-run` on the
-resulting `PATH`, and at the next login have shepherd exec it — as a direct
+resulting `PATH`, and at the next login have lunchbox exec it — as a direct
 child of the daemon, in the daemon's cgroup, which the management socket accepts
 as `Admin`. The same substitution turns `user_scope_argv_prefix` into a no-op,
-so every activity would land in shepherd's cgroup too, and nothing would fail
+so every activity would land in lunchbox's cgroup too, and nothing would fail
 loudly.
 
 `helpers::resolve` therefore does not read the environment at all. It searches a
@@ -522,7 +522,7 @@ tools that are legitimately absent.
   Returning the bare name would hand the lookup back to `$PATH`; an absolute
   path under a root-owned directory fails at spawn exactly as a missing tool
   always did, and an activity cannot satisfy it.
-- `helpers::resolve_daemon_sibling` is the variant for shepherd's *own*
+- `helpers::resolve_daemon_sibling` is the variant for lunchbox's *own*
   binaries: `current_exe()`'s directory first (where both an install and a
   `cargo build` put them), then the trusted directories. The input-compat
   sidecars and the pairing overlay use it.
@@ -531,12 +531,12 @@ tools that are legitimately absent.
   one on `$PATH` is how the e2e suite tests the flatpak and polkit paths without
   installing either. A device never takes that branch —
   `helpers::set_trust_environment` is off unless `--trust-environment` was
-  passed, and `shepherd install sway-config` strips that flag and refuses to
+  passed, and `lunchbox install sway-config` strips that flag and refuses to
   finish if the strip did not take. Only the e2e suite passes it, because it
   stubs `flatpak`, `pkcheck` and `pkexec` on `$PATH`; an ordinary dev session
   leaves it off and so resolves helpers exactly as a device does.
 
-`SHEPHERD_*_BIN`, `SHEPHERD_FIREWALL_HELPER` and `SHEPHERD_BROWSER_ROOT` all go
+`LUNCHBOX_*_BIN`, `LUNCHBOX_FIREWALL_HELPER` and `LUNCHBOX_BROWSER_ROOT` all go
 through the single gate `helpers::env_override` and are **ignored by default**.
 The first two are binary-substitution primitives; the third redirects where the
 Chrome managed-policy JSON is written, so leaving it open would let an activity
@@ -563,12 +563,12 @@ rather than a lookup bug.
 `helpers::command()` / `helpers::tokio_command()` instead. Prose in a README
 does not survive the next person adding a call site; a denied method does.
 
-Spawning something that is *not* a shepherd-chosen helper is still legitimate
+Spawning something that is *not* a lunchbox-chosen helper is still legitimate
 and takes an `#[allow(clippy::disallowed_methods)]` with a comment saying which
 exception it is. There are five kinds, and they are the whole list:
 
 - `ManagedProcess::spawn` — `argv[0]` is the activity's own command from
-  `config.toml`, the admin's string and not shepherd's to reinterpret.
+  `config.toml`, the admin's string and not lunchbox's to reinterpret.
 - The input sidecars and the pairing overlay — already resolved by
   `resolve_daemon_sibling`.
 - `lunchbox-firewall-helper` — only ever runs under `pkexec`, which replaces the
@@ -597,15 +597,15 @@ supported — a warning is logged and the browser policy ignored.
   managed policy from the root-owned, machine-wide `/etc/opt/chrome/policies/`
   — writing there would hijack Chrome for *every* user on the box. But the
   flatpak's launch wrapper populates that path *inside its own sandbox* (an
-  ephemeral, per-launch filesystem). So shepherd writes a `<policy_id>.json`
+  ephemeral, per-launch filesystem). So lunchbox writes a `<policy_id>.json`
   (regenerated each spawn) into the app's own per-user tree
-  (`~/.var/app/com.google.Chrome/config/shepherd-policies/`) and rebuilds the
+  (`~/.var/app/com.google.Chrome/config/lunchbox-policies/`) and rebuilds the
   launch as:
 
   ```
-  flatpak run --command=bash --env=SHEPHERD_POLICY=<file> com.google.Chrome \
+  flatpak run --command=bash --env=LUNCHBOX_POLICY=<file> com.google.Chrome \
     -c 'mkdir -p /etc/opt/chrome/policies/managed;
-        ln -sf "$SHEPHERD_POLICY" /etc/opt/chrome/policies/managed/shepherd.json;
+        ln -sf "$LUNCHBOX_POLICY" /etc/opt/chrome/policies/managed/lunchbox.json;
         exec /app/bin/chrome "$@"' bash <chrome flags>
   ```
 

@@ -2,7 +2,7 @@
 //!
 //! Posters are loaded once at startup. Local posters are read from disk;
 //! remote posters are served from an on-disk cache under
-//! `$XDG_CACHE_HOME/shepherd/media/posters/` and only fetched over HTTP on a
+//! `$XDG_CACHE_HOME/lunchbox/media/posters/` and only fetched over HTTP on a
 //! cache miss or when the cached copy has expired. A failure produces a
 //! placeholder rather than aborting the launch; failed fetches are not cached
 //! so a transient network blip on first launch doesn't become a permanent

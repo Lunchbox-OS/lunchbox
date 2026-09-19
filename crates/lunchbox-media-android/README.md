@@ -95,7 +95,7 @@ the full design and roadmap.
   decode, audio, transport controls, and EOF.
 
   Video does **not** go through egui. mpv decodes straight into a `SurfaceView`
-  that [`ShepherdMediaActivity`](./android/app/src/main/java/com/armeafamily/shepherd/media/ShepherdMediaActivity.java)
+  that [`LunchboxMediaActivity`](./android/app/src/main/java/com/lunchbox_os/media/LunchboxMediaActivity.java)
   puts behind the (translucent) activity window — `vo=mediacodec_embed`,
   `hwdec=mediacodec`, `--wid` — so frames stay on the GPU and SurfaceFlinger can
   put them on a hardware overlay plane. egui paints only the overlay, over
@@ -167,7 +167,7 @@ The same `MediaApp` runs natively for fast iteration — no device or emulator:
 cargo run -p lunchbox-media-android --example desktop_preview
 ```
 
-Settings persist under `<tmp>/shepherd-media-preview/settings.toml`.
+Settings persist under `<tmp>/lunchbox-media-preview/settings.toml`.
 
 ## Run the tests on a device
 
@@ -200,7 +200,7 @@ the cache naming and eviction behave identically on bionic.
 ## Build the Android library
 
 Requires the Rust Android target, `cargo-ndk`, and an installed NDK. The NDK is
-provisioned into `/opt/android-sdk` by `./scripts/shepherd deps install android`
+provisioned into `/opt/android-sdk` by `./scripts/lunchbox deps install android`
 (the same deps set the companion app uses); point `ANDROID_NDK_HOME` at it:
 
 ```sh
@@ -222,7 +222,7 @@ App listing metadata lives in [`dist/fdroid/`](../../dist/fdroid/README.md).
 Fire TV sticks are the sideload case: F-Droid has no remote-friendly interface,
 so `adb install` stays the practical route there.
 
-`shepherd-admin apps install media` does that sideload for you, onto whatever
+`lunchbox-admin apps install media` does that sideload for you, onto whatever
 Android device is attached over `adb`: it downloads the version-matched signed
 release asset (verifying its `.sha256`) on a packaged install, and builds the
 Gradle project below in a source checkout.

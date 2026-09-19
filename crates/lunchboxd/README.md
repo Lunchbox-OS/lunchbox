@@ -1,10 +1,10 @@
 # lunchboxd
 
-The Shepherd background service.
+The Lunchbox background service.
 
 ## Overview
 
-`lunchboxd` is the authoritative policy and enforcement service for the Shepherd ecosystem. It is the central coordinator that:
+`lunchboxd` is the authoritative policy and enforcement service for the Lunchbox ecosystem. It is the central coordinator that:
 
 - Loads and validates configuration
 - Evaluates policy to determine availability
@@ -72,7 +72,7 @@ lunchboxd
 lunchboxd --config /path/to/config.toml
 
 # Override socket and data paths
-lunchboxd --socket /tmp/lunchboxd.sock --data-dir /tmp/shepherdd-data
+lunchboxd --socket /tmp/lunchboxd.sock --data-dir /tmp/lunchboxd-data
 
 # Debug logging
 lunchboxd --log-level debug
@@ -82,7 +82,7 @@ lunchboxd --log-level debug
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-c, --config` | `~/.config/shepherd/config.toml` | Configuration file path |
+| `-c, --config` | `~/.config/lunchbox/config.toml` | Configuration file path |
 | `-s, --socket` | From config | IPC socket path |
 | `-d, --data-dir` | From config | Data directory |
 | `-l, --log-level` | `info` | Log verbosity |
@@ -91,8 +91,8 @@ lunchboxd --log-level debug
 
 | Variable | Description |
 |----------|-------------|
-| `SHEPHERD_SOCKET` | Override socket path (default: `$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock`) |
-| `SHEPHERD_DATA_DIR` | Override data directory (default: `$XDG_DATA_HOME/lunchboxd`) |
+| `LUNCHBOX_SOCKET` | Override socket path (default: `$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock`) |
+| `LUNCHBOX_DATA_DIR` | Override data directory (default: `$XDG_DATA_HOME/lunchboxd`) |
 | `RUST_LOG` | Tracing filter (e.g., `lunchboxd=debug`) |
 
 ## Main Loop
@@ -247,7 +247,7 @@ The service exposes health status via `GetHealth`:
 Uses structured logging via `tracing`:
 
 ```
-2025-01-15T14:30:00.000Z INFO  lunchboxd: Starting shepherd service
+2025-01-15T14:30:00.000Z INFO  lunchboxd: Starting lunchbox service
 2025-01-15T14:30:00.050Z INFO  lunchbox_config: Configuration loaded entries=5
 2025-01-15T14:30:00.100Z INFO  lunchbox_ipc: IPC server listening path=/run/lunchboxd/lunchboxd.sock
 2025-01-15T14:30:15.000Z INFO  lunchbox_core: Session started session_id=abc123 entry_id=minecraft

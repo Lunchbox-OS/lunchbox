@@ -14,8 +14,8 @@
 //! clients use `lunchbox_ipc::IpcClient`'s helpers to skip the
 //! `Value` step and get back the strongly-typed result.
 
-use serde::{Deserialize, Serialize};
 use lunchbox_util::ClientId;
+use serde::{Deserialize, Serialize};
 
 use crate::{API_VERSION, ClientRole};
 

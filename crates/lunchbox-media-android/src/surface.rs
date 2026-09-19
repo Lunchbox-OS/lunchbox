@@ -1,13 +1,13 @@
 //! The video `Surface` mpv decodes into.
 //!
-//! [`ShepherdMediaActivity`][activity] owns a `SurfaceView` behind the
+//! [`LunchboxMediaActivity`][activity] owns a `SurfaceView` behind the
 //! activity's own window and exposes its `Surface` through
 //! `getVideoSurface()`. This module fetches that over JNI and hands mpv the
 //! jobject pointer as `--wid`, which is what lets it use
 //! `vo=mediacodec_embed` + `hwdec=mediacodec` and keep decoded frames on the
 //! GPU (see [`VideoOutput::AndroidSurface`]).
 //!
-//! [activity]: ../../android/app/src/main/java/com/armeafamily/shepherd/media/ShepherdMediaActivity.java
+//! [activity]: ../../android/app/src/main/java/com/lunchbox_os/media/LunchboxMediaActivity.java
 //!
 //! ## Reference lifetime
 //!

@@ -6,11 +6,11 @@
          fills the whole non-rectangular display while nothing important lands
          under the camera or the rounded corners. The cutout-mode attribute is
          ignored on API < 28. -->
-    <style name="Theme.ShepherdMedia" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+    <style name="Theme.LunchboxMedia" parent="@android:style/Theme.NoTitleBar.Fullscreen">
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
 
         <!-- The window needs an alpha channel so the video SurfaceView behind
-             it (see ShepherdMediaActivity) shows through wherever the GL side
+             it (see LunchboxMediaActivity) shows through wherever the GL side
              leaves pixels transparent.
 
              This has to come from the theme rather than a runtime

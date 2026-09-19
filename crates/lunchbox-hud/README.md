@@ -1,6 +1,6 @@
 # lunchbox-hud
 
-Always-visible HUD overlay for Shepherd.
+Always-visible HUD overlay for Lunchbox.
 
 ## Overview
 
@@ -14,7 +14,7 @@ Always-visible HUD overlay for Shepherd.
 - **Brightness control** - Adjust screen brightness on hosts with a backlight (hidden otherwise). Same flyout shape, with the automatic-brightness toggle in place of mute.
 - **Session controls** - End session button (confirms first unless the activity opts out via `confirm_on_close = false`)
 - **Reset** - Restart an activity in place, for kinds that offer it (`type = "retroarch"`)
-- **Page turning** - `‹` / `›` for reading activities (`type = "ebook"`), which synthesize `Page Up` / `Page Down` through `/dev/uinput`. They exist because a touchscreen cannot turn a page any other way: readers bind paging to keys, a D-pad or a wheel, and have no swipe gesture. The HUD is where they belong — it is on the overlay layer, above the activity, and it is shepherd's own surface rather than something a reader's own restrictions could take away. See `src/page_turn.rs` and `docs/ebooks.md`.
+- **Page turning** - `‹` / `›` for reading activities (`type = "ebook"`), which synthesize `Page Up` / `Page Down` through `/dev/uinput`. They exist because a touchscreen cannot turn a page any other way: readers bind paging to keys, a D-pad or a wheel, and have no swipe gesture. The HUD is where they belong — it is on the overlay layer, above the activity, and it is lunchbox's own surface rather than something a reader's own restrictions could take away. See `src/page_turn.rs` and `docs/ebooks.md`.
 
   On the vertical bar the pair stacks at the bottom, but the arrows keep
   pointing `‹` back and `›` forward. They point the way the *pages* go, not the
@@ -69,7 +69,7 @@ lunchbox-hud --anchor top --height 48
 |--------|---------|-------------|
 | `-s, --socket` | `$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock` | Service socket path |
 | `-l, --log-level` | `info` | Log verbosity |
-| `-a, --anchor` | *(unset)* | **Pin** the HUD to `top`, `bottom`, or `left`, ignoring config. Also readable from `SHEPHERD_HUD_ANCHOR`, which is how the headless dev session drives it. Unset — how `sway.conf` starts the HUD — the edge comes from lunchboxd instead (see below). |
+| `-a, --anchor` | *(unset)* | **Pin** the HUD to `top`, `bottom`, or `left`, ignoring config. Also readable from `LUNCHBOX_HUD_ANCHOR`, which is how the headless dev session drives it. Unset — how `sway.conf` starts the HUD — the edge comes from lunchboxd instead (see below). |
 | `--height` | `48` | HUD bar thickness in pixels — its height when horizontal, its width when it runs down the side |
 
 ## Display Elements
@@ -202,7 +202,7 @@ IPC, by the same two-part mechanism as the scale factor:
   hole issue #118 found for the scale factor.
 
 Passing `--anchor` **pins** the bar and makes the HUD ignore both. That is what
-makes `SHEPHERD_HUD_ANCHOR=left` useful in development, and a footgun on a
+makes `LUNCHBOX_HUD_ANCHOR=left` useful in development, and a footgun on a
 device — `sway.conf` deliberately passes no flags.
 
 Unpinned, the bar starts at `top` and follows lunchboxd from there, so a device

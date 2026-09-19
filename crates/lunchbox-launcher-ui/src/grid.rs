@@ -33,7 +33,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for LauncherGrid {
-        const NAME: &'static str = "ShepherdLauncherGrid";
+        const NAME: &'static str = "LunchboxLauncherGrid";
         type Type = super::LauncherGrid;
         type ParentType = gtk4::Box;
     }

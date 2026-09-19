@@ -3,7 +3,7 @@ name = "lunchbox-e2e"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "End-to-end integration tests for shepherd-launcher in a real headless Sway session"
+description = "End-to-end integration tests for lunchbox-launcher in a real headless Sway session"
 publish = false
 
 [lib]

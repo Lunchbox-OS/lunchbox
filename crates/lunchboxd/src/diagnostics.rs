@@ -168,7 +168,7 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
                     "activities"
                 },
             ),
-            remedy: Some("Install it with `shepherd-admin media-deps install`.".to_string()),
+            remedy: Some("Install it with `lunchbox-admin media-deps install`.".to_string()),
             since: now,
         });
     }
@@ -241,15 +241,15 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
             MissingCore::Unresolved { name, filename } => (
                 format!("The libretro core \"{name}\" this activity names is not installed"),
                 format!(
-                    "Install it with `sudo shepherd-admin apps install retroarch {name}`. If it \
-                     is installed somewhere shepherd does not search, point `core_path` at that \
+                    "Install it with `sudo lunchbox-admin apps install retroarch {name}`. If it \
+                     is installed somewhere lunchbox does not search, point `core_path` at that \
                      copy of {filename} instead -- otherwise the activity fails to launch."
                 ),
             ),
             MissingCore::NoSuchPath { path } => (
                 format!("This activity's core_path is not a file, so it will not launch: {path}"),
                 "Point `core_path` at an installed `*_libretro.so`, or replace it with \
-                 `core = \"<name>\"` and let shepherd find the core."
+                 `core = \"<name>\"` and let lunchbox find the core."
                     .to_string(),
             ),
         };
@@ -312,14 +312,14 @@ pub fn evaluate(facts: &ProbeFacts, now: DateTime<Local>) -> Vec<Diagnostic> {
         let (message, remedy) = match why {
             MissingSupport::Reader { command } => (
                 format!("The reader this activity runs is not installed: {command}"),
-                "Install it with `sudo shepherd-admin apps install okular`, or point                  `command` at the reader you meant."
+                "Install it with `sudo lunchbox-admin apps install okular`, or point                  `command` at the reader you meant."
                     .to_string(),
             ),
             MissingSupport::Backend { format, generator } => (
                 format!(
                     "Okular is installed but cannot open {format} files: the {generator}                      backend is missing"
                 ),
-                "Install it with `sudo shepherd-admin apps install okular`, which includes                  okular-extra-backends -- EPUB and DjVu support ship separately from Okular                  itself."
+                "Install it with `sudo lunchbox-admin apps install okular`, which includes                  okular-extra-backends -- EPUB and DjVu support ship separately from Okular                  itself."
                     .to_string(),
             ),
         };
@@ -982,7 +982,7 @@ mod tests {
                 .remedy
                 .as_deref()
                 .unwrap()
-                .contains("shepherd-admin apps install retroarch mgba")
+                .contains("lunchbox-admin apps install retroarch mgba")
         );
         // The path is named, since that is the thing to correct.
         assert!(diags[1].message.contains("/opt/nope_libretro.so"));

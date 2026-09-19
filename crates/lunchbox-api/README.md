@@ -1,10 +1,10 @@
 # lunchbox-api
 
-Protocol types for Shepherd IPC communication.
+Protocol types for Lunchbox IPC communication.
 
 ## Overview
 
-This crate defines the stable API between the Shepherd service (`lunchboxd`) and its clients (launcher UI, HUD overlay, admin tools). It contains:
+This crate defines the stable API between the Lunchbox service (`lunchboxd`) and its clients (launcher UI, HUD overlay, admin tools). It contains:
 
 - **Commands** - Requests from clients to the service
 - **Responses** - Service replies to commands

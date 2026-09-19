@@ -62,7 +62,7 @@ const RECONNECT_BACKOFF: [Duration; 4] = [
     Duration::from_secs(10),
 ];
 
-/// Shepherd's end of the watchdog.
+/// Lunchbox's end of the watchdog.
 ///
 /// Dropping it stops the thread and closes the connection, which the custodian
 /// reads as supervision having ended — correct, because it has.

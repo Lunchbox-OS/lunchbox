@@ -14,8 +14,8 @@
 #![allow(clippy::disallowed_methods)]
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body};
+use serde_json::json;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HELPER_PATH: &str = "/usr/libexec/lunchbox-firewall-helper";
-const POLKIT_ACTION: &str = "org.shepherd.firewall.apply-process";
+const POLKIT_ACTION: &str = "com.lunchbox-os.firewall.apply-process";
 
 /// Returns `None` when this host can run the test, or `Some(reason)` if
 /// not. Mirrors the predicate in firewall_real.rs but adds snapd and the
@@ -73,10 +73,10 @@ fn deny_target_reachable(target: &str) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn snap_firewall_enforcement_with_real_helper() -> Result<()> {
-    let snap_name = std::env::var("SHEPHERD_FIREWALL_PROBE_SNAP")
-        .unwrap_or_else(|_| "shepherd-firewall-probe".into());
+    let snap_name = std::env::var("LUNCHBOX_FIREWALL_PROBE_SNAP")
+        .unwrap_or_else(|_| "lunchbox-firewall-probe".into());
     let deny_target =
-        std::env::var("SHEPHERD_FIREWALL_PROBE_DENY").unwrap_or_else(|_| "8.8.8.8:53".into());
+        std::env::var("LUNCHBOX_FIREWALL_PROBE_DENY").unwrap_or_else(|_| "8.8.8.8:53".into());
 
     if let Some(reason) = skip_reason(&snap_name) {
         eprintln!(
@@ -106,13 +106,13 @@ async fn snap_firewall_enforcement_with_real_helper() -> Result<()> {
     let allow_target = format!("127.0.0.1:{allow_port}");
 
     // Probe log path. The orchestrator script creates a world-writable
-    // tempdir and exports SHEPHERD_FIREWALL_PROBE_LOG; that lets the
+    // tempdir and exports LUNCHBOX_FIREWALL_PROBE_LOG; that lets the
     // classic-confined snap write back to a host path the test can read.
-    let probe_log_path: PathBuf = std::env::var("SHEPHERD_FIREWALL_PROBE_LOG")
+    let probe_log_path: PathBuf = std::env::var("LUNCHBOX_FIREWALL_PROBE_LOG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             tempfile::Builder::new()
-                .prefix("shepherd-fw-snap-")
+                .prefix("lunchbox-fw-snap-")
                 .tempdir_in("/tmp")
                 .unwrap()
                 .keep()
@@ -143,15 +143,15 @@ label = "Snap Firewall Probe"
 type = "snap"
 snap_name = "{snap_name}"
 [entries.kind.env]
-SHEPHERD_FIREWALL_PROBE_LOG = "{log}"
-SHEPHERD_FIREWALL_PROBE_ALLOW = "{allow}"
-SHEPHERD_FIREWALL_PROBE_DENY = "{deny}"
-SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS = "120"
+LUNCHBOX_FIREWALL_PROBE_LOG = "{log}"
+LUNCHBOX_FIREWALL_PROBE_ALLOW = "{allow}"
+LUNCHBOX_FIREWALL_PROBE_DENY = "{deny}"
+LUNCHBOX_FIREWALL_PROBE_HOLD_SECONDS = "120"
 # 5s gives lunchboxd's wait_for_scope poll loop and the
 # pkexec→helper→BPF-attach round trip time to land before the probe
 # starts testing. snap-run startup itself usually consumes most of this
 # already, but the explicit delay makes the test deterministic.
-SHEPHERD_FIREWALL_PROBE_INITIAL_DELAY = "5"
+LUNCHBOX_FIREWALL_PROBE_INITIAL_DELAY = "5"
 [entries.availability]
 always = true
 [entries.limits]

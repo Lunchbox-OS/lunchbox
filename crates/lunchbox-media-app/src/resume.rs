@@ -17,7 +17,7 @@
 //! the credits, and an item stopped in its first few seconds never records one.
 //!
 //! This module is pure state + TOML persistence. Where the file lives is the
-//! platform binary's decision (`$XDG_STATE_HOME/shepherd/media/resume/` on
+//! platform binary's decision (`$XDG_STATE_HOME/lunchbox/media/resume/` on
 //! Linux, app-private storage on Android), as is when to call [`ResumeStore`]'s
 //! record/flush methods.
 

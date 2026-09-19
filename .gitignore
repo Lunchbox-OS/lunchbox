@@ -1,6 +1,6 @@
 /target
 /dev-runtime
-# `shepherd package deb` output
+# `lunchbox package deb` output
 /dist/pkg
-# `shepherd package fdroid` output (throwaway signing key + a copy of the APKs)
+# `lunchbox package fdroid` output (throwaway signing key + a copy of the APKs)
 /dist/fdroid-repo

@@ -4,20 +4,20 @@
 //! around it. On launch of a `com.google.Chrome` flatpak entry with
 //! `[entries.browser]`, the daemon must (1) write the managed-policy JSON under
 //! the browser root, (2) rebuild the launch into the policy-injection form
-//! (`flatpak run --command=bash --env=SHEPHERD_POLICY=… com.google.Chrome -c
+//! (`flatpak run --command=bash --env=LUNCHBOX_POLICY=… com.google.Chrome -c
 //! <shim> bash <chrome flags>`), and (3) wipe the per-profile user-data-dir
 //! after the activity exits when `wipe_on_exit` is set.
 //!
 //! A stub `flatpak` on `PATH` records the argv it was invoked with and exits,
-//! so no real Chrome (or flatpak) is needed. `SHEPHERD_BROWSER_ROOT` redirects
+//! so no real Chrome (or flatpak) is needed. `LUNCHBOX_BROWSER_ROOT` redirects
 //! all writes into a tempdir.
 //!
 //! Run alongside the other e2e tests with
 //! `cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1`.
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body};
+use serde_json::json;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -42,7 +42,7 @@ label = "School"
 type = "flatpak"
 app_id = "com.google.Chrome"
 [entries.kind.env]
-SHEPHERD_TEST_ARGV = "@ARGV@"
+LUNCHBOX_TEST_ARGV = "@ARGV@"
 [entries.availability]
 always = true
 [entries.limits]
@@ -94,17 +94,17 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
     // `work` holds the stub flatpak + argv log; `root` is the redirected
     // browser root. Separate so wiping the profile never deletes the argv log.
     let work = tempfile::Builder::new()
-        .prefix("shepherd-e2e-browser-work-")
+        .prefix("lunchbox-e2e-browser-work-")
         .tempdir()
         .context("create work dir")?;
     let root = tempfile::Builder::new()
-        .prefix("shepherd-e2e-browser-root-")
+        .prefix("lunchbox-e2e-browser-root-")
         .tempdir()
         .context("create browser root")?;
 
     let argv_log = work.path().join("flatpak-argv.log");
     // Stub flatpak: record argv (one per line), then exit so the monitor fires
-    // the wipe. `$SHEPHERD_TEST_ARGV` is set from [entries.kind.env].
+    // the wipe. `$LUNCHBOX_TEST_ARGV` is set from [entries.kind.env].
     //
     // Written to a scratch file and renamed into place: `wait_for_file` waits
     // for the log to *exist*, and a redirection creates it before a byte is in
@@ -112,8 +112,8 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
     write_executable(
         &work.path().join("flatpak"),
         "#!/bin/sh\n\
-         printf '%s\\n' \"$@\" > \"$SHEPHERD_TEST_ARGV.partial\"\n\
-         mv \"$SHEPHERD_TEST_ARGV.partial\" \"$SHEPHERD_TEST_ARGV\"\n",
+         printf '%s\\n' \"$@\" > \"$LUNCHBOX_TEST_ARGV.partial\"\n\
+         mv \"$LUNCHBOX_TEST_ARGV.partial\" \"$LUNCHBOX_TEST_ARGV\"\n",
     )?;
     let augmented_path = format!(
         "{}:{}",
@@ -132,8 +132,8 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
 
     let h = TestHarness::builder()
         .config_toml(config)
-        .shepherdd_env("SHEPHERD_BROWSER_ROOT", root.path().display().to_string())
-        .shepherdd_env("PATH", augmented_path)
+        .lunchboxd_env("LUNCHBOX_BROWSER_ROOT", root.path().display().to_string())
+        .lunchboxd_env("PATH", augmented_path)
         .start()
         .await?;
     let http = h.http();
@@ -145,7 +145,7 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
     // (1) The managed-policy JSON is written under the per-user policy dir.
     let policy = root
         .path()
-        .join(".var/app/com.google.Chrome/config/shepherd-policies/chrome-school.json");
+        .join(".var/app/com.google.Chrome/config/lunchbox-policies/chrome-school.json");
     wait_for_file(&policy, Duration::from_secs(5)).await?;
     let policy_body = fs::read_to_string(&policy)?;
     assert!(
@@ -176,8 +176,8 @@ async fn browser_materializes_policy_injection_and_wipes_profile() -> Result<()>
     assert!(
         lines
             .iter()
-            .any(|l| *l == format!("--env=SHEPHERD_POLICY={}", policy.display())),
-        "missing --env=SHEPHERD_POLICY; argv:\n{argv}"
+            .any(|l| *l == format!("--env=LUNCHBOX_POLICY={}", policy.display())),
+        "missing --env=LUNCHBOX_POLICY; argv:\n{argv}"
     );
     assert!(
         lines

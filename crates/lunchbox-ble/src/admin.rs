@@ -1,6 +1,6 @@
 //! `AdminRecord`: the per-bond admin identity that survives restarts.
 //!
-//! Stored as TOML alongside other shepherd persistent state. Also owns
+//! Stored as TOML alongside other lunchbox persistent state. Also owns
 //! the factory-reset sentinel check that runs at daemon startup before
 //! the GATT server comes up.
 //!
@@ -11,10 +11,10 @@
 //! so a device claimed before this change keeps its admin and its token.
 
 use chrono::{DateTime, Local};
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use lunchbox_management::AdminSummary;
 use lunchbox_util::{ProtectedFile, ProtectedFiles};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
@@ -251,7 +251,7 @@ impl std::fmt::Debug for PendingUnbondStore {
 }
 
 impl PendingUnbondStore {
-    /// Keep the queue with the rest of shepherd's protected files (issue #157).
+    /// Keep the queue with the rest of lunchbox's protected files (issue #157).
     ///
     /// It used to derive its own path beside the admin record, under a
     /// different name (`ble-pending-unbond.toml`) from the one the custodian

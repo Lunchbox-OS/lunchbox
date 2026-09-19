@@ -15,8 +15,8 @@
 //! `cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1`.
 
 use anyhow::Result;
-use serde_json::json;
 use lunchbox_e2e::{TestHarness, json_body};
+use serde_json::json;
 
 const RETROARCH_CONFIG: &str = r#"
 config_version = 1
@@ -84,8 +84,8 @@ async fn missing_cores_and_content_reach_clients_as_per_entry_diagnostics() -> R
 
     let h = TestHarness::builder()
         .config_toml(RETROARCH_CONFIG.replace("{ROM}", &rom.to_string_lossy()))
-        .shepherdd_env(
-            "SHEPHERD_LIBRETRO_DIR",
+        .lunchboxd_env(
+            "LUNCHBOX_LIBRETRO_DIR",
             scratch.path().to_string_lossy().to_string(),
         )
         .start()

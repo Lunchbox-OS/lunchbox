@@ -1,9 +1,9 @@
 //! Audit event types
 
 use chrono::{DateTime, Local};
-use serde::{Deserialize, Serialize};
 use lunchbox_api::SessionEndReason;
 use lunchbox_util::{EntryId, LimitSubject, SessionId};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Types of audit events

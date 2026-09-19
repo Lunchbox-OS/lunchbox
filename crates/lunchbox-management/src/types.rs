@@ -1,8 +1,8 @@
 //! Result types returned by [`ManagementService`](crate::ManagementService).
 
 use chrono::{DateTime, Local};
-use serde::{Deserialize, Serialize};
 use lunchbox_api::ReasonCode;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -20,7 +20,7 @@ pub enum LaunchOutcome {
 /// that changes when they do.
 ///
 /// The tag exists because a device's policy has three writers — `sudoedit`,
-/// `shepherd install policy`, and now the web config editor — and the last one
+/// `lunchbox install policy`, and now the web config editor — and the last one
 /// has to be able to notice that it is about to overwrite one of the others.
 /// It is a hash rather than an mtime so that a file restored from a backup, or
 /// rewritten with identical bytes, reads as unchanged.

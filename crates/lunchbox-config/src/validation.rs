@@ -2071,7 +2071,7 @@ mod tests {
     #[test]
     fn media_browse_needs_only_a_library() {
         assert!(
-            media_errors("type = \"media\"\nlibrary = \"/etc/shepherd/movies.toml\"").is_empty()
+            media_errors("type = \"media\"\nlibrary = \"/etc/lunchbox/movies.toml\"").is_empty()
         );
     }
 

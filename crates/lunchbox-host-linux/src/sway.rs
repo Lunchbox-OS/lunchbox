@@ -14,9 +14,9 @@
 //! Windows moved there with `move scratchpad` (see `sway.conf` for the
 //! Steam client) live under that workspace's `floating_nodes`.
 
-use serde::Deserialize;
 use lunchbox_api::{VideoMode, WindowAction, WindowInfo, WindowOwner};
 use lunchbox_host_api::{HostError, HostResult};
+use serde::Deserialize;
 
 const SCRATCHPAD_WORKSPACE: &str = "__i3_scratch";
 

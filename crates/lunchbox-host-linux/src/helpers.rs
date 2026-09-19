@@ -1,4 +1,4 @@
-//! Where shepherd's helper binaries come from (issue #144).
+//! Where lunchbox's helper binaries come from (issue #144).
 //!
 //! `lunchboxd` execs a good deal that it did not write — `systemd-run`,
 //! `pkexec`, `snap`, `pgrep`, `wpctl` and a dozen more. Every one of them used
@@ -7,11 +7,11 @@
 //! `pam_env.so … user_readenv=1`, and `libpam-modules` still honours it, so
 //! `~/.pam_environment` sets the session's environment outright. Every activity
 //! runs as that uid, so any of them could write one file, drop a `systemd-run`
-//! on the resulting `PATH`, and at the next login have shepherd exec it — as a
+//! on the resulting `PATH`, and at the next login have lunchbox exec it — as a
 //! direct child of the daemon, in the daemon's own cgroup, which the management
 //! socket accepts as `Admin`. The same substitution turns
 //! [`crate::user_scope_argv_prefix`] into a no-op, so every activity lands in
-//! shepherd's cgroup too. Nothing fails loudly; the peer check simply stops
+//! lunchbox's cgroup too. Nothing fails loudly; the peer check simply stops
 //! separating anything.
 //!
 //! Sanitising the inherited `PATH` would not fix that, because the environment
@@ -63,7 +63,7 @@ const TRUSTED_PATH: &[&str] = &[
 /// not an error one.
 const FALLBACK_DIR: &str = "/usr/bin";
 
-/// Whether `SHEPHERD_*_BIN`-style environment overrides are honoured.
+/// Whether `LUNCHBOX_*_BIN`-style environment overrides are honoured.
 ///
 /// Off by default. They are a direct binary-substitution primitive, and the
 /// environment is exactly what an activity can control — so on a device they
@@ -90,7 +90,7 @@ pub fn environment_is_trusted() -> bool {
 
 /// Read `var` as a path override, or `None` when the environment is not trusted.
 ///
-/// The single gate every `SHEPHERD_*_BIN`-style override goes through, so
+/// The single gate every `LUNCHBOX_*_BIN`-style override goes through, so
 /// adding one cannot accidentally reintroduce the hole.
 pub fn env_override(var: &str) -> Option<PathBuf> {
     if !environment_is_trusted() {
@@ -128,7 +128,7 @@ pub fn resolve(name: &str) -> PathBuf {
     // fake one on `$PATH` is how the e2e suite tests the flatpak and polkit
     // paths without installing either, and resolving only from `/usr/bin` broke
     // that. A device never takes this branch — `set_trust_environment` is off
-    // unless `--no-restrict-ipc-peers` was passed, and `shepherd install
+    // unless `--no-restrict-ipc-peers` was passed, and `lunchbox install
     // sway-config` strips that flag.
     let resolved = environment_is_trusted()
         .then(|| search_path(name))
@@ -149,7 +149,7 @@ pub fn resolve(name: &str) -> PathBuf {
     resolved
 }
 
-/// The absolute path to one of shepherd's **own** binaries.
+/// The absolute path to one of lunchbox's **own** binaries.
 ///
 /// A sibling of the running daemon first, which is where both an install and a
 /// `cargo build` put them, then a trusted system directory. Never the bare
@@ -169,7 +169,7 @@ pub fn resolve_daemon_sibling(name: &str) -> PathBuf {
 
 /// A [`std::process::Command`] for helper `name`, resolved (issue #144).
 ///
-/// The way shepherd should spawn anything it chose itself. `Command::new` is
+/// The way lunchbox should spawn anything it chose itself. `Command::new` is
 /// banned workspace-wide (see `clippy.toml`) precisely so that reaching for it
 /// is a deliberate act with a comment attached, rather than the default.
 #[allow(clippy::disallowed_methods)]
@@ -263,7 +263,7 @@ mod tests {
         // lookup back to an environment an activity controls, which is the
         // entire bug; an absolute path under a root-owned directory fails the
         // same way a missing tool always did.
-        let p = resolve("shepherd-no-such-helper-exists");
+        let p = resolve("lunchbox-no-such-helper-exists");
         assert!(p.is_absolute(), "missing helper resolved to a bare name");
         assert_eq!(p.parent().unwrap(), Path::new(FALLBACK_DIR));
     }
@@ -283,18 +283,18 @@ mod tests {
     #[test]
     fn environment_overrides_are_refused_unless_development_says_otherwise() {
         // Default-off is the property that matters: a device that never calls
-        // `set_trust_environment` cannot be steered by `SHEPHERD_*_BIN`, which
+        // `set_trust_environment` cannot be steered by `LUNCHBOX_*_BIN`, which
         // is what an activity would reach for after `~/.pam_environment`.
-        unsafe { std::env::set_var("SHEPHERD_TEST_HELPER_BIN", "/home/kiosk/evil") };
+        unsafe { std::env::set_var("LUNCHBOX_TEST_HELPER_BIN", "/home/kiosk/evil") };
         set_trust_environment(false);
-        assert_eq!(env_override("SHEPHERD_TEST_HELPER_BIN"), None);
+        assert_eq!(env_override("LUNCHBOX_TEST_HELPER_BIN"), None);
 
         set_trust_environment(true);
         assert_eq!(
-            env_override("SHEPHERD_TEST_HELPER_BIN"),
+            env_override("LUNCHBOX_TEST_HELPER_BIN"),
             Some(PathBuf::from("/home/kiosk/evil"))
         );
         set_trust_environment(false);
-        unsafe { std::env::remove_var("SHEPHERD_TEST_HELPER_BIN") };
+        unsafe { std::env::remove_var("LUNCHBOX_TEST_HELPER_BIN") };
     }
 }

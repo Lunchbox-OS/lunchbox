@@ -338,7 +338,7 @@ fn stop_scope(args: impl Iterator<Item = OsString>) -> ExitCode {
 ///   a session rather than to a uid.
 ///
 /// The session is **derived, never passed**. The polkit rule admits the
-/// `shepherd-firewall` group, which is the kiosk user, so an argument here
+/// `lunchbox-firewall` group, which is the kiosk user, so an argument here
 /// would be attacker-chosen. Reading it from this process's own cgroup -- which
 /// is the caller's, inherited through `pkexec`, before `systemd-run` moves
 /// anything -- means a caller can only ever name the session it is actually in.
@@ -572,12 +572,12 @@ mod tests {
 
     #[test]
     fn scope_name_must_end_in_scope() {
-        assert!(is_valid_scope_name("shepherd-abc.scope"));
-        assert!(is_valid_scope_name("shepherd-1234567890abcdef.scope"));
-        assert!(!is_valid_scope_name("shepherd-abc"));
-        assert!(!is_valid_scope_name("shepherd abc.scope"));
+        assert!(is_valid_scope_name("lunchbox-abc.scope"));
+        assert!(is_valid_scope_name("lunchbox-1234567890abcdef.scope"));
+        assert!(!is_valid_scope_name("lunchbox-abc"));
+        assert!(!is_valid_scope_name("lunchbox abc.scope"));
         assert!(!is_valid_scope_name(".scope"));
-        assert!(!is_valid_scope_name("../shepherd.scope"));
+        assert!(!is_valid_scope_name("../lunchbox.scope"));
     }
 
     #[test]
@@ -644,7 +644,7 @@ mod tests {
         // The value reaches an argv, so it is held to logind's shape rather
         // than trusted for coming from the kernel.
         for cgroup in [
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/shepherd-abc.scope\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/lunchbox-abc.scope\n",
             "0::/system.slice/lunchbox-stated@kiosk.service\n",
             "0::/user.slice/user-1000.slice/session-.scope\n",
             "0::/user.slice/user-1000.slice/session-2;rm.scope\n",

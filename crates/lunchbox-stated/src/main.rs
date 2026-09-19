@@ -1,4 +1,4 @@
-//! `lunchbox-stated` — custodian for shepherd's policy and state (issue #157).
+//! `lunchbox-stated` — custodian for lunchbox's policy and state (issue #157).
 //!
 //! lunchboxd runs inside the kiosk session, as the same uid as every activity
 //! it launches. So do its files: `lunchboxd.db`, `config.toml`, the BLE admin
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
                     action = "org.freedesktop.login1.manage",
                     "polkit refuses this daemon the right to end a session, so the watchdog \
                      cannot fire. Install \
-                     /etc/polkit-1/rules.d/50-shepherd-session-guard.rules (issue #172)"
+                     /etc/polkit-1/rules.d/50-lunchbox-session-guard.rules (issue #172)"
                 ),
                 polkit::Authority::Unknown(why) => warn!(
                     %why,

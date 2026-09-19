@@ -6,7 +6,7 @@ license.workspace = true
 description = "GTK4 launcher UI for lunchboxd - main grid interface"
 
 [[bin]]
-name = "shepherd-launcher"
+name = "lunchbox-launcher"
 path = "src/main.rs"
 
 [dependencies]
