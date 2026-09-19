@@ -655,6 +655,51 @@ jobs:
           fi
           echo "OK: no conffiles, and no shipped bluetoothd drop-in"
 
+      # Everything above asserted against exactly what `shepherd package deb`
+      # produced; the rename happens only now, so the checks never see a name
+      # this project would not ship.
+      #
+      # The marker goes in the filename and not the package: dpkg reads the
+      # control file, so `Version:` stays 0.5.1 and nothing installing this is
+      # misled. It exists because the name dpkg generates carries only version
+      # and architecture -- every PR produces an identical
+      # `shepherd-launcher_0.5.1_amd64.deb`, and two of them in a downloads
+      # folder are indistinguishable.
+      - name: Name the .deb after the PR that built it
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          origin="${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || 'main' }}"
+          debs=(dist/pkg/*.deb)
+          deb="${debs[0]}"
+          # From the control file rather than by unpicking the filename, so a
+          # renamed package or a new arch needs no change here.
+          pkg="$(dpkg-deb -f "$deb" Package)"
+          version="$(dpkg-deb -f "$deb" Version)"
+          arch="$(dpkg-deb -f "$deb" Architecture)"
+          new="dist/pkg/${pkg}_${version}+${origin}.g${sha:0:7}_${arch}.deb"
+          mv "$deb" "$new"
+          ls -l "$new"
+
+      # A reviewer can install this on a real device, which is the only way to
+      # see packaging behaviour -- the postinst, the generated sway config, the
+      # udev and polkit rules -- actually working.
+      #
+      # Worth knowing before that becomes routine: this .deb is unsigned, and
+      # its postinst runs as root. While pull requests come from this repository
+      # that is the same trust as running the branch locally. The first pull
+      # request from a fork changes it, and this upload would then be handing
+      # reviewers root-executing code from an unreviewed branch; gate it on
+      # `github.event.pull_request.head.repo.full_name == github.repository` if
+      # that day comes.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || 'main' }}
+          path: dist/pkg/*.deb
+          retention-days: 14
+          if-no-files-found: error
+
   versions:
     name: Version harmony
     # No custom image needed: the default job container (node:20-bookworm) has
