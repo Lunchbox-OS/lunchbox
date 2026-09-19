@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish .deb file(s) to Forgejo's Debian package registry, so users can
-# `apt update && apt install lunchbox-launcher` and get `apt upgrade` on future
+# `apt update && apt install lunchbox` and get `apt upgrade` on future
 # releases. This is complementary to upload-release-asset.sh: the release still
 # carries the .deb + .sha256 as an offline/manual download; this adds the hosted
 # apt-repository path.

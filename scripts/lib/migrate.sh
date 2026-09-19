@@ -136,6 +136,9 @@ _migrate_system_files() {
     do
         [[ -e "$f" ]] || continue
         if path_owned_by_dpkg "$f"; then
+            # Only reachable on a from-source install over a packaged one. The
+            # `lunchbox` package declares Conflicts/Replaces on
+            # `shepherd-launcher`, so an apt upgrade has already removed these.
             warn "  Leaving $f (owned by an installed package)."
             warn "    Remove the old package with: sudo apt purge shepherd-launcher"
             continue

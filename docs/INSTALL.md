@@ -23,11 +23,11 @@ echo "deb [signed-by=/etc/apt/keyrings/lunchbox-os.asc] \
 https://apt.lunchbox-os.com stable main" \
   | sudo tee /etc/apt/sources.list.d/lunchbox.list
 sudo apt update
-sudo apt install lunchbox-launcher
+sudo apt install lunchbox
 ```
 
 `apt` pulls in the runtime dependencies (Sway, mpv, BlueZ, …) from the Ubuntu
-archive; the Lunchbox repository only carries `lunchbox-launcher` itself. Post-
+archive; the Lunchbox repository only carries `lunchbox` itself. Post-
 install (package contents, per-user setup) is identical to the standalone `.deb`
 below — continue with the `lunchbox-admin setup-user` step described there.
 
@@ -40,7 +40,7 @@ Download the `.deb` for the version you want and install it with `apt`, which
 also pulls in the runtime dependencies (Sway, mpv, BlueZ, …):
 
 ```sh
-sudo apt install ./lunchbox-launcher_0.2.0_amd64.deb
+sudo apt install ./lunchbox_0.2.0_amd64.deb
 ```
 
 The package installs the binaries, the privileged firewall helper and its
@@ -831,7 +831,7 @@ sudo ./scripts/lunchbox uninstall all
 sudo ./scripts/lunchbox uninstall all --restore-to-home
 ```
 
-(If you installed the `.deb`, use `sudo apt-get remove lunchbox-launcher`
+(If you installed the `.deb`, use `sudo apt-get remove lunchbox`
 instead. Since issue #177 that takes the sway config and the udev and polkit
 rules with it — they are Lunchbox's files, not conffiles the admin owns — while
 leaving `/etc/sway/lunchbox.conf.d/` and the state custodian's data alone.)
@@ -858,13 +858,13 @@ sidecars that stop working (no polkit or udev rule).
 Compare what dpkg thinks it installed against what is on disk:
 
 ```sh
-dpkg-query -L lunchbox-launcher | xargs -d '\n' ls -ld 2>&1 | grep -i 'no such'
+dpkg-query -L lunchbox | xargs -d '\n' ls -ld 2>&1 | grep -i 'no such'
 ```
 
 Restore the missing ones:
 
 ```sh
-sudo apt install --reinstall lunchbox-launcher
+sudo apt install --reinstall lunchbox
 ```
 
 The package declares no *conffiles* (issue #177), so a plain `--reinstall` puts

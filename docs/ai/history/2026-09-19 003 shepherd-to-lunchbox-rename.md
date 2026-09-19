@@ -2,8 +2,9 @@
 
 > Status: **done**, 2026-09-19. The tree builds, lints and tests clean, both
 > Android apps build, and a headless session boots the launcher under
-> `com.lunchboxos.launcher`. Two follow-ups are listed at the end — both are
-> infrastructure that has to exist in the world, not code.
+> `com.lunchboxos.launcher`. One follow-up is left at the end, and it is
+> infrastructure that has to exist in the world rather than code: the
+> `lunchbox-os.com` hosts the docs and packages now point at.
 
 ## Prompt
 
@@ -275,7 +276,20 @@ does not link.
    `release.yml.disabled` next to the existing "decide where releases live".
    The F-Droid `fingerprint` in `INSTALL.md` stays valid across the move — it
    pins the repository signing key, not the host.
-2. **The `.deb` is still `lunchbox-launcher`**, a faithful 1:1 rename of
-   `shepherd-launcher`. Now that the repo is just `lunchbox`, `-launcher` may
-   be redundant; renaming the package again is a separate decision with its own
-   apt-upgrade consequences, so it was left alone.
+2. ~~The `.deb` is still `lunchbox-launcher`.~~ **Resolved: the package is
+   `lunchbox`.** Three things decided it. The package ships *thirteen*
+   binaries -- the daemon, the launcher, the HUD, the lock, the media player,
+   the pairing display, three bridges, the validator, the admin CLI, the
+   firewall helper and the custodian -- so naming it after the grid UI named
+   the whole system after one of its parts. `-launcher` was there to dodge a
+   collision anyway: `shepherd` is taken in the Ubuntu archive (GNU Daemon
+   Shepherd), while `lunchbox` is free. And nothing had ever been published
+   under `lunchbox-launcher` -- the 18 release tags all shipped as
+   `shepherd-launcher` to the old Forgejo registry -- so the rename cost
+   nothing, exactly like the application ID, and the window closes at the
+   first release.
+
+   The package also declares `Conflicts: shepherd-launcher` and
+   `Replaces: shepherd-launcher`, so apt removes the pre-rename package as
+   part of installing this one. That is the half `migrate.sh` cannot do: it
+   declines to touch dpkg-owned files and can only say so.

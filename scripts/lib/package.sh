@@ -428,6 +428,13 @@ _package_write_control() {
     # release that introduced the helper; every dpkg lunchbox runs on is far
     # newer, so this is a formality rather than a real constraint.
     #
+    # Conflicts + Replaces on `shepherd-launcher`: the pre-rename package owns
+    # the same /usr/bin and /usr/libexec paths under the old names, so a device
+    # upgrading from the old forge would otherwise end up with both installed
+    # and two sets of binaries on PATH. Declaring both makes apt remove the old
+    # one as part of installing this, which is the half `migrate.sh` cannot do
+    # -- it can only decline to touch dpkg-owned files and say so.
+    #
     # Installed-Size in KiB (Debian policy: excludes the control area).
     local size
     size="$(du -ks "$stage" | cut -f1)"
@@ -443,6 +450,8 @@ Homepage: https://lunchbox-os.com
 Depends: $depends
 Pre-Depends: dpkg (>= 1.15.7.2)
 Suggests: $suggests
+Conflicts: shepherd-launcher
+Replaces: shepherd-launcher
 Installed-Size: $size
 Description: Parent-guided kiosk desktop environment for Wayland
  Lunchbox provides supervised, time-scoped access to the

@@ -663,7 +663,7 @@ jobs:
       # control file, so `Version:` stays 0.5.1 and nothing installing this is
       # misled. It exists because the name dpkg generates carries only version
       # and architecture -- every PR produces an identical
-      # `lunchbox-launcher_0.5.1_amd64.deb`, and two of them in a downloads
+      # `lunchbox_0.5.1_amd64.deb`, and two of them in a downloads
       # folder are indistinguishable.
       - name: Name the .deb after the PR that built it
         shell: bash

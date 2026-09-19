@@ -26,7 +26,7 @@ source "$INSTALL_LIB_DIR/migrate.sh"
 # Distro package name. Lives here rather than in package.sh because the
 # uninstall path needs it to point at `apt purge`, and package.sh sources
 # this file (not the other way round).
-DISTRO_PACKAGE_NAME="lunchbox-launcher"
+DISTRO_PACKAGE_NAME="lunchbox"
 
 # Where a packaged install keeps the data files that have no repo to come from
 # (the example config, the media library, VERSION, and the bluetoothd drop-in
@@ -1310,7 +1310,7 @@ UNINSTALL_SKIPPED_OWNED=0
 # straight back to the greeter.
 #
 # The package declares no conffiles (issue #177), so everything it ships is an
-# ordinary file and `apt install --reinstall lunchbox-launcher` puts the lot
+# ordinary file and `apt install --reinstall lunchbox` puts the lot
 # back. That was not true while the four files below were conffiles: dpkg read
 # a missing conffile as a deliberate admin removal and needed --force-confmiss
 # to restore it. See docs/INSTALL.md.
