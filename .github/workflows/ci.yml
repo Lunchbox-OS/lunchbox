@@ -46,19 +46,50 @@ env:
 #     Per-job keys let each keep its own incremental artifacts.
 
 jobs:
-  images:
-    name: CI images
-    uses: ./.github/workflows/images.yml
+  # One call per image, not one call building all three. `needs:` on a
+  # reusable-workflow call is all-or-nothing, so while these were a single call
+  # every job waited for every image: on a cold build the base was ready at
+  # 16:14:35 and nothing started until 16:20:11, because the Android and cross
+  # layers (and the outputs-settling job that is now gone) had to finish first.
+  # 5m36s of idling for jobs that only ever wanted the base image.
+  image-base:
+    name: CI image
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: base
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-android:
+    name: CI image (Android)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: android
+      base-ref: ${{ needs.image-base.outputs.ref }}
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-cross:
+    name: CI image (arm64 cross)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: cross
+      base-ref: ${{ needs.image-base.outputs.ref }}
+      target-arch: arm64
     permissions:
       packages: write
     secrets: inherit
 
   warmup:
     name: Warm cargo registry
-    needs: images
+    needs: image-base
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -86,10 +117,10 @@ jobs:
 
   build:
     name: Build
-    needs: [images, warmup]
+    needs: [image-base, warmup]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -169,13 +200,13 @@ jobs:
     # gates outside the wasm crate, so a second clippy target would cost
     # minutes per PR to re-report what the amd64 `lint` job already says.
     # Measurements: docs/ai/history/2026-09-04 002.
-    needs: [images, warmup]
+    needs: [image-cross, warmup]
     runs-on: ubuntu-latest
     container:
       # The cross image, not the base one: it carries the cross toolchain and
       # the arm64 sysroot, and is 1.5-2.5 GB larger. Only this job and the
       # arm64 leg of `package` pull it.
-      image: ${{ needs.images.outputs.cross-ref }}
+      image: ${{ needs.image-cross.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -185,16 +216,16 @@ jobs:
         # nothing after it can succeed, and what it fails with points
         # somewhere else entirely -- `rustc: command not found` when the
         # container is dropped (an empty image ref), or E0463 "can't find
-        # crate for `core`" when the container is some other image. Both were seen on run 462 against
+        # crate for `core`" when the container is some other image. Both were seen on Forgejo run 462 against
         # a cross image that was published and correct, so the ref itself is
         # printed: it is the one fact the rest of the log cannot recover.
         shell: sh
         env:
-          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
         run: |
           echo "cross-ref: '$CROSS_REF'"
           if [ -z "$CROSS_REF" ]; then
-            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
             exit 1
           fi
           if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
@@ -274,10 +305,10 @@ jobs:
     # The cost is that `Clippy` is no longer a separate check. It was not on the
     # critical path either way (that is `warmup` -> `Package (arm64)`), so this
     # does not lengthen a run.
-    needs: [images, warmup]
+    needs: [image-base, warmup]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -347,10 +378,10 @@ jobs:
 
   e2e:
     name: E2E
-    needs: [images, warmup, build]
+    needs: [image-base, warmup, build]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -395,10 +426,10 @@ jobs:
 
   fmt:
     name: Rustfmt
-    needs: images
+    needs: image-base
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -471,7 +502,11 @@ jobs:
     # xz assertion. The two legs differ only in the image and the --arch value:
     # `dpkg-deb -I` and `ar t` are arch-agnostic. (The legs always pass --arch,
     # so the no---arch default is checked separately, in the arch-neutral job.)
-    needs: [images, warmup]
+    # Both images: the matrix picks the cross one for arm64 and the base one for
+    # amd64, and a single job cannot depend on a different thing per matrix leg.
+    # So the amd64 leg still waits for the cross image. Splitting the matrix in
+    # two would fix that at the cost of duplicating every assertion below.
+    needs: [image-base, image-cross, warmup]
     runs-on: ubuntu-latest
     strategy:
       # Don't let one architecture's failure hide the other's result.
@@ -482,7 +517,7 @@ jobs:
       # arm64 needs the cross image (toolchain + sysroot); amd64 builds
       # natively in the base one. Selected here rather than in the matrix
       # because `container:` is where both `needs` and `matrix` are available.
-      image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
+      image: ${{ matrix.arch == 'arm64' && needs.image-cross.outputs.ref || needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -494,16 +529,16 @@ jobs:
         # somewhere else entirely -- `rustc: command not found` when the
         # container is dropped (an empty image ref), or E0463 "can't find
         # crate for `core`" when the image expression above falls through: an empty cross-ref makes
-        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on run 462 against
+        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on Forgejo run 462 against
         # a cross image that was published and correct, so the ref itself is
         # printed: it is the one fact the rest of the log cannot recover.
         shell: sh
         env:
-          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
         run: |
           echo "cross-ref: '$CROSS_REF'"
           if [ -z "$CROSS_REF" ]; then
-            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
             exit 1
           fi
           if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
@@ -634,7 +669,7 @@ jobs:
 
   firewall:
     name: Firewall E2E
-    needs: [images, build]
+    needs: [image-base, build]
     runs-on: ubuntu-latest
     # The test (crates/shepherd-e2e/tests/firewall_real.rs) needs systemd
     # as PID1 + polkit + dbus + a writable cgroup hierarchy + the BPF
@@ -669,7 +704,7 @@ jobs:
 
       - name: Run firewall_real in a privileged systemd sidecar
         env:
-          IMAGE_REF: ${{ needs.images.outputs.base-ref }}
+          IMAGE_REF: ${{ needs.image-base.outputs.ref }}
         run: |
           set -euo pipefail
 
@@ -816,10 +851,10 @@ jobs:
     # /opt/android-sdk (with ANDROID_SDK_ROOT set), so there's no per-run
     # toolchain download. Only the Gradle/Maven dep cache — which churns
     # with build.gradle edits — rides on actions/cache.
-    needs: images
+    needs: image-android
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.android-ref }}
+      image: ${{ needs.image-android.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -865,10 +900,10 @@ jobs:
     # set — so there's no per-run toolchain install. Unlike android-portability's
     # `cargo check` of the core, this fully builds and links the cdylib against
     # the vendored libmpv.
-    needs: images
+    needs: image-android
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.android-ref }}
+      image: ${{ needs.image-android.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -907,10 +942,10 @@ jobs:
 
   config-editor:
     name: Config editor
-    needs: [images, warmup]
+    needs: [image-base, warmup]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

@@ -89,12 +89,39 @@ jobs:
         run: ./scripts/shepherd version check
 
   # --------------------------------------------------------------------------
-  # images: build-if-missing the pre-baked CI images and expose their refs.
+  # images: build-if-missing the pre-baked CI images and expose their refs. One
+  # call per image, so a job waits only for the image it pulls -- see the note in
+  # ci.yml, and image.yml's own header, for why that is worth the three calls.
   # --------------------------------------------------------------------------
-  images:
-    name: CI images
+  image-base:
+    name: CI image
     needs: guard
-    uses: ./.github/workflows/images.yml
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: base
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-android:
+    name: CI image (Android)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: android
+      base-ref: ${{ needs.image-base.outputs.ref }}
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-cross:
+    name: CI image (arm64 cross)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: cross
+      base-ref: ${{ needs.image-base.outputs.ref }}
+      target-arch: arm64
     permissions:
       packages: write
     secrets: inherit
@@ -109,7 +136,9 @@ jobs:
     # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
     # catches that locally.
     name: Build .deb (${{ matrix.arch }})
-    needs: [guard, images]
+    # Both images: the matrix picks the cross one for arm64 and the base one for
+    # amd64, and a single job cannot depend on a different thing per matrix leg.
+    needs: [guard, image-base, image-cross]
     runs-on: ubuntu-latest
     strategy:
       # Publish whichever architecture succeeded rather than losing both to
@@ -120,7 +149,7 @@ jobs:
     container:
       # arm64 is cross-compiled on this amd64 runner and so needs the cross
       # image; amd64 builds natively in the base one.
-      image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
+      image: ${{ matrix.arch == 'arm64' && needs.image-cross.outputs.ref || needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -132,16 +161,16 @@ jobs:
         # somewhere else entirely -- `rustc: command not found` when the
         # container is dropped (an empty image ref), or E0463 "can't find
         # crate for `core`" when the image expression above falls through: an empty cross-ref makes
-        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on run 462 against
+        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on Forgejo run 462 against
         # a cross image that was published and correct, so the ref itself is
         # printed: it is the one fact the rest of the log cannot recover.
         shell: sh
         env:
-          CROSS_REF: ${{ needs.images.outputs.cross-ref }}
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
         run: |
           echo "cross-ref: '$CROSS_REF'"
           if [ -z "$CROSS_REF" ]; then
-            echo "::error::needs.images.outputs.cross-ref is empty, so this job is not running in the arm64 cross image. The image jobs succeeded but their output did not arrive; re-run the workflow."
+            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
             exit 1
           fi
           if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
@@ -211,10 +240,10 @@ jobs:
   # --------------------------------------------------------------------------
   config-editor:
     name: Config editor (Cloudflare Pages)
-    needs: [guard, images]
+    needs: [guard, image-base]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.base-ref }}
+      image: ${{ needs.image-base.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -278,10 +307,10 @@ jobs:
   # --------------------------------------------------------------------------
   apk:
     name: Build .apk (${{ matrix.module.name }})
-    needs: [guard, images]
+    needs: [guard, image-android]
     runs-on: ubuntu-latest
     container:
-      image: ${{ needs.images.outputs.android-ref }}
+      image: ${{ needs.image-android.outputs.ref }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
