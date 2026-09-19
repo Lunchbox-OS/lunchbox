@@ -359,7 +359,11 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
   `POST /files/move` takes one too, as `from_handle`, and that is the better
   half: renaming such a file to something typable is the *repair* — it keeps
   the file and makes every other route work on it again — where deleting it is
-  only the bin. There is deliberately no handle for a move's `to`: a
+  only the bin. The same handle moves it to another folder, and the UI asks
+  before it does: a destination can only ever be something typable, so a move
+  renames the file whether or not that was the intention, and on the drive it
+  came from the `é` in `café.mp3` becomes three bytes of nonsense. The two
+  names render identically, so nothing about the result would show it. There is deliberately no handle for a move's `to`: a
   destination is always something the caller typed, and a move that could name
   an unreachable target would be a way to create files nothing can reach.
 

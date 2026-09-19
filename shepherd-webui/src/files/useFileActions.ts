@@ -43,6 +43,14 @@ export interface Move {
   toDir: string;
   /** Replace what is already there. Only ever true after somebody was asked. */
   overwrite?: boolean;
+  /**
+   * For a row whose name is not text: the bytes the listing gave it.
+   *
+   * `from` stays the entry's (lossy) path, because that is still what names
+   * the destination and the cache keys; only the request's source is sent as
+   * the folder instead.
+   */
+  handle?: string;
 }
 
 export interface Delete {
@@ -87,8 +95,16 @@ export function useFileActions(forgetSubtree: (key: NodeKey) => void) {
   });
 
   const move = useMutation({
-    mutationFn: ({ rootId, from, toDir, overwrite }: Move) =>
-      moveEntry(rootId, from, joinPath(toDir, basename(from)), overwrite ?? false),
+    mutationFn: ({ rootId, from, toDir, overwrite, handle }: Move) =>
+      moveEntry(
+        rootId,
+        // With a handle the request's source is the folder; the handle says
+        // which entry inside it.
+        handle ? parentPath(from) : from,
+        joinPath(toDir, basename(from)),
+        overwrite ?? false,
+        handle,
+      ),
     onSuccess: (_data, { rootId, from, toDir }) => {
       // Both ends: the folder it left and the folder it arrived in.
       void refresh.directory(nodeKey(rootId, parentPath(from)));

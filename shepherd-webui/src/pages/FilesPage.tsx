@@ -196,8 +196,24 @@ export function FilesPage() {
     (source: Row, target: Row, overwrite = false) => {
       if (source.kind !== "entry") return;
       const { rootId, dir } = moveDestination(target);
+      // A name that is not text cannot travel unchanged: the destination has
+      // to be typed, and the nearest typable thing is the ? the name is drawn
+      // with. That really does discard the original — on the drive it came
+      // from, the é in `café.mp3` becomes three bytes of nonsense — so it is
+      // asked rather than assumed. `overwrite` means this is the second pass
+      // of a clash, which has been through here once already.
+      const handle = source.entry.handle;
+      if (handle && !overwrite) {
+        const proceed = window.confirm(
+          `${source.entry.name} has a name this device cannot type, so moving it ` +
+            `has to rename it. The original name — which may still read correctly ` +
+            `on the computer that wrote it — will be lost. Rename it yourself first ` +
+            `if you want to choose the new name. Move it anyway?`,
+        );
+        if (!proceed) return;
+      }
       actions.move.mutate(
-        { rootId, from: source.path, toDir: dir, overwrite },
+        { rootId, from: source.path, toDir: dir, overwrite, handle },
         {
           onSuccess: () => {
             setMovingRow(null);

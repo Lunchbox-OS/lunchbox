@@ -677,6 +677,64 @@ async fn a_file_whose_name_is_not_text_can_be_given_one_that_is() {
     assert!(entry.get("handle").is_none());
 }
 
+/// The same handle, used to move rather than to rename.
+///
+/// One route serves both, so this is really asserting that a destination in
+/// another folder is not a special case — but it is the case a person reaches
+/// by dragging, and it is worth having the byte-level outcome written down:
+/// the file keeps its contents and loses its name, because a destination can
+/// only ever be something typable.
+#[tokio::test]
+async fn moving_an_un_typable_name_keeps_the_bytes_and_not_the_name() {
+    let (dir, app) = fixture();
+    std::fs::create_dir_all(dir.path().join("Books/Albums")).unwrap();
+    let raw = b"caf\xe9.mp3";
+    let name = std::ffi::OsStr::from_bytes(raw);
+    std::fs::write(dir.path().join("Books").join(name), b"a song").unwrap();
+
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books")).await;
+    let handle = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["unusable"] == "name_not_utf8")
+        .expect("not listed")["handle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body, _) = send(
+        &app,
+        post(
+            "/api/v1/files/move",
+            serde_json::json!({
+                "root": "home",
+                "from": "Books",
+                // The lossy rendering, which is the only thing a client can
+                // type for it. U+FFFD, three bytes, and nothing like the é the
+                // drive was holding.
+                "to": "Books/Albums/caf\u{fffd}.mp3",
+                "from_handle": handle,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("Books/Albums/caf\u{fffd}.mp3")).unwrap(),
+        "a song",
+        "the contents did not survive the move"
+    );
+    assert!(!dir.path().join("Books").join(name).exists());
+    // And it is addressable now, which is the consolation for the name.
+    let (_, body, _) = send(&app, get("/api/v1/files/list?root=home&path=Books/Albums")).await;
+    let moved = body["entries"].as_array().unwrap();
+    assert_eq!(moved.len(), 1);
+    assert!(moved[0]["unusable"].is_null(), "still flagged: {body}");
+    assert!(moved[0].get("handle").is_none());
+}
+
 #[tokio::test]
 async fn a_forged_handle_is_no_better_on_the_move_route() {
     let (dir, app) = fixture();

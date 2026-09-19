@@ -573,8 +573,75 @@ describe("the file tree", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Move" }));
 
     await waitFor(() =>
-      expect(moveEntry).toHaveBeenCalledWith("home", "hobbit.epub", "Books/hobbit.epub", false),
+      expect(moveEntry).toHaveBeenCalledWith(
+        "home",
+        "hobbit.epub",
+        "Books/hobbit.epub",
+        false,
+        // No handle: an ordinary name travels as itself.
+        undefined,
+      ),
     );
+  });
+
+  it("moves a file whose name is not text, once the loss is accepted", async () => {
+    await renderPage();
+    const broken = file("caf\uFFFD.mp3", {
+      unusable: "name_not_utf8",
+      handle: "636166e92e6d7033",
+    });
+    listDirectory.mockImplementation(async (root: string, path: string) =>
+      path === "" ? listing(root, "", [folder("Books"), broken]) : listing(root, path, []),
+    );
+    moveEntry.mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for caf\uFFFD.mp3"));
+    await userEvent.click(screen.getByText("Move to…"));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText("Expand Home"));
+    await userEvent.click(await within(dialog).findByText("Books"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Move" }));
+
+    // Asked first, and in words that say what is lost -- the two names render
+    // identically, so nothing about the result would show it.
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("will be lost"));
+    await waitFor(() =>
+      expect(moveEntry).toHaveBeenCalledWith(
+        "home",
+        // The folder, with the handle naming the entry in it.
+        "",
+        "Books/caf\uFFFD.mp3",
+        false,
+        "636166e92e6d7033",
+      ),
+    );
+    confirm.mockRestore();
+  });
+
+  it("does not move it when the loss is refused", async () => {
+    await renderPage();
+    const broken = file("caf\uFFFD.mp3", {
+      unusable: "name_not_utf8",
+      handle: "636166e92e6d7033",
+    });
+    listDirectory.mockImplementation(async (root: string, path: string) =>
+      path === "" ? listing(root, "", [folder("Books"), broken]) : listing(root, path, []),
+    );
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    await openHome();
+    await userEvent.click(screen.getByLabelText("Actions for caf\uFFFD.mp3"));
+    await userEvent.click(screen.getByText("Move to…"));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByLabelText("Expand Home"));
+    await userEvent.click(await within(dialog).findByText("Books"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Move" }));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(moveEntry).not.toHaveBeenCalled();
+    confirm.mockRestore();
   });
 
   it("will not offer a destination the move would be refused from", async () => {

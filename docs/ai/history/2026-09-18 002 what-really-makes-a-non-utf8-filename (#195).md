@@ -144,6 +144,22 @@ validation cannot drift between them, and the forgery table is fired at both.
 There is deliberately **no handle for a move's `to`**. A destination is always
 something the caller typed, and a move that could name an unreachable target
 would be a way to *create* files nothing can reach — the opposite of the point.
+Nothing this API does can put a non-UTF-8 name on a disk, and that is worth
+keeping.
+
+The consequence has to be lived with rather than designed away: **moving such a
+file to another folder renames it**, to the lossy rendering, because that is the
+only thing a `to` can say. The bytes survive and the name does not — on the
+drive it came from, the `é` in `café.mp3` becomes three bytes of nonsense. Since
+the old and new names *render identically*, nothing about the outcome would show
+a person what happened, so the UI asks first and says what is lost. Renaming it
+yourself first is the way to choose the new name, and the confirmation says so.
+
+A subtlety found while wiring this up: the drag gesture and the **Move to…**
+menu item are both gated on `canRename`, so allowing rename by handle silently
+enabled two affordances that had no handle plumbed through them and answered
+`404`. Fixed in the same breath; worth noting because the gate is shared and
+the next person to widen one of these will widen all three.
 
 Download does not take one either. A file that cannot be named has no
 `Content-Disposition` to offer, and not being able to read it was never the gap;
