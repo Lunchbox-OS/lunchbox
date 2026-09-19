@@ -5,9 +5,10 @@ name: CI images
 # ci.yml and release.yml via `uses: ./.github/workflows/images.yml` so the
 # build-if-missing logic lives in exactly one place.
 #
-# Requires a `REGISTRY_TOKEN` secret (Forgejo PAT with package read+write);
-# callers pass it with `secrets: inherit`. See ci.yml for the DinD/runner
-# background these jobs depend on.
+# Publishes to GHCR (ghcr.io/aarmea/lunchbox-ci*). `permissions: packages:
+# write` plus the ambient GITHUB_TOKEN covers both build and push, so no PAT is
+# needed -- on Forgejo a `REGISTRY_TOKEN` was, because that registry 401'd the
+# ambient token on push.
 
 on:
   workflow_call:
@@ -33,45 +34,13 @@ jobs:
       packages: write
     outputs:
       ref: ${{ steps.tag.outputs.ref }}
-    # Job-level, not workflow-level: Forgejo's runner does not propagate a
+    # Job-level, not workflow-level: Forgejo's runner did not propagate a
     # reusable workflow's top-level `env:` into its jobs, which silently blanked
-    # CI_IMAGE_NAME and produced an invalid `:tag`-only image ref.
+    # CI_IMAGE_NAME and produced an invalid `:tag`-only image ref. GitHub does
+    # propagate it; kept job-level so the two forges behave identically.
     env:
-      CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
+      CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
     steps:
-      - name: Install docker CLI
-        # The default `runs-on: ubuntu-latest` job container
-        # (node:20-bookworm) has git but no docker CLI. Install
-        # docker.io so we can talk to the DinD daemon.
-        run: |
-          apt-get update
-          apt-get install -y docker.io
-
-      - name: Point DOCKER_HOST at the DinD bridge gateway
-        # The runner is configured with
-        # `container.docker_host: tcp://docker:2375`, which auto-
-        # provisions a docker:dind sidecar. The hostname `docker`
-        # only resolves on the docker-compose network the runner
-        # lives on — but job containers are children of the dind
-        # service and live on dind's own bridge network, where
-        # `docker` doesn't resolve. The dind daemon is reachable
-        # from a job container at the bridge gateway IP (which is
-        # the dind container itself, listening on 0.0.0.0:2375
-        # because the compose env sets DOCKER_TLS_CERTDIR="").
-        # `iproute2` was just pulled in as a transitive dep of the
-        # docker.io install above, so `ip route` is on PATH.
-        run: |
-          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
-          if [ -z "$gateway" ]; then
-            echo "::error::could not determine bridge gateway IP"
-            ip route || true
-            exit 1
-          fi
-          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=tcp://${gateway}:2375"
-
-      - uses: actions/checkout@v4
-
       - name: Compute image tag
         id: tag
         run: |
@@ -90,26 +59,13 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${ref}"
 
-      - name: Wait for DinD daemon
-        # Even after the sidecar is up, the daemon can take a few
-        # seconds before it answers requests. Poll until ready.
+      - name: Log in to GHCR
+        # GITHUB_TOKEN with `packages: write` is enough for ghcr.io, so this
+        # needs no PAT. On Forgejo it did: that instance authenticated the
+        # ambient token for read but 401'd on push.
         run: |
-          for _ in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "docker daemon ready at $DOCKER_HOST"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::docker daemon at $DOCKER_HOST never became ready."
-          echo "::error::Confirm the runner has container.docker_host: tcp://docker:2375 set"
-          echo "::error::and a docker:dind sidecar reachable from job containers."
-          exit 1
-
-      - name: Log in to Forgejo container registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login git.armeafamily.com \
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io \
                 --username "${{ github.actor }}" --password-stdin
 
       - name: Build and push if tag is missing
@@ -137,26 +93,8 @@ jobs:
     # See the note on the base image job: job-level env so CI_IMAGE_NAME
     # survives inside the reusable workflow.
     env:
-      CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
+      CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
     steps:
-      - name: Install docker CLI
-        run: |
-          apt-get update
-          apt-get install -y docker.io
-
-      - name: Point DOCKER_HOST at the DinD bridge gateway
-        run: |
-          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
-          if [ -z "$gateway" ]; then
-            echo "::error::could not determine bridge gateway IP"
-            ip route || true
-            exit 1
-          fi
-          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=tcp://${gateway}:2375"
-
-      - uses: actions/checkout@v4
-
       - name: Compute image tag
         id: tag
         env:
@@ -178,22 +116,13 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${ref}"
 
-      - name: Wait for DinD daemon
+      - name: Log in to GHCR
+        # GITHUB_TOKEN with `packages: write` is enough for ghcr.io, so this
+        # needs no PAT. On Forgejo it did: that instance authenticated the
+        # ambient token for read but 401'd on push.
         run: |
-          for _ in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "docker daemon ready at $DOCKER_HOST"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::docker daemon at $DOCKER_HOST never became ready."
-          exit 1
-
-      - name: Log in to Forgejo container registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login git.armeafamily.com \
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io \
                 --username "${{ github.actor }}" --password-stdin
 
       - name: Build and push if tag is missing
@@ -205,8 +134,8 @@ jobs:
             echo "Image already published: $ref"
             exit 0
           fi
-          # Pull the base image explicitly so the dind daemon has it
-          # locally for the FROM (it may not be in the daemon's cache).
+          # Pull the base image explicitly so the daemon has it locally for
+          # the FROM (it may not be in the daemon's cache).
           docker pull "$BASE_REF"
           docker build \
             --build-arg BASE_IMAGE="$BASE_REF" \
@@ -229,27 +158,9 @@ jobs:
     # See the note on the base image job: job-level env so CI_IMAGE_NAME
     # survives inside the reusable workflow.
     env:
-      CI_IMAGE_NAME: git.armeafamily.com/albert/shepherd-launcher-ci
+      CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
       TARGET_ARCH: arm64
     steps:
-      - name: Install docker CLI
-        run: |
-          apt-get update
-          apt-get install -y docker.io
-
-      - name: Point DOCKER_HOST at the DinD bridge gateway
-        run: |
-          gateway=$(ip route | awk '$1=="default"{print $3; exit}')
-          if [ -z "$gateway" ]; then
-            echo "::error::could not determine bridge gateway IP"
-            ip route || true
-            exit 1
-          fi
-          echo "DOCKER_HOST=tcp://${gateway}:2375" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=tcp://${gateway}:2375"
-
-      - uses: actions/checkout@v4
-
       - name: Compute image tag
         id: tag
         env:
@@ -272,22 +183,13 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${ref}"
 
-      - name: Wait for DinD daemon
+      - name: Log in to GHCR
+        # GITHUB_TOKEN with `packages: write` is enough for ghcr.io, so this
+        # needs no PAT. On Forgejo it did: that instance authenticated the
+        # ambient token for read but 401'd on push.
         run: |
-          for _ in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then
-              echo "docker daemon ready at $DOCKER_HOST"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::docker daemon at $DOCKER_HOST never became ready."
-          exit 1
-
-      - name: Log in to Forgejo container registry
-        run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login git.armeafamily.com \
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io \
                 --username "${{ github.actor }}" --password-stdin
 
       - name: Build and push if tag is missing
@@ -299,8 +201,8 @@ jobs:
             echo "Image already published: $ref"
             exit 0
           fi
-          # Pull the base image explicitly so the dind daemon has it locally
-          # for the FROM (it may not be in the daemon's cache).
+          # Pull the base image explicitly so the daemon has it locally for
+          # the FROM (it may not be in the daemon's cache).
           docker pull "$BASE_REF"
           docker build \
             --build-arg BASE_IMAGE="$BASE_REF" \

@@ -11,15 +11,24 @@ name: Release
 #
 # See docs/ai/history/2026-07-04 003 binary-releases.md for the full design.
 #
+# NOT YET PORTED TO GITHUB. The image pulls below now come from GHCR, but every
+# publishing step still targets the Forgejo instance, which still hosts the
+# releases, the apt registry and the F-Droid repo:
+#   * create-release + upload-release-asset.sh talk to the Forgejo release API
+#   * publish-apt.sh pushes into Forgejo's Debian package registry
+# A `v*` tag pushed to GitHub would therefore run these against
+# git.armeafamily.com. Decide where releases and the apt repo live before
+# tagging here.
+#
 # No cross-job artifacts: Forgejo doesn't implement the upload-artifact@v4
 # protocol (the runner reports as GHES and the action hard-fails). So instead of
 # a build→publish handoff, `create-release` makes the release first, then the
-# parallel `deb` and `apk` jobs each upload their own asset straight to it via
-# the Forgejo API (scripts/ci/upload-release-asset.sh, which also writes a
-# per-asset .sha256). This keeps the jobs parallel with zero artifact-backend
-# dependency.
+# parallel `deb` and `apk` jobs each upload their own asset straight to it.
+# GitHub *does* implement that protocol, so this constraint is lifted here --
+# see the speedup notes in the migration history doc.
 #
-# Secrets required (in addition to REGISTRY_TOKEN from ci.yml):
+# Secrets required (the CI images come from GHCR on the ambient GITHUB_TOKEN,
+# so there is no REGISTRY_TOKEN any more):
 #   RELEASE_TOKEN               repo-write PAT to create the release + upload
 #                               assets. (Not FORGEJO_*/GITEA_*/GITHUB_* — Forgejo
 #                               reserves those prefixes for secret names.)
@@ -161,7 +170,7 @@ jobs:
       image: ${{ matrix.arch == 'arm64' && needs.images.outputs.cross-ref || needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Assert this job got the arm64 cross image
         if: matrix.arch == 'arm64'
@@ -279,7 +288,7 @@ jobs:
       image: ${{ needs.images.outputs.base-ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       # The Pages project. Its production branch must be `main` for the deploy
       # below to publish to production rather than to a preview URL.
@@ -346,7 +355,7 @@ jobs:
       image: ${{ needs.images.outputs.android-ref }}
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.REGISTRY_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
