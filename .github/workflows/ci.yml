@@ -120,6 +120,36 @@ jobs:
       - name: Build
         run: ./scripts/shepherd build
 
+      # Hand target/debug to the two jobs that were compiling this same
+      # workspace again: `e2e`, which opened with its own
+      # `./scripts/shepherd build`, and `firewall`, which cannot reach
+      # actions/cache at all from inside its privileged container and so paid a
+      # full cold build on every run -- 6m42s, the longest job in the suite.
+      #
+      # Tarred rather than uploaded as a file tree, for two reasons:
+      # upload-artifact does not preserve the executable bit, and the e2e
+      # harness execs these binaries; and a tree of tens of thousands of small
+      # files uploads far slower than one stream. gzip -1 rather than zstd
+      # because zstd is not in the image's package set, and
+      # `compression-level: 0` so the artifact is not compressed a second time.
+      #
+      # `incremental/` is excluded: it is large and only accelerates a rebuild
+      # in the same directory, which no consumer does.
+      - name: Pack target/debug for e2e and firewall
+        run: |
+          tar -I 'gzip -1' -cf /tmp/target-debug.tar.gz \
+            --exclude=./target/debug/incremental \
+            -C "$GITHUB_WORKSPACE" ./target/debug
+          ls -lh /tmp/target-debug.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: target-debug
+          path: /tmp/target-debug.tar.gz
+          # Consumed within the run; nothing needs it afterwards.
+          retention-days: 1
+          compression-level: 0
+
   build-arm64:
     name: Build (arm64 cross)
     # Cross-compiles the workspace for arm64 on this amd64 runner. It is the
@@ -317,7 +347,7 @@ jobs:
 
   e2e:
     name: E2E
-    needs: [images, warmup]
+    needs: [images, warmup, build]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.images.outputs.base-ref }}
@@ -337,16 +367,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-v2-
 
-      - name: Cache build artifacts
-        uses: actions/cache@v4
+      # No target/ cache here any more, and no build either: `build` already
+      # compiled this workspace in this same run, and its artifact is always a
+      # hit where a cache could miss or be evicted. Worth 1.81 GB of the
+      # repository's 10 GB cache quota.
+      #
+      # This job is a container job, so its workspace is at the same absolute
+      # path as `build`'s (/__w/<repo>/<repo>). That matters: cargo's
+      # fingerprints record absolute paths, and unpacking somewhere else would
+      # make it rebuild everything the artifact just supplied.
+      - uses: actions/download-artifact@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-e2e-v2-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-e2e-v2-
+          name: target-debug
+          path: /tmp
 
-      - name: Build binaries (e2e harness execs them from target/debug)
-        run: ./scripts/shepherd build
+      - name: Unpack target/debug
+        run: |
+          tar -xf /tmp/target-debug.tar.gz -C "$GITHUB_WORKSPACE"
+          ls -l target/debug/shepherdd target/debug/shepherd-launcher
 
       - name: Run e2e tests
         run: cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
@@ -596,7 +634,7 @@ jobs:
 
   firewall:
     name: Firewall E2E
-    needs: images
+    needs: [images, build]
     runs-on: ubuntu-latest
     # The test (crates/shepherd-e2e/tests/firewall_real.rs) needs systemd
     # as PID1 + polkit + dbus + a writable cgroup hierarchy + the BPF
@@ -619,6 +657,15 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io \
                 --username "${{ github.actor }}" --password-stdin
+
+      # target/debug from `build`, so this job stops compiling the workspace
+      # inside the container. It is the one job that cannot use actions/cache
+      # for target/ -- the compile happens through `docker exec`, where the
+      # action cannot follow -- so it paid a full build every run.
+      - uses: actions/download-artifact@v4
+        with:
+          name: target-debug
+          path: /tmp
 
       - name: Run firewall_real in a privileged systemd sidecar
         env:
@@ -651,18 +698,31 @@ jobs:
             exit 1
           '
 
-          # Copy the workspace in. The runner job and the dind daemon
-          # do not share a filesystem, so `--volume` between them
-          # silently mounts the wrong path; tar-pipe over `docker exec`
-          # is the cleanest way across that boundary.
-          docker exec "$cid" mkdir -p /work
+          # Copy the workspace in. The runner job and the container do not
+          # share a filesystem, so `--volume` between them silently mounts the
+          # wrong path; tar-pipe over `docker exec` is the cleanest way across
+          # that boundary.
+          #
+          # It lands at /__w/<repo>/<repo>, not /work, and that is load-bearing
+          # now: it is the path a *container* job has its workspace at, so it is
+          # where `build` compiled, and cargo's fingerprints record absolute
+          # paths. Unpack target/debug anywhere else and cargo rebuilds the lot,
+          # which is the entire cost this artifact exists to avoid.
+          repo="${GITHUB_REPOSITORY##*/}"
+          ws="/__w/${repo}/${repo}"
+          echo "container workspace: $ws"
+          docker exec "$cid" mkdir -p "$ws"
           tar -c -C "$PWD" --exclude=./target --exclude=./.git . \
-            | docker exec -i "$cid" tar -xC /work
+            | docker exec -i "$cid" tar -xC "$ws"
 
-          # Build everything (webui + workspace) so the TestHarness has
-          # shepherdd, shepherd-launcher, shepherd-hud, and the firewall
-          # helper under target/debug. Then install the helper via the
-          # project's own installer (drops polkit policy + rule, creates
+          # target/debug from the `build` job, instead of compiling it here.
+          docker exec -i "$cid" tar -xf - -C "$ws" < /tmp/target-debug.tar.gz
+          docker exec "$cid" ls -l "$ws/target/debug/shepherdd"
+
+          # shepherdd, shepherd-launcher, shepherd-hud and the firewall helper
+          # are already under target/debug, unpacked above from `build`'s
+          # artifact -- this job no longer builds them. Install the helper via
+          # the project's own installer (drops polkit policy + rule, creates
           # the shepherd-firewall group, adds the test user to it).
           #
           # The helper rejects `--uid 0` to prevent a polkit-blessed user
@@ -674,8 +734,7 @@ jobs:
           # added by the installer) so polkit's isInGroup() check passes.
           docker exec "$cid" bash -c '
             set -euo pipefail
-            cd /work
-            ./scripts/shepherd build
+            cd "'"$ws"'"
 
             # First, the cgroup path (issue #151). `firewall_real` below
             # covers the Process kind, which wraps the launch in
@@ -732,14 +791,14 @@ jobs:
             # No apostrophes in this comment: the whole block is a
             # single-quoted argument to `bash -c`, so one would close the
             # string early. That is what broke run 4516.
-            chown -R tester:tester /work
+            chown -R tester:tester .
 
             runuser -u tester -- env \
               CARGO_HOME="$CARGO_HOME" \
               RUSTUP_HOME="$RUSTUP_HOME" \
               PATH="$PATH" \
               bash -c "
-                cd /work
+                cd '"$ws"'
                 cargo test -p shepherd-e2e --test firewall_real -- \
                   --include-ignored --test-threads=1 --nocapture
               "
@@ -878,13 +937,14 @@ jobs:
         working-directory: shepherd-webui
         run: npm run typecheck
 
-      # No upload-artifact here, deliberately. Forgejo does not implement the
-      # upload-artifact@v4 protocol — the runner reports as GHES and the action
-      # hard-fails — which release.yml's header already records, and which is
-      # why its own config-editor job builds the bundle itself rather than
-      # taking a handoff. Nothing consumes a bundle from CI, so there is nothing
-      # to hand off; this checks the build landed where it should instead.
+      # The bundle is uploaded now. It could not be on Forgejo: that runner
+      # reports as GHES and upload-artifact@v4 hard-fails against it, which is
+      # why release.yml's config-editor job rebuilds the bundle rather than
+      # taking a handoff. GitHub implements the protocol, so a release can reuse
+      # what a PR already built, and a reviewer can download the exact bundle a
+      # PR produces.
       #
+      # The check below stays regardless of the upload:
       # Worth checking rather than assuming: `output.distPath` in
       # rsbuild.config.ts is resolved relative to the working directory, so a
       # build run from the wrong cwd succeeds and writes somewhere else — and
@@ -900,6 +960,14 @@ jobs:
           stray=$(ls -A shepherd-webui/dist 2>/dev/null | grep -v '^\.gitkeep$' || true)
           test -z "$stray" || { echo "standalone build wrote into dist/: $stray" >&2; exit 1; }
           echo "[OK] standalone bundle built, dist/ untouched"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-editor-standalone
+          path: shepherd-webui/dist-standalone
+          # A static bundle: no executables, so the lost executable bit that
+          # forces the target/debug handoff to be tarred does not matter here.
+          retention-days: 7
 
   shellcheck:
     name: ShellCheck
