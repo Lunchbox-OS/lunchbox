@@ -532,6 +532,60 @@ EOF
         printf 'bluetoothd_default=%s\n' "$BLUETOOTHD_DEFAULT_PATH"
         cat <<'EOF'
 if [ "$1" = "configure" ]; then
+    # --- shepherd -> lunchbox migration ------------------------------------
+    #
+    # A POSIX-sh restatement of the essential steps in scripts/lib/migrate.sh,
+    # which the maintainer script cannot source (no repo on the target). Keep
+    # the two in sync.
+    #
+    # It runs FIRST, before the groupadd/useradd below. Renaming the group
+    # keeps its gid and therefore every existing membership and every file it
+    # owns; creating lunchbox-firewall first would leave the rename with both
+    # names present, which it then refuses to resolve on its own.
+    #
+    # Per-user directories (~/.config/shepherd and friends) are not here: the
+    # kiosk user is not known at package time. `lunchbox install all` and
+    # `lunchbox-admin setup-user` migrate those.
+    if getent group shepherd-firewall >/dev/null 2>&1 \
+       && ! getent group "$group" >/dev/null 2>&1; then
+        groupmod -n "$group" shepherd-firewall || true
+    fi
+    if getent passwd shepherd-state >/dev/null 2>&1 \
+       && ! getent passwd "$stated_user" >/dev/null 2>&1; then
+        usermod -l "$stated_user" shepherd-state || true
+        if getent group shepherd-state >/dev/null 2>&1 \
+           && ! getent group "$stated_user" >/dev/null 2>&1; then
+            groupmod -n "$stated_user" shepherd-state || true
+        fi
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        for u in $(systemctl list-units --all --no-legend 'shepherd-stated@*' \
+                    2>/dev/null | awk '{print $1}'); do
+            systemctl disable --now "$u" >/dev/null 2>&1 || true
+        done
+    fi
+    rm -f /etc/systemd/system/shepherd-stated@.socket \
+          /etc/systemd/system/shepherd-stated@.service
+    # Only onto a path that does not exist yet -- never clobber a real tree.
+    if [ -d /var/lib/shepherdd ] && [ ! -e /var/lib/lunchboxd ]; then
+        mv /var/lib/shepherdd /var/lib/lunchboxd || true
+    fi
+    for d in /var/lib/lunchboxd/state/*/; do
+        [ -d "$d" ] || continue
+        if [ -f "$d/shepherdd.db" ] && [ ! -e "$d/lunchboxd.db" ]; then
+            mv "$d/shepherdd.db" "$d/lunchboxd.db" || true
+        fi
+    done
+    rm -f /usr/share/polkit-1/actions/org.shepherd.firewall.policy \
+          /usr/share/polkit-1/rules.d/50-shepherd-firewall.rules \
+          /usr/share/polkit-1/rules.d/50-shepherd-session-guard.rules \
+          /etc/polkit-1/rules.d/50-shepherd-firewall.rules \
+          /etc/polkit-1/rules.d/50-shepherd-session-guard.rules \
+          /usr/lib/udev/rules.d/71-shepherd-uinput.rules \
+          /etc/udev/rules.d/71-shepherd-uinput.rules \
+          "$dropin_dir/10-shepherd-bluetooth-experimental.conf"
+    # --- end migration -----------------------------------------------------
+
     if ! getent group "$group" >/dev/null 2>&1; then
         groupadd --system "$group" || true
     fi

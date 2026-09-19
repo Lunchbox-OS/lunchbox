@@ -18,6 +18,11 @@ source "$INSTALL_LIB_DIR/build.sh"
 # shellcheck source=config.sh
 source "$INSTALL_LIB_DIR/config.sh"
 
+# Source the shepherd -> lunchbox migration, which `install all` runs before
+# it installs anything (see the call site for why the order matters).
+# shellcheck source=migrate.sh
+source "$INSTALL_LIB_DIR/migrate.sh"
+
 # Distro package name. Lives here rather than in package.sh because the
 # uninstall path needs it to point at `apt purge`, and package.sh sources
 # this file (not the other way round).
@@ -1243,6 +1248,14 @@ install_all() {
     validate_user "$user"
 
     info "Installing lunchbox-launcher (prefix: $prefix)..."
+
+    # Before anything is installed, not after. The migration moves a legacy
+    # device's state to the lunchbox paths, and it refuses to move onto a path
+    # that already exists -- so if `install_state` ran first and created an
+    # empty /var/lib/lunchboxd, the real state under /var/lib/shepherdd would
+    # be stranded there and the device would come up as if it were new.
+    # No-op on a device that was never a shepherd.
+    migrate_from_shepherd "$user" "$prefix"
 
     install_system "$prefix" "$user"
     install_config "$user" ""

@@ -1292,6 +1292,14 @@ setup_user() {
     require_root
     validate_user "$user"
 
+    # Before install_config, for the same reason install_all migrates first:
+    # this moves ~/.config/shepherd to ~/.config/lunchbox, and it will not move
+    # onto a directory that already exists. Writing the example config first
+    # would create that directory and strand the user's real one. No-op for a
+    # user who never ran a shepherd build. The package's postinst does the
+    # host-global half; the kiosk user is not known at package time.
+    migrate_user_dirs "$user"
+
     # Config + media library (reads the examples via get_data_dir).
     install_config "$user" ""
 
