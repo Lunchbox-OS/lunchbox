@@ -126,17 +126,10 @@ As legislated, such requirements are fundamentally incompatible with non-goals 3
 
 `shepherd-launcher` will *never* collect telemetry or PII, and as such, it will never implement this type of age verification.
 
-As a result, `shepherd-launcher` is not licensed for use in any region that requires OS-level age verification by law.
-**If you reside in any such region, you may not download, install, or redistribute `shepherd-launcher`.**
-
-This includes, but is not limited to:
-
-* [California](https://legiscan.com/CA/text/AB1043/id/3269704)
-* [Brazil](https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/Lei/L15211.htm)
-
-[The US as a whole](https://www.govtrack.us/congress/bills/119/hr8250) and [individual states](https://actonline.org/2025/01/14/the-abcs-of-age-verification-in-the-united-states/) are considering similar legislation.
-
-If you disagree with this assessment and you reside in an affected region, **please contact your representatives.**
+Usage in California is explicitly allowed under [AB1856][age-california-2],
+which exempts applications distributed "under license terms that permit a
+recipient to copy, redistribute, and modify the software", such as the
+[GPL](./LICENSE.md).
 
 ## Installation
 
