@@ -1,17 +1,17 @@
 # Installation
 
-`lunchbox-launcher` can be installed on Linux with a modern Wayland compositor.
+Lunchbox can be installed on Linux with a modern Wayland compositor.
 It is currently developed and tested on Ubuntu 26.04.
 
-`lunchbox-launcher` can be installed from the apt repository (the quick path,
+Lunchbox can be installed from the apt repository (the quick path,
 with automatic upgrades), from a standalone prebuilt `.deb`, or from source (for
 development). `./scripts/lunchbox` can help set up your build environment and
 manage a source installation.
 
 ## Installing from the apt repository
 
-Prebuilt amd64 packages are published to this project's Forgejo Debian package
-registry, so you can install and then `apt upgrade` on future releases. Add the
+Prebuilt amd64 packages are published to Lunchbox's own apt repository, so you
+can install and then `apt upgrade` on future releases. Add the
 repository's signing key and source list once (prereleases are deliberately not
 published here, so `apt upgrade` only tracks stable versions):
 
@@ -27,7 +27,7 @@ sudo apt install lunchbox-launcher
 ```
 
 `apt` pulls in the runtime dependencies (Sway, mpv, BlueZ, …) from the Ubuntu
-archive; the Forgejo repository only carries `lunchbox-launcher` itself. Post-
+archive; the Lunchbox repository only carries `lunchbox-launcher` itself. Post-
 install (package contents, per-user setup) is identical to the standalone `.deb`
 below — continue with the `lunchbox-admin setup-user` step described there.
 
@@ -51,14 +51,14 @@ display-manager session entry. Its post-install step creates the
 A distro package can't know which account is your kiosk user, so per-user setup
 is **not** done automatically. The package ships a `lunchbox-admin` CLI for the
 post-install admin tasks (the same code the from-source `./scripts/lunchbox`
-runs). Deploy the example config and add the user to lunchbox's groups with one
+runs). Deploy the example config and add the user to Lunchbox's groups with one
 command (substitute your user for `kiosk`):
 
 ```sh
 sudo lunchbox-admin setup-user kiosk
 ```
 
-If you use YouTube media libraries, also install `yt-dlp`. lunchbox deliberately
+If you use YouTube media libraries, also install `yt-dlp`. Lunchbox deliberately
 does not use the apt `yt-dlp` — YouTube changes formats often and the archived
 build goes stale — so it lives in a venv you can refresh independently:
 
@@ -106,7 +106,7 @@ on the CPU. `lunchbox-media` asks YouTube for H.264 first for exactly that
 reason.
 
 To install an activity backend (Steam via Canonical's snap, Chrome via Flathub,
-RetroArch and Okular from the distro's own packages — matching what lunchbox's
+RetroArch and Okular from the distro's own packages — matching what Lunchbox's
 `type = "steam"`, `kind = "flatpak"`, `type = "retroarch"` and `type = "ebook"`
 adapters drive):
 
@@ -149,7 +149,7 @@ sudo lunchbox-admin apps install okular
 It installs three packages, and the second is the one people miss: `okular`
 itself, `okular-extra-backends` — EPUB and DjVu support ship separately from
 Okular on Ubuntu, so without it a reading activity opens PDFs and refuses
-novels — and `fonts-noto-core` for the default reading font. lunchbox generates
+novels — and `fonts-noto-core` for the default reading font. Lunchbox generates
 the reader's whole configuration per entry and re-renders it on every launch,
 so there is nothing to set up by hand.
 
@@ -178,7 +178,7 @@ sudo lunchbox-admin power-key suspend
 
 Then have `kiosk` log out and back in (so the new group memberships take
 effect) and pick the "Lunchbox Kiosk" session at login. Then run
-[kiosk hardening](#kiosk-hardening) — it is what two of lunchbox's own
+[kiosk hardening](#kiosk-hardening) — it is what two of Lunchbox's own
 protections rest on, not just a lockdown preference.
 
 > The companion `.apk` is attached to the same release; see
@@ -264,7 +264,7 @@ lunchbox-admin apps install companion    # or: media
 Run it **without `sudo`**: `adb` authorises devices against the invoking user's
 key, so under `sudo` the device reports `unauthorized`.
 
-Where the APK comes from follows how lunchbox itself was installed. From the
+Where the APK comes from follows how Lunchbox itself was installed. From the
 `.deb` it downloads the release asset matching the installed version and checks
 it against the release's published `.sha256`; from a source checkout it builds
 the app's Gradle project instead, so you install what you just wrote. Either can
@@ -386,7 +386,7 @@ understanding before you remove it.
 Pairing over LE with a dual-mode adapter also mints a BR/EDR key, so the phone
 lands in the device's bond store looking like an ordinary audio device. BlueZ
 then arms the *kernel* to auto-connect it whenever it advertises. That is
-backwards for lunchbox: the companion is the client and the device is a GATT
+backwards for Lunchbox: the companion is the client and the device is a GATT
 peripheral, so a link the device originates puts the device in the central
 role — and only a central can start encryption. The phone can never encrypt
 such a link, so every read fails with `Insufficient Authentication`, on a
@@ -394,7 +394,7 @@ connection that never drops. Symptomatically the companion sits on "Can't reach
 this device securely" and nothing on the device side fixes it, including
 restarting the session.
 
-lunchbox prevents this by setting `PreferredBearer=bredr` on the paired phone,
+Lunchbox prevents this by setting `PreferredBearer=bredr` on the paired phone,
 which stops BlueZ arming the kernel while leaving BR/EDR auto-connect
 (headphones, controllers) alone. That property is flagged experimental
 upstream, hence `-E`.
@@ -417,7 +417,7 @@ BlueZ loads and honours the stored value regardless of `-E`; the flag only
 governs whether the property can be *set* over D-Bus.
 
 A device with a Bluetooth radio it does not share is better off still: give
-lunchbox a dedicated USB adapter, turn BR/EDR off on it (`btmgmt bredr off`)
+Lunchbox a dedicated USB adapter, turn BR/EDR off on it (`btmgmt bredr off`)
 and pin it with `[service.ble_management] adapter`. No BR/EDR means no
 cross-transport key, so the phone never looks like an audio device and nothing
 has a reason to dial it.
@@ -446,7 +446,7 @@ This installs:
 - Drop-in directory for Sway overrides at `/etc/sway/lunchbox.conf.d/`
 - Display manager desktop entry ("Lunchbox Kiosk" session)
 - A `bluetoothd` drop-in enabling experimental D-Bus interfaces, which
-  lunchbox needs to stop the device auto-dialling the paired phone (see
+  Lunchbox needs to stop the device auto-dialling the paired phone (see
   "Keeping the device from dialling the phone" above)
 - A udev rule at `/usr/lib/udev/rules.d/71-lunchbox-uinput.rules` and polkit
   rules at `/usr/share/polkit-1/rules.d/50-lunchbox-firewall.rules` and
@@ -478,7 +478,7 @@ out of it.
 
 This is not a micro-optimisation. Sway's IPC grants every process running as
 lunchboxd's own uid — which is every activity — the whole compositor:
-`exec` starts a process outside lunchbox's supervision *and* outside the cgroup
+`exec` starts a process outside Lunchbox's supervision *and* outside the cgroup
 the per-entry firewall is attached to, so an activity configured `default_deny`
 could ask sway to make its network requests for it. `exit` ends the kiosk
 session; `kill` closes the HUD. Sway has no access control to turn on, and file
@@ -509,7 +509,7 @@ already — `sway.conf`, `lunchbox dev headless`, `run-dev`, and the e2e harness
 so this only bites an invocation written from scratch. `lunchbox install
 sway-config` is what strips the flag back out for a device.
 
-### lunchbox's own socket accepts only the session and root (issue #144)
+### Lunchbox's own socket accepts only the session and root (issue #144)
 
 The other half of the same problem. `lunchboxd` listens on a Unix socket for the
 launcher, the HUD and the compositor's keybinding one-shots — and every activity
@@ -528,7 +528,7 @@ descendant inherits, and an unprivileged process can neither forge nor leave.
 `lunchboxd` accepts a connection only from:
 
 - a process in **its own cgroup** — that is the session: sway, the launcher, the
-  HUD, the one-shots sway starts for a keybinding, and lunchbox's own helper
+  HUD, the one-shots sway starts for a keybinding, and Lunchbox's own helper
   subprocesses (the input-compat sidecars, `wl-mirror`, the pairing overlay, and
   the short-lived commands it runs to read volume, brightness and audio state);
   and
@@ -542,7 +542,7 @@ Those helpers are also located from a fixed list of root-owned directories
 rather than `$PATH`. This matters more than it sounds: GDM's PAM stack is
 configured with `user_readenv=1`, so `~/.pam_environment` — a file the kiosk user
 owns — sets the session's environment, and an activity that could steer `$PATH`
-could have lunchbox exec a binary of its choosing *inside lunchbox's own
+could have Lunchbox exec a binary of its choosing *inside Lunchbox's own
 cgroup*. For the same reason `LUNCHBOX_*_BIN` and `LUNCHBOX_FIREWALL_HELPER` are ignored
 unless `--trust-environment` is passed, which no device does — and which is a
 flag rather than an environment variable precisely so that
@@ -577,7 +577,7 @@ saying which one. `--no-restrict-ipc-peers` turns the check off; like
 `--no-harden-sway-ipc`, every development entry point passes it already, and
 `lunchbox install sway-config` strips it back out for a device.
 
-**An activity can still take the socket's name.** It shares lunchbox's uid, so
+**An activity can still take the socket's name.** It shares Lunchbox's uid, so
 it can delete the socket file and bind its own in its place — no file permission
 stops that, because a root-owned directory would stop `lunchboxd` binding too,
 and the sticky bit only restricts deletion to the file's owner, which an
@@ -673,11 +673,11 @@ Consequences worth knowing before you debug a device:
 - **The state is not in the user's home.** `/var/lib/lunchboxd/state/<user>/` is,
   and only `root` and `lunchbox-state` can read it.
 - **The socket is created by systemd, not by the daemon**, which is what stops an
-  activity taking its name the way it can with lunchbox's own management socket
+  activity taking its name the way it can with Lunchbox's own management socket
   (above).
 - **If the custodian cannot be reached, the device does not start.** `lunchboxd`
   exits and the session ends at the login screen. That is deliberate, and it is
-  the one place lunchbox prefers a visible failure to a working-looking one: its
+  the one place Lunchbox prefers a visible failure to a working-looking one: its
   state has *moved*, so carrying on would mean a fresh empty database, a claimed
   device presenting itself as unclaimed, and a launcher with no activities on it
   — which reads to a child like an ordinary evening with nothing available, and
@@ -833,7 +833,7 @@ sudo ./scripts/lunchbox uninstall all --restore-to-home
 
 (If you installed the `.deb`, use `sudo apt-get remove lunchbox-launcher`
 instead. Since issue #177 that takes the sway config and the udev and polkit
-rules with it — they are lunchbox's files, not conffiles the admin owns — while
+rules with it — they are Lunchbox's files, not conffiles the admin owns — while
 leaving `/etc/sway/lunchbox.conf.d/` and the state custodian's data alone.)
 
 The state custodian's own files are left in place by default, and so is the
@@ -875,7 +875,7 @@ too.
 
 #### Who owns the files under `/etc`
 
-Nothing lunchbox installs is a dpkg *conffile*: there is no file here whose
+Nothing Lunchbox installs is a dpkg *conffile*: there is no file here whose
 local edits an upgrade will preserve or ask you about. That is deliberate.
 
 - `/etc/sway/lunchbox.conf` is **generated**, with the rewrites described under
@@ -883,7 +883,7 @@ local edits an upgrade will preserve or ask you about. That is deliberate.
   verified as it is written. A preserved local copy would carry an unverified
   config across upgrades forever, which is why site config belongs in
   `/etc/sway/lunchbox.conf.d/*.conf` — left unmanaged on purpose — instead.
-- `/etc/systemd/system/lunchbox-stated@.{service,socket}` are lunchbox's units,
+- `/etc/systemd/system/lunchbox-stated@.{service,socket}` are Lunchbox's units,
   pinned against the daemon's own constants by a test in the repository. A
   surviving local edit would break the state custodian quietly.
 - `/etc/systemd/system/bluetooth.service.d/10-lunchbox-bluetooth-experimental.conf`
@@ -894,10 +894,10 @@ The udev and polkit rules are not under `/etc` at all any more. They live at
 `/usr/lib/udev/rules.d/71-lunchbox-uinput.rules`,
 `/usr/share/polkit-1/rules.d/50-lunchbox-firewall.rules` and
 `/usr/share/polkit-1/rules.d/50-lunchbox-session-guard.rules`, next to the polkit
-action lunchbox has always installed to `/usr/share/polkit-1/actions/`. Both
+action Lunchbox has always installed to `/usr/share/polkit-1/actions/`. Both
 subsystems read their `/etc` directory as well, and a same-named file there
 wins — so that is still where a site override goes, it is simply no longer
-where lunchbox's own copy sits.
+where Lunchbox's own copy sits.
 
 ## Input compatibility sidecars (optional)
 
@@ -958,13 +958,13 @@ never silently hides content.
 ## Kiosk hardening
 
 Intended for devices used by children rather than developer machines — but on
-such a device it is **not optional**, because two of lunchbox's own protections
+such a device it is **not optional**, because two of Lunchbox's own protections
 depend on it:
 
 - It strips `user_readenv=1` from `/etc/pam.d`, which is what stops PAM handing
   the session an environment the kiosk user wrote. Without it, an activity can
   put `~/.pam_environment` in place and choose the next session's `PATH` and
-  variables — including where lunchbox looks for its state (issue #144).
+  variables — including where Lunchbox looks for its state (issue #144).
 - It denies the kiosk user SSH and console login, which is what stops a second
   session existing. The state custodian trusts the kiosk's *graphical* session
   specifically, and refuses any other (issue #157).
@@ -998,7 +998,7 @@ bluetoothd: src/advertising.c:add_client_complete() Failed to add advertisement:
 ```
 
 the host Bluetooth stack is failing to register *any* LE advertisement,
-so lunchbox's management service never goes on air. Confirm whether the
+so Lunchbox's management service never goes on air. Confirm whether the
 controller itself works by comparing the legacy vs. bluetoothd paths:
 
 ```sh
@@ -1006,14 +1006,14 @@ controller itself works by comparing the legacy vs. bluetoothd paths:
 sudo btmon
 # In another — legacy MGMT path (should succeed):
 sudo btmgmt add-adv -c 1
-# bluetoothd's path (the one lunchbox uses):
+# bluetoothd's path (the one Lunchbox uses):
 bluetoothctl advertise peripheral
 ```
 
 If `btmgmt add-adv` succeeds but `bluetoothctl advertise peripheral`
 fails, and `btmon` shows `Add Extended Advertising Data (0x0055) →
 Invalid Parameters (0x0d)`, this is a **kernel extended-advertising
-bug**, not a lunchbox or controller problem — observed on Ubuntu 26.04's
+bug**, not a Lunchbox or controller problem — observed on Ubuntu 26.04's
 `7.0.0-28-generic` across multiple Intel controllers (both BT 4.2 and
 BT 5). bluetoothd always uses the extended path when the kernel exposes
 it, and there is no config to force the legacy path. It matches the

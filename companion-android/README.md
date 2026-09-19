@@ -1,6 +1,6 @@
 # lunchbox-companion-android
 
-The Android companion app for managing one or more lunchbox-launcher
+The Android companion app for managing one or more Lunchbox
 devices over Bluetooth LE. It is the primary admin interface: it pairs
 with a device using Numeric Comparison, claims it (TOFU single-admin),
 and then drives the full management RPC catalog over the bonded GATT

@@ -11,7 +11,7 @@ emulator behave like every other supervised activity:
 - **The in-game save survives**, including a crash or a forced kill.
 - **The child stays in the game**: RetroArch's own menu, file browser, and
   settings are locked.
-- **Each activity keeps its own saves**, under a directory lunchbox owns.
+- **Each activity keeps its own saves**, under a directory Lunchbox owns.
 
 **No games are included, and none can be.** Supply your own content, and only
 content you have the right to. This document uses a freely licensed homebrew
@@ -36,7 +36,7 @@ disk disagrees. It often does: `libretro-genesisplusgx` ships
 `genesis_plus_gx_libretro.so`, `libretro-mupen64plus-next` ships
 `mupen64plus_next_libretro.so`, and the Beetle cores are libretro's forks of
 Mednafen and keep that name (`libretro-beetle-psx` →
-`mednafen_psx_hw_libretro.so`). lunchbox matches against the files actually
+`mednafen_psx_hw_libretro.so`). Lunchbox matches against the files actually
 present, ignoring `-` versus `_`, and knows the Beetle aliases — so
 `core = "beetle-psx"` and `core = "mednafen_psx_hw"` both work.
 
@@ -138,7 +138,7 @@ other kind.
 | `reset` | `true` | Show the HUD's reset button. |
 | `kiosk` | `true` | Lock RetroArch's own menu. |
 | `command` | `retroarch` | The RetroArch binary. |
-| `args` | `[]` | Extra arguments, appended after the ones lunchbox derives, so they win. |
+| `args` | `[]` | Extra arguments, appended after the ones Lunchbox derives, so they win. |
 | `env` | `{}` | Extra environment variables. |
 
 `content` is strict about relative paths on purpose: a bare `Games/game.gba`
@@ -156,7 +156,7 @@ Two different things are called "saving", and they are not interchangeable.
 
 **The in-game save** (SRAM / battery save, `.srm`) is the one the game itself
 writes — what a child means by "my save". RetroArch flushes it when content
-unloads, and lunchbox additionally sets `autosave_interval = 10`, so it is
+unloads, and Lunchbox additionally sets `autosave_interval = 10`, so it is
 written every ten seconds of play. A crash, a power cut, or a forced kill costs
 seconds, not an afternoon.
 
@@ -165,7 +165,7 @@ seconds, not an afternoon.
 opening restores it. This is what makes an emulator behave like the rest of the
 kiosk: a session that ends at a time limit picks up exactly where it stopped.
 
-Both depend on RetroArch exiting cleanly, so lunchbox gives these sessions a
+Both depend on RetroArch exiting cleanly, so Lunchbox gives these sessions a
 15-second graceful-stop window instead of the usual 5 — long enough to unload
 the core and write both kinds of save on slow storage.
 
@@ -216,7 +216,7 @@ and falls back to the path above — so look in both places. With
 `service.capture_child_output` on, that `Redirecting save file to` line names
 the exact path for the session you are looking at.
 
-**The resume state is lunchbox's**, since nothing outside a supervised session
+**The resume state is Lunchbox's**, since nothing outside a supervised session
 produces one:
 
 ```
@@ -238,18 +238,18 @@ To reset an activity from the admin side rather than the HUD, delete its
 > RetroArch's default save location, and so does this one, so the child's
 > existing save carries over untouched.
 
-## What lunchbox generates, and what it leaves alone
+## What Lunchbox generates, and what it leaves alone
 
-Before each launch lunchbox writes `append.cfg` and passes it to RetroArch with
+Before each launch Lunchbox writes `append.cfg` and passes it to RetroArch with
 `--appendconfig`. **Your `~/.config/retroarch/retroarch.cfg` is never edited**
 — cores, controller bindings, shaders and everything else you set up in
-RetroArch stay yours, and lunchbox's settings apply only to activities it
+RetroArch stay yours, and Lunchbox's settings apply only to activities it
 launches.
 
 That last guarantee takes an explicit setting to hold: RetroArch's
 `config_save_on_exit` defaults to *true*, so a clean exit would otherwise write
 its entire live settings block — including everything appended — back into your
-config, making lunchbox's per-activity choices permanent and global. The
+config, making Lunchbox's per-activity choices permanent and global. The
 generated fragment turns it off for the run.
 
 The fragment sets, and only sets:
@@ -270,10 +270,10 @@ those still live under `~/.config/retroarch/`. Nothing there affects a
 supervised session; it is worth knowing if you expected the activity to leave
 no trace at all.
 
-### Settings you make outside lunchbox carry in
+### Settings you make outside Lunchbox carry in
 
 Configure RetroArch however you like from a normal desktop session — bind your
-controllers, pick a video driver, set per-core options — and lunchbox picks it
+controllers, pick a video driver, set per-core options — and Lunchbox picks it
 all up. Every launch loads your `~/.config/retroarch/retroarch.cfg` first and
 appends its fragment on top:
 
@@ -282,22 +282,22 @@ appends its fragment on top:
 [INFO] [Config] Appending config: "…/append.cfg".
 ```
 
-Only the settings in the table above are lunchbox's; everything else is yours.
+Only the settings in the table above are Lunchbox's; everything else is yours.
 Controller autoconfig profiles (`autoconfig/`), input remaps (`remaps/`) and
 per-core options (`retroarch-core-options.cfg`, the `.opt` files) are separate
-files lunchbox never touches. Traffic is one-way — `config_save_on_exit =
+files Lunchbox never touches. Traffic is one-way — `config_save_on_exit =
 "false"` means a supervised session cannot write back into your config, so
-lunchbox's per-activity choices never become your global ones.
+Lunchbox's per-activity choices never become your global ones.
 
-### …and per-core overrides beat lunchbox
+### …and per-core overrides beat Lunchbox
 
 One sharp edge. RetroArch applies **overrides** —
 `~/.config/retroarch/config/<Core>/<Core>.cfg`, and the per-content-directory
 and per-game files beside it — *after* `--appendconfig`, so an override that
-names one of lunchbox's settings wins.
+names one of Lunchbox's settings wins.
 
 Mostly that is what you want: overrides are how per-core video and input tuning
-carries into a session. But for the nine settings lunchbox relies on it is a
+carries into a session. But for the nine settings Lunchbox relies on it is a
 footgun, and two of them fail quietly:
 
 - `kiosk_mode_enable = "false"` unlocks RetroArch's menu inside a supervised
@@ -309,7 +309,7 @@ The rest are `config_save_on_exit`, `savestate_directory`,
 `autosave_interval`, `pause_nonactive`, `video_fullscreen` and
 `video_context_driver`.
 
-lunchbox checks for this at every launch and warns, naming the file and the
+Lunchbox checks for this at every launch and warns, naming the file and the
 keys:
 
 ```
@@ -319,16 +319,16 @@ override_file=~/.config/retroarch/config/mGBA/mGBA.cfg
 settings=savestate_auto_save, kiosk_mode_enable
 ```
 
-It is a warning, not an error: your overrides are yours, and lunchbox will not
+It is a warning, not an error: your overrides are yours, and Lunchbox will not
 silently discard them. Remove those keys from the override file to hand the
 settings back.
 
 ### The network command interface is not enabled
 
-RetroArch can expose a UDP control port (`network_cmd_enable`), and lunchbox
+RetroArch can expose a UDP control port (`network_cmd_enable`), and Lunchbox
 deliberately does not use it. It binds to all interfaces, cannot be restricted
 to localhost, and has no authentication — anyone on the network could quit a
-child's game or load different content into it. Everything lunchbox needs
+child's game or load different content into it. Everything Lunchbox needs
 (including the reset button) is done without it.
 
 The "cannot be restricted" half is upstream's to fix, and it has been asked:
@@ -459,7 +459,7 @@ package descriptions, because the two disagree often enough to matter.
   selects the hardware one (`mednafen_psx_hw`); use `core = "mednafen_psx"` for
   the software renderer.
 
-**Some names differ from the shared object on disk** and lunchbox translates
+**Some names differ from the shared object on disk** and Lunchbox translates
 them, so the name you install is the name you configure: the ten `beetle-*`
 cores are libretro's Mednafen forks (`beetle-saturn` → `mednafen_saturn`),
 `lrps2` → `pcsx2`, and `np2` → `nekop2`.
@@ -508,7 +508,7 @@ verbose about all of this, and `args = ["--verbose"]` makes it more so.
 
 **The activity exits immediately.** Usually the core or the content could not
 be loaded. `[Core] Loading dynamic libretro core from: …` names the core path
-lunchbox resolved. A core that isn't there gives
+Lunchbox resolved. A core that isn't there gives
 
 ```
 [WARN] --libretro argument "…" is not a file, core name or directory. Ignoring.
@@ -516,7 +516,7 @@ lunchbox resolved. A core that isn't there gives
 Fatal error received in: "init_libretro_symbols()"
 ```
 
-You should not have to read a log to find this out: lunchbox checks every
+You should not have to read a log to find this out: Lunchbox checks every
 RetroArch entry's core *and* its content on its diagnostic sweep, and reports
 what is missing against the activity, in the admin UIs and on the phone — a
 missing core with the `lunchbox-admin` command that installs it, missing content
@@ -525,9 +525,9 @@ The conditions clear on the next sweep once the file is there — no restart, so
 a ROM on removable media comes and goes with the drive.
 
 A core named with `core =` that resolves nowhere is reported but not certain:
-lunchbox passes the bare filename on to RetroArch, which resolves it against its
+Lunchbox passes the bare filename on to RetroArch, which resolves it against its
 own configured `libretro_directory`, so this can also mean "installed somewhere
-lunchbox does not search" — set `core_path` to the absolute path in that case. A
+Lunchbox does not search" — set `core_path` to the absolute path in that case. A
 `core_path` that is not a file is reported as the plain error it is.
 
 **Progress is lost between sessions.** Look for
@@ -561,7 +561,7 @@ swaymsg -t get_tree | jq -r '.. | objects | select(.pid) | "\(.name)\t\(.shell)"
 
 `xdg_shell` is Wayland. `xwayland` means something beat the fragment to it —
 almost certainly a per-core or per-game override setting `video_context_driver`
-(see above; lunchbox warns about exactly this), or a `video_driver` in your own
+(see above; Lunchbox warns about exactly this), or a `video_driver` in your own
 `retroarch.cfg` that does its own windowing, such as `sdl2`. Fix that rather
 than reaching for a compositor-wide scale override.
 
@@ -574,4 +574,4 @@ than reaching for a compositor-wide scale override.
   its config keys, its save-state naming — which is why the entry kind is
   `retroarch` rather than a vague `emulator`. A future kind can sit beside it.
 - **Netplay, achievements, shaders, per-core options.** Configure them in
-  RetroArch itself; lunchbox only appends the settings listed above.
+  RetroArch itself; Lunchbox only appends the settings listed above.

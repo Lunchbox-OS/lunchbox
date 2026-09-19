@@ -161,7 +161,7 @@ If the service is not running at startup:
 │                                        │
 │          System Not Ready              │
 │                                        │
-│    Waiting for lunchbox service...     │
+│    Waiting for Lunchbox service...     │
 │                                        │
 │           [Retry]                      │
 │                                        │

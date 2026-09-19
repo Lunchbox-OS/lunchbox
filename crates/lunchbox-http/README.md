@@ -388,7 +388,7 @@ The SPA's own responses carry a `Content-Security-Policy` for the same reason
   before the check, and a symlink out of the root is *listed* (so a person can
   delete it) with `unusable: "symlink_escapes"` but never followed. Any
   activity at the kiosk uid can plant such a link, so this is not hypothetical.
-- **Serve lunchbox's own state, or an SSH key.** `~/.local/share/lunchboxd`
+- **Serve Lunchbox's own state, or an SSH key.** `~/.local/share/lunchboxd`
   (the database), `$XDG_CACHE_HOME/lunchbox` (the video cache, which keeps an
   index that hand-deletion desynchronises) and `~/.ssh` are refused, for
   reading and writing alike. The first two are about damage nobody would

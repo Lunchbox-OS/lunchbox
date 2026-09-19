@@ -23,7 +23,7 @@ dependencies. Once installed, `./run-dev` will start a development instance.
 
 ### Unified script system
 
-`lunchbox-launcher` provides a unified script system for managing dependencies, building, and running:
+Lunchbox provides a unified script system for managing dependencies, building, and running:
 
 ```sh
 # View and install dependencies
@@ -424,7 +424,7 @@ The standalone bundle is published to Cloudflare Pages at
 <https://config.lunchbox-os.com>, from the `config-editor` job in
 [`release.yml`](.github/workflows/release.yml). It deploys on `vX.Y.Z` tags
 rather than on every push to main, so the hosted editor matches the last
-released lunchbox — it renders a `config_version` that ships with the daemon,
+released Lunchbox — it renders a `config_version` that ships with the daemon,
 and an editor ahead of the release would offer fields the installed version
 cannot read. Prerelease tags (`v0.4.0-rc1`) are skipped.
 
@@ -693,7 +693,7 @@ PyYAML accepts duplicate keys and keeps the last one; Forgejo's parser does not.
 
 ### Bumping the version
 
-`lunchbox-launcher` is a composition of Rust crates, a web UI, an Android
+Lunchbox is a composition of Rust crates, a web UI, an Android
 companion app, and shell tooling — none of which depend on each other, but all
 of which ship a version string. The canonical version lives in exactly one
 place: the repo-root [`VERSION`](./VERSION) file.
@@ -715,7 +715,7 @@ fail the build if any literal is edited by hand and drifts out of sync.
 
 ## Contribution guidelines
 
-`lunchbox-launcher` is licensed under the GPLv3 to preserve end-users' rights.
+Lunchbox is licensed under the GPLv3 to preserve end-users' rights.
 By submitting a pull request, you agree to license your contributions under the
 GPLv3.
 
@@ -725,6 +725,6 @@ recommend adding substantial prompts and design docs provided to agents to
 [docs/ai/history/](./docs/ai/history/) along with the PRs and commit hashes
 associated with them.
 
-The authors of `lunchbox-launcher` do not condone software or media piracy.
+The authors of Lunchbox do not condone software or media piracy.
 Contributions that explicitly promote or facilitate piracy will be rejected.
 Please support developers and creators by obtaining content legally.

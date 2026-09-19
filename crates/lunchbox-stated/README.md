@@ -1,6 +1,6 @@
 # lunchbox-stated
 
-Custodian for lunchbox's policy and state, at a uid the activities do not have
+Custodian for Lunchbox's policy and state, at a uid the activities do not have
 (issue [#157]).
 
 ## The problem it exists for
@@ -82,14 +82,14 @@ Measured on a device running GDM, the kiosk uid's sessions are:
 | the previous session, after a display-manager restart | `user` | `wayland` | `seat0` | `closing` | refused |
 
 `Class=user` alone would admit the SSH row, which is a second way into the same
-uid rather than the session lunchbox runs in. The last row is the one only a
+uid rather than the session Lunchbox runs in. The last row is the one only a
 device showed: after `systemctl restart gdm` the outgoing session was still
 listed, still seated, and still owned a live cgroup, while logind had it as
 `closing`. Two sessions matched, the daemon refused to guess — correctly — and
 the custodian would not start at all.
 
 `online` is accepted alongside `active`: a kiosk whose VT is switched away is
-still the session lunchbox runs in.
+still the session Lunchbox runs in.
 
 Refusing is measured too: an activity in
 `…/app.slice/lunchbox-<session-id>.scope` connects, is refused at accept before
@@ -122,7 +122,7 @@ defeats it without killing anything at all: a stopped daemon never exits, so the
 wrapper's `||` never fires, while the engine that counts a child's time has
 stopped.
 
-This daemon is the only part of lunchbox that is outside the session, at a uid
+This daemon is the only part of Lunchbox that is outside the session, at a uid
 nothing inside it can signal, and it already knows which session is the kiosk's.
 So it holds the dead man's switch.
 

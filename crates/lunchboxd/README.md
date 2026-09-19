@@ -247,7 +247,7 @@ The service exposes health status via `GetHealth`:
 Uses structured logging via `tracing`:
 
 ```
-2025-01-15T14:30:00.000Z INFO  lunchboxd: Starting lunchbox service
+2025-01-15T14:30:00.000Z INFO  lunchboxd: Starting Lunchbox service
 2025-01-15T14:30:00.050Z INFO  lunchbox_config: Configuration loaded entries=5
 2025-01-15T14:30:00.100Z INFO  lunchbox_ipc: IPC server listening path=/run/lunchboxd/lunchboxd.sock
 2025-01-15T14:30:15.000Z INFO  lunchbox_core: Session started session_id=abc123 entry_id=minecraft

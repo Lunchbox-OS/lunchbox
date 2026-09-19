@@ -96,13 +96,13 @@ unprivileged process can neither forge it nor climb out of it.
 
 What is in `lunchboxd`'s cgroup is worth stating in full, because that set *is*
 the trust boundary: sway, `lunchboxd`, the launcher, the HUD, `swayidle` and the
-one-shots sway starts for a keybinding — and also lunchbox's own helper
+one-shots sway starts for a keybinding — and also Lunchbox's own helper
 subprocesses, which are children of the daemon: the input-compat sidecars,
 `wl-mirror`, the pairing overlay, and the short-lived query commands
 (`wpctl`/`pactl`/`amixer`, `pw-dump`, `brightnessctl`, `pgrep`, `pkcheck`).
 
 Activities are not, by construction — see `lunchbox-host-linux`'s README. Nor is
-`yt-dlp`, which is scoped out of this cgroup despite being lunchbox's own
+`yt-dlp`, which is scoped out of this cgroup despite being Lunchbox's own
 subprocess, because it parses remote input on a background timer.
 
 The decision is made **once per connection, at accept**, not per call: one
@@ -115,9 +115,9 @@ diagnostic.
 It is an **allow-list**, not a deny-list. "Refuse peers I recognise as
 activities" fails open on exactly the cases it cannot classify, and there is a
 verified escape that lands in that gap: an activity can ask `systemd --user` to
-start a process for it in a cgroup that is in no lunchbox scope at all. That
+start a process for it in a cgroup that is in no Lunchbox scope at all. That
 process is refused here because it is not *in `lunchboxd`'s cgroup*, which is a
-different question from whether it is in a scope lunchbox made.
+different question from whether it is in a scope Lunchbox made.
 
 `PeerPolicy::unrestricted()` restores the old uid-only classification; the
 daemon uses it for `--no-restrict-ipc-peers`. See `src/peer.rs` for how the
@@ -127,12 +127,12 @@ the measurements behind it.
 
 `ClientRole` still rides on `ClientInfo` and is recorded in the audit log, but
 nothing consults it at dispatch: once the allow-list is in place every accepted
-peer is either root or lunchbox's own code, so a per-method tier split would
+peer is either root or Lunchbox's own code, so a per-method tier split would
 have no security content to enforce.
 
 ### Exercising the armed check without a device
 
-`PeerPolicy::restricted()` degrades wherever lunchbox's cgroup is one an
+`PeerPolicy::restricted()` degrades wherever Lunchbox's cgroup is one an
 activity could join, which is every stack started from a shell — so a dev
 session never runs the enforced path. A **system**-manager scope owned by the
 right uid is not delegated, which is structurally what a logind session scope
@@ -190,7 +190,7 @@ So the client checks who answered, exactly as the server checks who called.
 | Our own cgroup unreadable | accepted, with a warning — nothing an activity does causes this, and refusing would leave a device with a launcher that will not start |
 
 Root is exempt, because `sudo` reaches the daemon from a login session that is
-never lunchbox's cgroup — the same exemption the server makes.
+never Lunchbox's cgroup — the same exemption the server makes.
 `IpcClient::connect_unverified` exists for clients that legitimately live
 outside the session; the launcher, the HUD and the one-shots must never use it,
 since they are precisely the clients an impostor is worth deceiving.

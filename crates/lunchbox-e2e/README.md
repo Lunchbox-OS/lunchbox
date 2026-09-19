@@ -1,6 +1,6 @@
 # lunchbox-e2e
 
-End-to-end integration tests that exercise the full lunchbox stack against a
+End-to-end integration tests that exercise the full Lunchbox stack against a
 real, headless Sway compositor. Each test starts its own private Sway,
 lunchboxd, and (optionally) launcher/HUD processes inside an isolated temp
 environment, then drives the daemon through its HTTP management API and IPC
@@ -65,7 +65,7 @@ than read as a pass.
 
 ## Running locally
 
-The harness needs `sway`, `dbus-daemon`, and the lunchbox binaries (built
+The harness needs `sway`, `dbus-daemon`, and the Lunchbox binaries (built
 in debug mode). Install runtime deps and a few extras:
 
 ```sh

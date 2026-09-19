@@ -13,7 +13,7 @@ touched until an administrator unlocks it from the companion or web app.
 
 ## Why it is not GTK
 
-Every other lunchbox surface is GTK4 (`lunchbox-hud`, `lunchbox-launcher-ui`,
+Every other Lunchbox surface is GTK4 (`lunchbox-hud`, `lunchbox-launcher-ui`,
 `lunchbox-pairing-display`). This one is a raw `wayland-client` +
 `smithay-client-toolkit` program drawing with cairo into a shared-memory buffer,
 because it must be a real `ext-session-lock-v1` client rather than a

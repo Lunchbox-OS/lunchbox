@@ -18,7 +18,7 @@ The implementation lives in three crates:
 
 ## Installation requirements
 
-In addition to the standard `lunchbox-launcher` build dependencies:
+In addition to the standard Lunchbox build dependencies:
 
 - `libmpv-dev` at build time (provides the libmpv2 client headers).
 - `mpv` and `yt-dlp` at runtime. `yt-dlp` is needed only if you reference
@@ -797,7 +797,7 @@ is the hash-prefix endpoint asking for every skippable category. It needs
 
 Segment data comes from [SponsorBlock](https://sponsor.ajay.app) and is licensed
 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). No
-segment data is redistributed with lunchbox-launcher: it is fetched at runtime
+segment data is redistributed with Lunchbox: it is fetched at runtime
 and cached on the device that fetched it. The non-commercial clause applies to
 how this project is used and distributed, not to its own licence.
 

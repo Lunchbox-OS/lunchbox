@@ -1,6 +1,6 @@
 # Lunchbox Scripts System
 
-This directory contains the unified script system for lunchbox-launcher.
+This directory contains the unified script system for Lunchbox.
 
 ## Quick Reference
 

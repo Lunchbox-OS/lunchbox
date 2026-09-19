@@ -1,7 +1,7 @@
 ---
 name: headless-dev
 description: >-
-  Run and visually verify lunchbox-launcher end-to-end during development without
+  Run and visually verify Lunchbox end-to-end during development without
   a graphical login session. Use whenever you need to launch/start/run the app,
   take a screenshot, or confirm a UI change (launcher grid, HUD, media, browser,
   availability/bedtime, time limits) actually works in the real stack — not just
@@ -11,9 +11,9 @@ description: >-
   falling back to `./run-dev` (which needs a login session).
 ---
 
-# Headless end-to-end development for lunchbox-launcher
+# Headless end-to-end development for Lunchbox
 
-`lunchbox-launcher` is a Sway-based kiosk. The normal `./run-dev` boots a
+Lunchbox is a Sway-based kiosk. The normal `./run-dev` boots a
 **nested** compositor (`WLR_BACKENDS=wayland`) that needs a graphical login
 session — unusable headlessly. Instead, use `lunchbox dev headless`, which boots
 the **same** stack (same `sway.conf`, `config.example.toml`, debug binaries)
@@ -204,7 +204,7 @@ Example (bedtime restriction):
   pids.
 - **A GUI app that ignores `SIGTERM` can be closed politely** with
   `swaymsg '[app_id="…"] kill'` (an `xdg_toplevel.close` *request*, not a
-  signal), which is how you verify save-on-close behaviour that lunchbox's
+  signal), which is how you verify save-on-close behaviour that Lunchbox's
   current graceful stop does not trigger. See the #160 scope note.
 - **Settle after "ready".** `dev headless` returns once the launcher *surface*
   maps, but async icon/tile loading can lag a beat (a tile may still say

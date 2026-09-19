@@ -1,7 +1,7 @@
 ---
 name: companion-pairing
 description: >-
-  Pair the Lunchbox Companion Android app with a lunchbox device over BLE, and
+  Pair the Lunchbox Companion Android app with a Lunchbox device over BLE, and
   verify the result on both sides — the flow no unit test can reach (Numeric
   Comparison, bonding, claim, reconnect, re-pair after factory reset). Use
   whenever you change `DeviceConnection`, `BondManager`, the pairing UI, or
@@ -270,7 +270,7 @@ DEVICE=8C:68:8B:41:02:DC ./.claude/skills/companion-pairing/pair.sh run
 ```
 
 `DEVICE` picks the scan row. Leave it unset for the plain `lunchbox`
-label; set it to the serving controller's address when a second lunchbox
+label; set it to the serving controller's address when a second Lunchbox
 is in range (see the two-radios gotcha below) — the app prints the
 address under each row, so this is the only way to tell them apart.
 
