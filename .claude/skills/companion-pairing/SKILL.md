@@ -5,7 +5,7 @@ description: >-
   verify the result on both sides — the flow no unit test can reach (Numeric
   Comparison, bonding, claim, reconnect, re-pair after factory reset). Use
   whenever you change `ShepherdConnection`, `BondManager`, the pairing UI, or
-  anything in `crates/shepherd-ble`, and whenever you need to confirm a pairing
+  anything in `crates/lunchbox-ble`, and whenever you need to confirm a pairing
   or reconnect bug end-to-end. Drives a USB-attached phone over adb against the
   headless dev session, so it works over SSH with no graphical login.
 ---
@@ -307,7 +307,7 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
 - **Re-pair after factory reset** — `touch dev-runtime/data/.factory-reset-ble`
   and restart the session. (That path is the dev stack's, which runs with
   `--no-state-custodian`. On an installed device the sentinel is the *device's*
-  and lives at `/var/lib/shepherdd/admin/.factory-reset-ble` — issue #157.) The device returns to unclaimed and drops its
+  and lives at `/var/lib/lunchboxd/admin/.factory-reset-ble` — issue #157.) The device returns to unclaimed and drops its
   bond; the app should show "Bond lost — re-pair needed", and `Re-pair`
   leads back to the scan list (not straight into pairing).
 
@@ -432,7 +432,7 @@ Screenshots land in `$SHOTDIR` (default `/tmp/shepherd-pairing`) — Read
   daemon log stays silent because it was never involved. The app prints
   each row's controller address; pass it as `DEVICE=`. `bluetoothctl scan
   le` from the host's other radio enumerates who is actually advertising.
-- **With two radios present, shepherdd serves whichever BlueZ lists
+- **With two radios present, lunchboxd serves whichever BlueZ lists
   first** — not the one you meant, and not necessarily the one the phone
   is bonded to. Symptom: the app sits on "Connecting…" forever while the
   daemon logs `BLE management advertising started` and looks perfectly

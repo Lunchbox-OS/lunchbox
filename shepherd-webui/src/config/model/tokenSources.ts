@@ -1,7 +1,7 @@
 /**
  * Which subjects a token gate is allowed to earn from.
  *
- * This mirrors `validate_tokens` in `crates/shepherd-config/src/validation.rs`,
+ * This mirrors `validate_tokens` in `crates/lunchbox-config/src/validation.rs`,
  * which rejects four shapes of "a thing unlocking itself". Encoding them here
  * is what stops the picker offering a choice the daemon would refuse — but it
  * also means the two can drift, so the rules are stated once, here, and the

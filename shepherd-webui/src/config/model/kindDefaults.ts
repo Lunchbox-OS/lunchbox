@@ -3,7 +3,7 @@
  *
  * The values are NOT written here: they come from
  * `kind-defaults.generated.ts`, rendered from `EntryKindTag`'s own answers in
- * `crates/shepherd-api/src/types.rs`. This module is just the lookup, which
+ * `crates/lunchbox-api/src/types.rs`. This module is just the lookup, which
  * has to cope with an entry whose kind is not set yet — a state the editor has
  * and the daemon does not.
  *

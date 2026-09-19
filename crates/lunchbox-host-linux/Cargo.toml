@@ -1,0 +1,27 @@
+[package]
+name = "lunchbox-host-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux host adapter for lunchboxd: process groups, spawn/kill, exit observation"
+
+[dependencies]
+lunchbox-util = { workspace = true }
+lunchbox-api = { workspace = true }
+lunchbox-host-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+zbus = { workspace = true }
+nix = { workspace = true, features = ["net"] }
+async-trait = "0.1"
+dirs = "5.0"
+shell-escape = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

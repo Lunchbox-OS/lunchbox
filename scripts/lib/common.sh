@@ -104,7 +104,7 @@ verify_repo() {
         die "Not in shepherd repository (Cargo.toml not found at $repo_root)"
     fi
     # Check it's the right project
-    if ! grep -q 'shepherd-launcher-ui' "$repo_root/Cargo.toml" 2>/dev/null; then
+    if ! grep -q 'lunchbox-launcher-ui' "$repo_root/Cargo.toml" 2>/dev/null; then
         die "This doesn't appear to be the shepherd-launcher repository"
     fi
 }

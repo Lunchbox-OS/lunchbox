@@ -7,7 +7,7 @@
 # headless agent (or a developer over SSH) to bring the stack up and see it.
 #
 # This library boots the SAME stack (same sway.conf, same config.example.toml,
-# same debug binaries) against the *headless* wlroots backend the shepherd-e2e
+# same debug binaries) against the *headless* wlroots backend the lunchbox-e2e
 # harness already uses (WLR_BACKENDS=headless, pixman software renderer). That
 # needs no login session, no parent compositor, and no GPU. The result is a
 # virtual output that can be:
@@ -132,9 +132,9 @@ headless_scope_prefix() {
 # Wait until the compositor exists, by either name.
 #
 # Under `--harden-ipc` (and on a device, where hardening is the default)
-# shepherdd unlinks the socket sway created as soon as it has connected, so the
+# lunchboxd unlinks the socket sway created as soon as it has connected, so the
 # ambient name is short-lived and a harness that only watched for it would race. Either name proves sway is up, which is all this
-# stage claims — whether *shepherdd* is up is the separate wait on the alias.
+# stage claims — whether *lunchboxd* is up is the separate wait on the alias.
 #   headless_wait_compositor <runtime_dir> <user|""> <alias> <deciseconds>
 headless_wait_compositor() {
     local rt="$1" who="$2" alias="$3" tries="${4:-100}"
@@ -230,14 +230,14 @@ headless_precheck_user() {
         sudo -u "$user" test -r "$config" \
             || die "$user cannot read the config $config"
     fi
-    for b in shepherdd shepherd-launcher shepherd-hud; do
+    for b in lunchboxd shepherd-launcher lunchbox-hud; do
         sudo -u "$user" test -x "$repo_root/target/debug/$b" \
             || die "$user cannot execute $repo_root/target/debug/$b — is the repo traversable by $user?"
     done
 }
 
 # Start a detached headless session.
-#   --config PATH   shepherdd config to boot
+#   --config PATH   lunchboxd config to boot
 #                   (default: ./config.example.toml, or the target user's
 #                    ~/.config/shepherd/config.toml under --user)
 #   --user NAME     run the whole stack as NAME (via sudo) for a more realistic
@@ -248,18 +248,18 @@ headless_precheck_user() {
 #   --no-build      skip the cargo build (use existing target/debug binaries)
 #   --harden-ipc-peers
 #                   exercise the production management-socket peer check: only
-#                   shepherdd's own cgroup and root may drive the daemon (issue
+#                   lunchboxd's own cgroup and root may drive the daemon (issue
 #                   #144). Needs sudo, because the check only means anything in
 #                   a cgroup an activity cannot join, and a stack started from a
 #                   shell sits in the user manager's delegated subtree; the
 #                   session runs in a system-manager scope instead. Fails loudly
 #                   if the daemon degrades rather than arms.
-#   --harden-ipc    exercise the production sway-IPC hardening: shepherdd
+#   --harden-ipc    exercise the production sway-IPC hardening: lunchboxd
 #                   unlinks the compositor's socket once it has connected, so
-#                   nothing else can reach it (issue #144). This is shepherdd's
+#                   nothing else can reach it (issue #144). This is lunchboxd's
 #                   default; `sway.conf` opts out because it is the development
 #                   config, and this flag takes that opt-out back off. The
-#                   session stays drivable through the alias shepherdd creates
+#                   session stays drivable through the alias lunchboxd creates
 #                   first, which this harness always asks for and always uses.
 headless_start() {
     local size="$HEADLESS_SIZE_DEFAULT" mock_time="" renderer="pixman" do_build=1
@@ -268,7 +268,7 @@ headless_start() {
         case "$1" in
             --config)
                 # Resolve against the invoker's CWD now, before we cd to the
-                # repo root — shepherdd is exec'd with CWD=repo root, so it needs
+                # repo root — lunchboxd is exec'd with CWD=repo root, so it needs
                 # an absolute path.
                 config="$(realpath -m "$2")"; shift 2 ;;
             --user) user="$2"; shift 2 ;;
@@ -292,7 +292,7 @@ headless_start() {
 
     # Resolve the target user (default: the invoker), and, under --user with no
     # explicit --config, default to that user's regular config path in their home
-    # directory (what shepherdd's default_config_path() would pick).
+    # directory (what lunchboxd's default_config_path() would pick).
     local user_mode=0 target_home=""
     if [[ -n "$user" ]]; then
         user_mode=1
@@ -306,7 +306,7 @@ headless_start() {
     fi
 
     # The runtime dir has to be known before the sway config is written, because
-    # the config carries the alias path shepherdd will create inside it.
+    # the config carries the alias path lunchboxd will create inside it.
     local rt
     if [[ "$user_mode" -eq 1 ]]; then
         # Dedicated, short-pathed, target-owned runtime dir (the target user may
@@ -317,7 +317,7 @@ headless_start() {
         [[ -d "$rt" ]] || die "XDG_RUNTIME_DIR ($rt) does not exist; a headless session still needs a short-pathed runtime dir for its wayland socket"
     fi
 
-    # Where shepherdd will hard-link sway's IPC socket. Every `swaymsg` this
+    # Where lunchboxd will hard-link sway's IPC socket. Every `swaymsg` this
     # harness runs goes through this path rather than the one sway chose, so the
     # hardened and unhardened sessions are driven identically — and `--harden-ipc`
     # changes only whether the original name survives.
@@ -327,7 +327,7 @@ headless_start() {
     local sway_alias="$rt/shepherd-dev-sway.$$.sock"
 
     # Default sway config boots ./config.example.toml (hard-coded in sway.conf).
-    # The derived copy rewrites the shepherdd exec line: its `-c` token when a
+    # The derived copy rewrites the lunchboxd exec line: its `-c` token when a
     # config is chosen (--config, or the --user default), always the alias, and
     # the hardening opt-out sway.conf carries when --harden-ipc says to drop it.
     # Every other kiosk rule is preserved.
@@ -349,43 +349,43 @@ headless_start() {
             fi
             die "Config not found: $config"
         fi
-        # Match `shepherdd -c <token>` regardless of the default path/spacing.
-        sed -E -i "s#(target/debug/shepherdd -c )[^ ]+#\1$config#" "$sway_config"
-        if ! grep -qF "shepherdd -c $config" "$sway_config"; then
-            die "Failed to inject --config into a derived sway config (sway.conf's shepherdd exec line may have changed; expected 'target/debug/shepherdd -c <path>')"
+        # Match `lunchboxd -c <token>` regardless of the default path/spacing.
+        sed -E -i "s#(target/debug/lunchboxd -c )[^ ]+#\1$config#" "$sway_config"
+        if ! grep -qF "lunchboxd -c $config" "$sway_config"; then
+            die "Failed to inject --config into a derived sway config (sway.conf's lunchboxd exec line may have changed; expected 'target/debug/lunchboxd -c <path>')"
         fi
         info "Booting config: $config${user:+ (as $user)}"
     fi
 
-    sed -E -i "s#(target/debug/shepherdd -c [^ ]+)#\1 --sway-ipc-alias $sway_alias#" "$sway_config"
+    sed -E -i "s#(target/debug/lunchboxd -c [^ ]+)#\1 --sway-ipc-alias $sway_alias#" "$sway_config"
     if ! grep -qF -- "--sway-ipc-alias $sway_alias" "$sway_config"; then
-        die "Failed to inject the sway-IPC flags into the derived sway config (expected 'target/debug/shepherdd -c <path>')"
+        die "Failed to inject the sway-IPC flags into the derived sway config (expected 'target/debug/lunchboxd -c <path>')"
     fi
 
-    # shepherdd hardens by default; `sway.conf` opts out because it is the
+    # lunchboxd hardens by default; `sway.conf` opts out because it is the
     # development config. `--harden-ipc` therefore takes the opt-out back off
     # rather than adding a flag, so a dev session that does not ask for it keeps
     # a compositor `swaymsg` can reach.
     # Scoped to the exec line: sway.conf's comment names the flag too, so a
     # whole-file grep answers the wrong question in both directions.
     local exec_line
-    exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+    exec_line="$(grep -E "^exec .*lunchboxd -c [^ ]+" "$sway_config" || true)"
     if [[ "$harden" -eq 1 ]]; then
-        sed -i "/^exec .*shepherdd -c /s# --no-harden-sway-ipc##g" "$sway_config"
-        exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+        sed -i "/^exec .*lunchboxd -c /s# --no-harden-sway-ipc##g" "$sway_config"
+        exec_line="$(grep -E "^exec .*lunchboxd -c [^ ]+" "$sway_config" || true)"
         if [[ "$exec_line" == *--no-harden-sway-ipc* ]]; then
             die "Failed to strip --no-harden-sway-ipc from the derived sway config, so --harden-ipc would not have hardened anything"
         fi
-        info "Hardening sway IPC: shepherdd will unlink the compositor socket"
+        info "Hardening sway IPC: lunchboxd will unlink the compositor socket"
     elif [[ "$exec_line" != *--no-harden-sway-ipc* ]]; then
         # Without the opt-out the session would harden itself and every later
         # `swaymsg` would fail, which reads as a broken harness rather than a
         # missing flag.
-        die "sway.conf no longer passes --no-harden-sway-ipc on its shepherdd exec line, so a plain 'dev headless' would unlink the compositor socket (issue #144)"
+        die "sway.conf no longer passes --no-harden-sway-ipc on its lunchboxd exec line, so a plain 'dev headless' would unlink the compositor socket (issue #144)"
     fi
 
     # The management socket's peer check stays off by default, for the reason
-    # `sway.conf` gives: it accepts peers in shepherdd's own cgroup, and
+    # `sway.conf` gives: it accepts peers in lunchboxd's own cgroup, and
     # everything a plain dev session starts shares the cgroup of the shell that
     # launched it, so arming it would only refuse clients run from another
     # terminal without separating anything.
@@ -393,24 +393,24 @@ headless_start() {
     # `--harden-ipc-peers` takes the opt-out back off, the same way
     # `--harden-ipc` does — and, because stripping the flag is not by itself
     # enough, `headless_scope_prefix` puts the session somewhere the check can
-    # mean something. See the recipe in `crates/shepherd-ipc/README.md`.
+    # mean something. See the recipe in `crates/lunchbox-ipc/README.md`.
     if [[ "$harden_peers" -eq 1 ]]; then
-        sed -i "/^exec .*shepherdd -c /s# --no-restrict-ipc-peers##g" "$sway_config"
-        exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$sway_config" || true)"
+        sed -i "/^exec .*lunchboxd -c /s# --no-restrict-ipc-peers##g" "$sway_config"
+        exec_line="$(grep -E "^exec .*lunchboxd -c [^ ]+" "$sway_config" || true)"
         if [[ "$exec_line" == *--no-restrict-ipc-peers* ]]; then
             die "Failed to strip --no-restrict-ipc-peers from the derived sway config, so --harden-ipc-peers would not have armed anything"
         fi
         info "Arming the management-socket peer check: only this session and root may drive the daemon"
     elif [[ "$exec_line" != *--no-restrict-ipc-peers* ]]; then
-        die "sway.conf no longer passes --no-restrict-ipc-peers on its shepherdd exec line, so a dev session would refuse clients started from any other terminal (issue #144)"
+        die "sway.conf no longer passes --no-restrict-ipc-peers on its lunchboxd exec line, so a dev session would refuse clients started from any other terminal (issue #144)"
     fi
 
     # Same shape for the state custodian (issue #157): a dev box has no
-    # `shepherd-stated` installed and no kiosk session for one to trust, so
+    # `lunchbox-stated` installed and no kiosk session for one to trust, so
     # without the opt-out every run falls back to a local store and raises a
     # Critical diagnostic. True, but noise rather than news here.
     if [[ "$exec_line" != *--no-state-custodian* ]]; then
-        die "sway.conf no longer passes --no-state-custodian on its shepherdd exec line, so every dev session would raise state_not_protected (issue #157)"
+        die "sway.conf no longer passes --no-state-custodian on its lunchboxd exec line, so every dev session would raise state_not_protected (issue #157)"
     fi
 
     # The idle blank must keep its own `resume` (issue #197). `swayidle` parses
@@ -496,8 +496,8 @@ headless_start() {
         maybe_sudo pkill -u "$user" -f "sway -c $sway_config" 2>/dev/null || true
 
         info "Starting headless Sway ($renderer renderer, $size) as $user..."
-        # shepherdd/launcher/HUD get no SHEPHERD_SOCKET, so they agree on the
-        # default $XDG_RUNTIME_DIR/shepherdd/shepherdd.sock under this runtime dir.
+        # lunchboxd/launcher/HUD get no SHEPHERD_SOCKET, so they agree on the
+        # default $XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock under this runtime dir.
         setsid sudo -u "$user" env -i \
             HOME="$target_home" USER="$user" LOGNAME="$user" \
             "PATH=$repo_root/target/debug:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin" \
@@ -561,12 +561,12 @@ headless_start() {
     export SHEPHERD_HEADLESS_USER="$user"
     export XDG_RUNTIME_DIR="$rt"
 
-    # Second stage: the alias exists only once shepherdd has connected to the
+    # Second stage: the alias exists only once lunchboxd has connected to the
     # compositor, so waiting for it distinguishes "sway did not start" (above)
-    # from "shepherdd did not" — the two used to be one indistinguishable
+    # from "lunchboxd did not" — the two used to be one indistinguishable
     # timeout, and the second is by far the more common dev failure.
     if ! headless_wait_socket "$sway_alias" "$user" 300; then
-        error "shepherdd did not connect to the compositor within 30s (no $sway_alias). Last log lines:"
+        error "lunchboxd did not connect to the compositor within 30s (no $sway_alias). Last log lines:"
         tail -n 20 "$log" >&2 || true
         headless_stop quiet || true
         die "Failed to start headless session"
@@ -605,11 +605,11 @@ EOF
     # Asking for the armed check and getting a degraded one is the failure this
     # flag exists to prevent, and it is invisible unless someone reads the log:
     # the session comes up and every client still connects, because they all
-    # share shepherdd's cgroup either way. So confirm it, and hand back the
+    # share lunchboxd's cgroup either way. So confirm it, and hand back the
     # daemon's own reason when it did not arm.
     if [[ "$harden_peers" -eq 1 ]]; then
         if grep -aq "accepts only this session and root" "$log"; then
-            success "Peer check armed: only shepherdd's own cgroup and root may drive the daemon"
+            success "Peer check armed: only lunchboxd's own cgroup and root may drive the daemon"
         else
             local why
             why="$(grep -aoE "(delegated cgroup subtree|Activities will share shepherd's own cgroup)[^\"]*" "$log" | head -1)"
@@ -726,19 +726,19 @@ headless_stop() {
     if [[ -n "$u" && "$u" != "$(id -un)" ]]; then
         # Owned by another user — signal + reap via sudo, scoped to that user.
         maybe_sudo kill -KILL "$SHEPHERD_HEADLESS_PID" 2>/dev/null || true
-        maybe_sudo pkill -u "$u" -x shepherdd 2>/dev/null || true
+        maybe_sudo pkill -u "$u" -x lunchboxd 2>/dev/null || true
         maybe_sudo pkill -u "$u" -x shepherd-launcher 2>/dev/null || true
-        maybe_sudo pkill -u "$u" -x shepherd-hud 2>/dev/null || true
-        maybe_sudo pkill -u "$u" -x shepherd-media 2>/dev/null || true
+        maybe_sudo pkill -u "$u" -x lunchbox-hud 2>/dev/null || true
+        maybe_sudo pkill -u "$u" -x lunchbox-media 2>/dev/null || true
         maybe_sudo pkill -u "$u" -x sway 2>/dev/null || true
         # Remove the dedicated runtime dir we created for this user.
         maybe_sudo rm -rf "$XDG_RUNTIME_DIR"
     else
         kill -KILL "$SHEPHERD_HEADLESS_PID" 2>/dev/null || true
-        pkill -x shepherdd 2>/dev/null || true
+        pkill -x lunchboxd 2>/dev/null || true
         pkill -x shepherd-launcher 2>/dev/null || true
-        pkill -x shepherd-hud 2>/dev/null || true
-        pkill -x shepherd-media 2>/dev/null || true
+        pkill -x lunchbox-hud 2>/dev/null || true
+        pkill -x lunchbox-media 2>/dev/null || true
         [[ -n "${SHEPHERD_SOCKET:-}" ]] && rm -f "$SHEPHERD_SOCKET"
         # The alias outlives sway: it is a second name for a socket whose
         # inode is now gone, so it would sit there dangling.
@@ -761,7 +761,7 @@ Usage: shepherd dev headless [options]   # start a detached headless session
        shepherd dev stop                 # tear the session down
 
 Start options:
-    --config PATH  shepherdd config to boot (default: ./config.example.toml,
+    --config PATH  lunchboxd config to boot (default: ./config.example.toml,
                    or the target user's ~/.config/shepherd/config.toml under --user)
     --user NAME    Run the whole stack as NAME (via sudo) for a more realistic
                    session: that user's groups, HOME, and default config. The
@@ -772,15 +772,15 @@ Start options:
     --gpu          Use the GL renderer against a DRM node instead of pixman
     --no-build     Skip the cargo build; use existing target/debug binaries
     --harden-ipc   Exercise the production sway-IPC hardening (issue #144):
-                   shepherdd unlinks the compositor's socket once it has
+                   lunchboxd unlinks the compositor's socket once it has
                    connected, so no other process can reach it. That is
-                   shepherdd's default; sway.conf opts out because it is the
+                   lunchboxd's default; sway.conf opts out because it is the
                    development config, and this flag takes the opt-out back off.
-                   The session stays drivable through the alias shepherdd
+                   The session stays drivable through the alias lunchboxd
                    creates first, which this harness always uses either way.
     --harden-ipc-peers
                    Exercise the production management-socket peer check (issue
-                   #144): only shepherdd's own cgroup and root may drive the
+                   #144): only lunchboxd's own cgroup and root may drive the
                    daemon. Needs sudo. The check only means anything in a cgroup
                    an activity cannot join, and a stack started from a shell
                    sits in the user manager's delegated subtree, so the session

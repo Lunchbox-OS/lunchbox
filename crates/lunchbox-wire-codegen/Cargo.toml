@@ -1,0 +1,30 @@
+[package]
+name = "lunchbox-wire-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generates client mirrors of the lunchboxd wire types from their JSON Schema"
+
+# A leaf crate: nothing depends on it, and it is deliberately left out of the
+# workspace's `default-members` so a plain `cargo build` never pulls schemars
+# (or its derive machinery) into lunchboxd and the launcher. Being *above*
+# lunchbox-ble in the graph is what lets it describe the BLE claim types too,
+# which a generator living in lunchbox-management could not reach.
+
+[dependencies]
+lunchbox-api = { workspace = true, features = ["schema"] }
+lunchbox-management = { workspace = true, features = ["schema"] }
+lunchbox-ble = { workspace = true, features = ["schema"] }
+lunchbox-config = { workspace = true, features = ["schema"] }
+lunchbox-config-wasm = { workspace = true, features = ["schema"] }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[bin]]
+name = "rpc-codegen"
+path = "src/bin/rpc_codegen.rs"

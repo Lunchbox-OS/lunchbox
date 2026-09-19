@@ -1,6 +1,6 @@
 # Emulated games
 
-`shepherdd` runs emulated games through [RetroArch][retroarch], the libretro
+`lunchboxd` runs emulated games through [RetroArch][retroarch], the libretro
 frontend, with `type = "retroarch"` entries. Compared with launching RetroArch
 as a plain `type = "process"` activity, the dedicated kind exists to make an
 emulator behave like every other supervised activity:
@@ -220,7 +220,7 @@ the exact path for the session you are looking at.
 produces one:
 
 ```
-~/.local/share/shepherdd/retroarch/pokemon-firered/
+~/.local/share/lunchboxd/retroarch/pokemon-firered/
 ├── append.cfg              # generated on every launch; see below
 └── states/mGBA/…state.auto # the resume state (+ .png thumbnail)
 ```
@@ -313,7 +313,7 @@ shepherd checks for this at every launch and warns, naming the file and the
 keys:
 
 ```
-WARN shepherd_host_linux::retroarch: RetroArch override sets settings shepherd
+WARN lunchbox_host_linux::retroarch: RetroArch override sets settings shepherd
 relies on; RetroArch applies overrides after --appendconfig, so these win …
 override_file=~/.config/retroarch/config/mGBA/mGBA.cfg
 settings=savestate_auto_save, kiosk_mode_enable

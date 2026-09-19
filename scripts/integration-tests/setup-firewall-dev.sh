@@ -8,7 +8,7 @@
 # After running with sudo, log out and back in (or open a new sway session)
 # so the supplementary group membership takes effect. Local activities with
 # `[entries.firewall]` configured will then be enforced; the wiring is also
-# covered in CI by the shepherd-e2e firewall tests.
+# covered in CI by the lunchbox-e2e firewall tests.
 
 set -euo pipefail
 
@@ -31,7 +31,7 @@ fi
 # login profile loads ~/.cargo/bin onto PATH (sudo strips it via
 # secure_path).
 echo "[setup] Building debug helper..."
-sudo -u "$TARGET_USER" bash -lc "cd '$REPO_ROOT' && cargo build --bin shepherd-firewall-helper"
+sudo -u "$TARGET_USER" bash -lc "cd '$REPO_ROOT' && cargo build --bin lunchbox-firewall-helper"
 
 # Delegate to the main installer.
 exec "$REPO_ROOT/scripts/shepherd" install firewall --user "$TARGET_USER" --debug

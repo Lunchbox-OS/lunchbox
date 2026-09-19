@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Configuration validation logic for shepherd-launcher
-# Validates shepherdd configuration files
+# Validates lunchboxd configuration files
 
 # Get the directory containing this script
 CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -167,7 +167,7 @@ config_main() {
                         config_path="$example_path"
                         info "Using example config: $config_path"
                     else
-                        die "No config file found. Specify a path or install shepherdd."
+                        die "No config file found. Specify a path or install lunchboxd."
                     fi
                 fi
             fi

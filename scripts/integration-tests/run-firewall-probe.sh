@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Inside-the-activity firewall probe.
 #
-# Launched by shepherdd as the body of the "firewall-probe" entry, under the
-# transient systemd scope created by shepherd-firewall-helper. Probes one
+# Launched by lunchboxd as the body of the "firewall-probe" entry, under the
+# transient systemd scope created by lunchbox-firewall-helper. Probes one
 # allowed TCP target and one denied TCP target via bash's /dev/tcp, then
 # writes the results atomically to a log file the orchestrator polls.
 #
@@ -23,7 +23,7 @@ LOG="${SHEPHERD_FIREWALL_PROBE_LOG:?SHEPHERD_FIREWALL_PROBE_LOG required}"
 ALLOW="${SHEPHERD_FIREWALL_PROBE_ALLOW:?SHEPHERD_FIREWALL_PROBE_ALLOW required}"
 DENY="${SHEPHERD_FIREWALL_PROBE_DENY:?SHEPHERD_FIREWALL_PROBE_DENY required}"
 HOLD="${SHEPHERD_FIREWALL_PROBE_HOLD_SECONDS:-120}"
-# Snap/Flatpak entries have an inherent race: shepherdd polls for the
+# Snap/Flatpak entries have an inherent race: lunchboxd polls for the
 # runtime's scope cgroup to appear, then invokes the helper to attach BPF.
 # That can lag the activity's start by hundreds of ms. Wait so the probes
 # happen *after* the BPF program is attached. Process-kind entries don't

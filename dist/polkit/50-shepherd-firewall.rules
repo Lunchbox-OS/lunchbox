@@ -1,4 +1,4 @@
-// Polkit rule for shepherd-firewall-helper.
+// Polkit rule for lunchbox-firewall-helper.
 //
 // Grants the action `org.shepherd.firewall.apply-process` (declared in
 // /usr/share/polkit-1/actions/org.shepherd.firewall.policy) without a password
@@ -10,7 +10,7 @@
 //   1. Create the group:   sudo groupadd --system shepherd-firewall
 //   2. Add the kiosk user: sudo usermod -aG shepherd-firewall <user>
 //   3. The user must log out and back in for the supplementary group to take
-//      effect, OR shepherdd must be restarted from a fresh session.
+//      effect, OR lunchboxd must be restarted from a fresh session.
 
 polkit.addRule(function(action, subject) {
     if (action.id === "org.shepherd.firewall.apply-process" &&

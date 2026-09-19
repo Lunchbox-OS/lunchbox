@@ -1,16 +1,16 @@
 // Polkit rule for shepherd's session watchdog (issue #172).
 //
-// Every activity runs as the kiosk uid, and so does `shepherdd`. Signal
+// Every activity runs as the kiosk uid, and so does `lunchboxd`. Signal
 // permission is a uid comparison, so an activity can `kill` -- or `SIGSTOP` --
 // the daemon supervising it, and the session carries on with no time
-// accounting, no bedtime and no audit. The fallback that catches a shepherdd
+// accounting, no bedtime and no audit. The fallback that catches a lunchboxd
 // which merely *exits* (`sh -c '... || loginctl terminate-session'`, installed
 // into the sway config) runs at that same uid, so killing it first defeats it.
 //
 // The one part of shepherd outside the session is the state custodian,
-// `shepherd-stated`, running as `shepherd-state`: a uid nothing inside the
+// `lunchbox-stated`, running as `shepherd-state`: a uid nothing inside the
 // session can signal, and which already knows which logind session is the
-// kiosk's. It watches a connection `shepherdd` holds open and ends the session
+// kiosk's. It watches a connection `lunchboxd` holds open and ends the session
 // when the feeding stops. Ending a session it does not own is what this rule
 // grants.
 //
@@ -28,7 +28,7 @@
 // directory, not the socket, not the process.
 //
 // Without this rule the device still boots and everything else still works.
-// The custodian checks for it at startup, `shepherdd` raises the `Critical`
+// The custodian checks for it at startup, `lunchboxd` raises the `Critical`
 // diagnostic `session_not_guarded`, and the journal names this file -- because
 // a watchdog that cannot fire is worse than none: it is the shape that looks
 // like protection.

@@ -1,22 +1,22 @@
-# Sample shepherdd configuration
+# Sample lunchboxd configuration
 # This file defines the policy for what applications can run and when
 
 config_version = 1
 
 [service]
 # Uncomment to customize paths (defaults use XDG directories for user-writable access)
-# socket_path defaults to $XDG_RUNTIME_DIR/shepherdd/shepherdd.sock
-# log_dir defaults to $XDG_STATE_HOME/shepherdd or ~/.local/state/shepherdd
-# data_dir defaults to $XDG_DATA_HOME/shepherdd or ~/.local/share/shepherdd
-# socket_path = "/run/user/1000/shepherdd/shepherdd.sock"
-# log_dir = "~/.local/state/shepherdd"
-# data_dir = "~/.local/share/shepherdd"
+# socket_path defaults to $XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock
+# log_dir defaults to $XDG_STATE_HOME/lunchboxd or ~/.local/state/lunchboxd
+# data_dir defaults to $XDG_DATA_HOME/lunchboxd or ~/.local/share/lunchboxd
+# socket_path = "/run/user/1000/lunchboxd/lunchboxd.sock"
+# log_dir = "~/.local/state/lunchboxd"
+# data_dir = "~/.local/share/lunchboxd"
 
 # Capture stdout/stderr from child applications to log files
 # Logs are written to child_log_dir (or log_dir/sessions if not set)
 # File format: <entry_id>_<timestamp>.log
 # capture_child_output = true
-# child_log_dir = "~/.local/state/shepherdd/sessions"
+# child_log_dir = "~/.local/state/lunchboxd/sessions"
 
 # Default max run duration if not specified per entry (1 hour)
 # Set to 0 for unlimited (no time limit)
@@ -47,7 +47,7 @@ default_max_run_seconds = 3600
 #
 # Per-device limits (e.g. a lower cap for headphones than for speakers) are NOT
 # configured here. Devices identify themselves in ways that cannot be predicted
-# from a config file, so shepherdd records each audio output it sees and you set
+# from a config file, so lunchboxd records each audio output it sees and you set
 # a limit on it from the admin web UI ("Volume limits per device"). Plug the
 # device in once and it appears in that list.
 #
@@ -72,7 +72,7 @@ allow_change = true      # Whether brightness changes are allowed at all
 
 # Automatic (ambient-light) brightness (optional).
 # When the host exposes an ambient light sensor (an IIO illuminance channel,
-# e.g. /sys/bus/iio/devices/iio:deviceN/in_illuminance_raw), shepherdd can
+# e.g. /sys/bus/iio/devices/iio:deviceN/in_illuminance_raw), lunchboxd can
 # drive the backlight from measured room light. The screen sits at
 # `min_percent` at/below `dim_lux` and at `max_percent` at/above `bright_lux`,
 # interpolated logarithmically in between. The result is still clamped by the
@@ -90,7 +90,7 @@ enabled = false             # Start with auto brightness on?
 # poll_interval_seconds = 3 # How often to sample the sensor
 
 # External monitor / docking (optional, issue #87)
-# When a handheld or laptop is docked to an external monitor or TV, shepherdd
+# When a handheld or laptop is docked to an external monitor or TV, lunchboxd
 # mirrors the primary panel onto it by default (via `wl-mirror`) and offers a
 # HUD toggle to switch to "external only" at the TV's native resolution. Exactly
 # one logical output is ever active, so the one-activity-at-a-time rule holds.
@@ -108,13 +108,13 @@ interval_seconds = 300  # Keep this high to avoid excessive network requests
 timeout_ms = 1500
 
 # Background media prefetch (optional) — issue #127
-# shepherdd downloads the remote items of `type = "media"` libraries ahead of
+# lunchboxd downloads the remote items of `type = "media"` libraries ahead of
 # time, so a video the child opens later plays from disk instead of buffering,
 # and the library keeps working offline. Downloads pause while an activity is
 # running and while the internet is down, and a speculative download will never
 # displace a video watched within `watched_grace_days`.
 #
-# See docs/shepherd-media.md for the cache's eviction policy.
+# See docs/lunchbox-media.md for the cache's eviction policy.
 [service.media]
 # prefetch = true                        # global off switch
 # prefetch_while_session_active = false  # true spends CPU/bandwidth during play
@@ -160,7 +160,7 @@ timeout_ms = 1500
 
 # `cache_max_bytes` bounds the cache; `free_space_floor_bytes` bounds the volume
 # it sits on. Both are needed: a 10 GiB cache on a 16 GiB device fills the disk
-# long before it fills the cache. shepherdd hands the cap to every media
+# long before it fills the cache. lunchboxd hands the cap to every media
 # activity it launches, so the daemon filling the cache and the player trimming
 # it agree on its size — which is why this is config and not only the
 # SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES environment variable, which remains as a
@@ -171,7 +171,7 @@ timeout_ms = 1500
 # between the launch request and the game starting (e.g. the offline "Unable to
 # Sync" cloud warning, or a "connect a controller" advisory). These render
 # inside Steam's hidden CEF UI, so on a kiosk the launch just hangs forever.
-# shepherdd watches Steam's loopback CEF remote-debugging endpoint and clicks the
+# lunchboxd watches Steam's loopback CEF remote-debugging endpoint and clicks the
 # affirmative button for the interstitials you list here. Only listed kinds are
 # dismissed; an empty list disables the feature and the debug port is never
 # opened. When this key is omitted, the safe default set below is used.
@@ -222,8 +222,8 @@ mode = "self_signed"         # "auto" | "off" | "self_signed" | "files"
                              # "files" is the mode with a real padlock and no warnings:
                              # point it at `tailscale cert` output, a Let's Encrypt
                              # certificate from a DNS-01 client, or a home CA.
-# cert = "/var/lib/shepherdd/tls/fullchain.pem"   # required for mode = "files"
-# key  = "/var/lib/shepherdd/tls/privkey.pem"
+# cert = "/var/lib/lunchboxd/tls/fullchain.pem"   # required for mode = "files"
+# key  = "/var/lib/lunchboxd/tls/privkey.pem"
 
 # How long a signed-in browser stays signed in, and what guessing costs.
 # [service.management_api.auth]
@@ -619,7 +619,7 @@ end = "20:00"
 # that grabs touchscreens and synthesizes mouse events for the duration of
 # the activity. `input_compat` also accepts a list, so touch and gamepad
 # bridges can be stacked on a handheld with both. Requires the user
-# running shepherdd to be in the `input` group; see docs/INSTALL.md.
+# running lunchboxd to be in the `input` group; see docs/INSTALL.md.
 #
 # The inverse, `input_compat = "tablet_to_touch"`, grabs an absolute pointer
 # or tablet and synthesizes touch events instead — for activities that only
@@ -694,7 +694,7 @@ always = true
 # Supported device types: "mouse", "touch", "keyboard", "gamepad". (Camera,
 # microphone, and MIDI are planned but not yet supported.) A list requires ALL
 # of the named types to be connected. Detecting devices reads /dev/input, so the
-# user running shepherdd must be in the `input` group (see docs/INSTALL.md) —
+# user running lunchboxd must be in the `input` group (see docs/INSTALL.md) —
 # the same requirement as the `input_compat` bridges. If detection can't run,
 # the gate fails open (the activity stays visible) rather than hiding it.
 
@@ -702,7 +702,7 @@ always = true
 # does not pass output scaling to XWayland clients, so an XWayland game on
 # a panel configured with `output * scale 1.5` only renders at 1280x720 of
 # a 1920x1080 panel and sway upscales the result (blurry). When this flag
-# is set, shepherdd drops sway's compositor scale to 1.0 for the duration
+# is set, lunchboxd drops sway's compositor scale to 1.0 for the duration
 # of the activity so the client sees the panel's native pixel grid; the
 # HUD compensates with a counter-scale so it stays a normal physical size.
 # Restored on exit.
@@ -798,7 +798,7 @@ end = "20:00"
 required = true
 check = "http://www.msftconnecttest.com/connecttest.txt"  # Use Microsoft's test URL (Minecraft is owned by Microsoft)
 # forward_check = false
-#   By default shepherdd also hands the resolved check (this one, else
+#   By default lunchboxd also hands the resolved check (this one, else
 #   `service.internet.check`) to the activity itself, for kinds that can act
 #   on it — today `type = "media"`, whose browse grid hides items with no
 #   local source while the check fails. Set false to launch without one.
@@ -943,13 +943,13 @@ max_run_seconds = 3600       # 1 hour
 daily_quota_seconds = 7200   # 2 hours per day
 
 ## === Media ===
-# `shepherd-media` reads a declarative `.toml` library file and either
+# `lunchbox-media` reads a declarative `.toml` library file and either
 # direct-plays a single item or opens a poster-grid browser for a whole
-# collection. See docs/shepherd-media.md for the schema and authoring guide.
-# `shepherd-media validate <library.toml>` checks a file before you wire it
+# collection. See docs/lunchbox-media.md for the schema and authoring guide.
+# `lunchbox-media validate <library.toml>` checks a file before you wire it
 # up here.
 #
-# Entries use `type = "media"`: shepherdd builds the `shepherd-media` command
+# Entries use `type = "media"`: lunchboxd builds the `lunchbox-media` command
 # line itself, so a bad item id or an unknown quality is caught by
 # `shepherd-admin config validate` rather than on the child's screen.
 #
@@ -960,7 +960,7 @@ daily_quota_seconds = 7200   # 2 hours per day
 #
 #   cp movies-library.example.toml ~/.config/shepherd/movies.toml
 #   $EDITOR ~/.config/shepherd/movies.toml
-#   shepherd-media validate ~/.config/shepherd/movies.toml
+#   lunchbox-media validate ~/.config/shepherd/movies.toml
 #
 # A YouTube playlist URL can be used in place of a library path; see the
 # `youtube-channel` entry at the end of this section.
@@ -998,7 +998,7 @@ end = "20:00"
 # Set `resume = true` to remember where each item was left off (and offer to
 # continue the last one watched when the library re-opens). It is off by
 # default: without it nothing about what was watched is written to disk.
-# See docs/shepherd-media.md#resuming-playback.
+# See docs/lunchbox-media.md#resuming-playback.
 [[entries]]
 id = "movies-library"
 label = "Movies"
@@ -1049,15 +1049,15 @@ max_run_seconds = 0  # Unlimited: sleep/study aid
 daily_quota_seconds = 0  # Unlimited
 cooldown_seconds = 0  # No cooldown
 
-# A YouTube playlist exposed as a browse-mode activity. shepherd-media
+# A YouTube playlist exposed as a browse-mode activity. lunchbox-media
 # fetches the playlist via yt-dlp at startup (cached for 6 hours under
 # $XDG_CACHE_HOME/shepherd/media/playlists/) and shows each video as a
 # poster tile. Replace the `list=` value with a playlist you control or
-# trust. See docs/shepherd-media.md for caching behavior and the rationale
+# trust. See docs/lunchbox-media.md for caching behavior and the rationale
 # for the recommended flags below.
 #
 # Every source here is a YouTube URL, so the grid is unreachable when
-# offline. shepherdd hands the activity the connectivity check from
+# offline. lunchboxd hands the activity the connectivity check from
 # `[entries.internet]`, or `service.internet.check` above when the entry sets
 # none — as here. Browse mode then polls it and empties the grid gracefully
 # instead of failing on the first click. Set `forward_check = false` under
@@ -1205,9 +1205,9 @@ default = "deny"
 # Terminal for debugging only.
 # `foot` is used here (not `ptyxis`, `gnome-terminal`, etc.) because
 # single-instance GApplication terminals D-Bus-delegate new windows to a
-# long-lived primary that lives outside shepherdd's transient scope --
+# long-lived primary that lives outside lunchboxd's transient scope --
 # the [entries.firewall] block below would silently be a no-op. See the
-# "Firewall caveats" section in crates/shepherd-config/README.md.
+# "Firewall caveats" section in crates/lunchbox-config/README.md.
 [[entries]]
 id = "terminal"
 label = "Terminal"

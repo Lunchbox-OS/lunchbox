@@ -14,7 +14,7 @@
  * - "Could not read the network" and "offline" are different sentences.
  *
  * The daemon derives `reachable` and `management_urls`, and their derivation is
- * tested in `shepherd-api`. These assertions are about the page believing them.
+ * tested in `lunchbox-api`. These assertions are about the page believing them.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";

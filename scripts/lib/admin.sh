@@ -67,7 +67,7 @@ install_ytdlp() {
     # Install or upgrade yt-dlp inside the venv.
     maybe_sudo "$YTDLP_VENV/bin/pip" install --quiet --upgrade yt-dlp
 
-    # Symlink the venv binary onto PATH so shepherd-media (and anything else)
+    # Symlink the venv binary onto PATH so lunchbox-media (and anything else)
     # can find it as plain `yt-dlp`.
     maybe_sudo ln -sf "$YTDLP_VENV/bin/yt-dlp" "$YTDLP_LINK"
 
@@ -106,14 +106,14 @@ EOF
 # ---------------------------------------------------------------------------
 #
 # libva dispatches to a per-vendor `<name>_drv_video.so`. With none installed,
-# mpv's `hwdec` auto-detection finds nothing and shepherd-media decodes every frame
+# mpv's `hwdec` auto-detection finds nothing and lunchbox-media decodes every frame
 # on the CPU — roughly 6x the CPU for 1080p30 on an Intel HD 4000 (issue #115).
 # Ubuntu's `mpv` package neither depends on nor recommends a driver, so a fresh
 # install usually has none.
 #
 # Which driver is the right one depends on the GPU, so the packages are chosen
 # from the hardware present rather than installed blanket-fashion. Whether the
-# chosen driver actually loads at playback time is reported by shepherd-media
+# chosen driver actually loads at playback time is reported by lunchbox-media
 # itself, which observes mpv's `hwdec-current` and warns when video ends up on
 # the CPU.
 
@@ -322,7 +322,7 @@ install_va_api_drivers() {
 
     info "Installing VA-API drivers for hardware video decoding: ${packages[*]}"
     if ! maybe_sudo apt-get install -y "${packages[@]}"; then
-        warn "VA-API driver install failed; shepherd-media will decode video on the CPU"
+        warn "VA-API driver install failed; lunchbox-media will decode video on the CPU"
         return 0
     fi
     success "VA-API drivers installed: ${packages[*]}"
@@ -346,11 +346,11 @@ Usage: shepherd-admin va-api <install|detect>
     install   Install the VA-API drivers this host's graphics hardware needs
     detect    Show the detected hardware and the packages it would install
 
-shepherd-media decodes video on the GPU through mpv's VA-API support, which
+lunchbox-media decodes video on the GPU through mpv's VA-API support, which
 needs a libva driver for your graphics hardware. Ubuntu's mpv package does not
 pull one in, so without this every frame is decoded on the CPU.
 
-The driver in use is reported in shepherd-media's log at the start of each
+The driver in use is reported in lunchbox-media's log at the start of each
 video ("mpv is decoding video with vaapi (zero-copy)", or a warning when it
 ends up on the CPU).
 EOF
@@ -365,7 +365,7 @@ EOF
 # Media dependencies
 # ---------------------------------------------------------------------------
 
-# Everything shepherd-media needs beyond the apt packages in run.pkgs: a VA-API
+# Everything lunchbox-media needs beyond the apt packages in run.pkgs: a VA-API
 # driver for its hardware decoding, and yt-dlp for YouTube libraries. Both are
 # kept out of run.pkgs — the drivers because the right ones depend on the
 # hardware, yt-dlp because the archived build goes stale — so this is the one
@@ -387,7 +387,7 @@ media_deps_main() {
             cat <<'EOF'
 Usage: shepherd-admin media-deps install
 
-Installs everything shepherd-media needs that apt cannot cover on its own:
+Installs everything lunchbox-media needs that apt cannot cover on its own:
 
     va-api    VA-API drivers matched to this host's graphics hardware,
               without which video is decoded on the CPU
@@ -450,8 +450,8 @@ android_app_meta() {
             ANDROID_APP_LABEL="Shepherd Companion"
             ;;
         media)
-            ANDROID_APP_DIR="crates/shepherd-media-android/android"
-            ANDROID_APP_ARTIFACT="shepherd-media"
+            ANDROID_APP_DIR="crates/lunchbox-media-android/android"
+            ANDROID_APP_ARTIFACT="lunchbox-media"
             ANDROID_APP_PACKAGE="com.armeafamily.shepherd.media"
             ANDROID_APP_LABEL="Shepherd Media"
             ;;
@@ -1187,7 +1187,7 @@ apps_main() {
 # The packaged face of `shepherd install policy`. On a device the policy lives
 # with the state custodian and `sudoedit` is the other way in; this is the one
 # that checks the file first, which matters because an unparseable policy is
-# fatal at shepherdd's *startup* rather than on reload.
+# fatal at lunchboxd's *startup* rather than on reload.
 #
 # `--source` is required here, unlike the from-source command, which defaults to
 # the user's home copy. After migration that path holds a signpost rather than a
@@ -1202,11 +1202,11 @@ admin_policy() {
 Usage: shepherd-admin policy USER --source PATH
 
 Install PATH as USER's policy, validating it first. The state custodian holds
-the policy shepherdd reads; shepherdd reloads within a second.
+the policy lunchboxd reads; lunchboxd reloads within a second.
 
 The other way to change it on a device is to edit the custodian's copy directly:
 
-  sudoedit /var/lib/shepherdd/state/USER/config.toml
+  sudoedit /var/lib/lunchboxd/state/USER/config.toml
 
 That takes effect the same way, but nothing checks it first.
 EOF
@@ -1250,7 +1250,7 @@ admin_migrate_state() {
 # `shepherd-admin restore-state` -- move state back out of the custodian.
 #
 # Run before downgrading to a release without the custodian. The migration
-# *moves* the database and the admin record, so an older shepherdd would find an
+# *moves* the database and the admin record, so an older lunchboxd would find an
 # empty home directory, open a fresh database and -- with no `admin.toml` --
 # report itself unclaimed, letting the next phone to pair claim the device.
 #
@@ -1328,7 +1328,7 @@ setup_user() {
 # systemd-logind drop-in that maps a short press of the hardware power button.
 # The distro default is `poweroff`; a kiosk usually wants `suspend` (tap to
 # sleep). A long press (HandlePowerKeyLongPress, left at the default) still
-# powers off. shepherdd already listens for logind's PrepareForSleep to draw the
+# powers off. lunchboxd already listens for logind's PrepareForSleep to draw the
 # suspend cover, so the device wakes back into the session cleanly.
 POWER_KEY_DROPIN="/etc/systemd/logind.conf.d/10-shepherd-power-key.conf"
 

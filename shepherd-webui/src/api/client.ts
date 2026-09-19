@@ -1,10 +1,10 @@
-// JSON-RPC client for shepherdd's management HTTP API.
+// JSON-RPC client for lunchboxd's management HTTP API.
 //
 // Every operation dispatches through a single `POST /api/v1/rpc`
 // endpoint with body `{ method, params }`; the server routes into
 // `ManagementService::dispatch_json` and hands back either the
 // method's return value (2xx) or `{ error, message }` (4xx/5xx).
-// See `crates/shepherd-http/src/handlers/rpc.rs`.
+// See `crates/lunchbox-http/src/handlers/rpc.rs`.
 
 import axios from "axios";
 import type { RpcMethod, RpcParams, RpcResult } from "./rpc-methods.generated";
@@ -336,7 +336,7 @@ export function openEventStream(signal: AbortSignal): Promise<Response> {
 //
 // Not RPCs. `GET`/`PUT /api/v1/config` carry the config as text with an
 // `ETag`, because the thing being moved is a file — see
-// `crates/shepherd-http/src/handlers/config.rs` for why it is off the RPC
+// `crates/lunchbox-http/src/handlers/config.rs` for why it is off the RPC
 // endpoint entirely.
 // ---------------------------------------------------------------------------
 

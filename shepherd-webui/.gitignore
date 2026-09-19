@@ -4,5 +4,5 @@ dist/*
 dist-standalone/
 .cache/
 # Built by `shepherd build config-wasm` (wasm-pack) from
-# crates/shepherd-config-wasm. Generated, not source.
+# crates/lunchbox-config-wasm. Generated, not source.
 src/config/wasm/

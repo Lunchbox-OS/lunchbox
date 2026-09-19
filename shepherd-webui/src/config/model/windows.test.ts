@@ -15,7 +15,7 @@ import {
   snap,
   toggleDay,
 } from "./windows";
-import fixture from "../../../../crates/shepherd-config-wasm/tests/time_formats.json";
+import fixture from "../../../../crates/lunchbox-config-wasm/tests/time_formats.json";
 
 describe("day masks", () => {
   it("reads the presets the daemon accepts", () => {
@@ -219,10 +219,10 @@ describe("toggleDay", () => {
 /**
  * The editor's half of the time and day format contract.
  *
- * `parseDays` and `parseTime` above re-implement `shepherd_config`'s, because
+ * `parseDays` and `parseTime` above re-implement `lunchbox_config`'s, because
  * the grid parses on every drag frame and cannot round-trip through wasm to do
  * it. Nothing connected the two, and they had drifted — see the fixture's own
- * header for what that cost. `crates/shepherd-config-wasm/tests/time_formats.rs`
+ * header for what that cost. `crates/lunchbox-config-wasm/tests/time_formats.rs`
  * asserts the daemon's side of this same file.
  */
 describe("the format contract with the daemon", () => {

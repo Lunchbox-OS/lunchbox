@@ -43,7 +43,7 @@ function windowSubtitle(w: WindowInfo): string {
 /**
  * A window nobody is supervising: an activity that survived its own teardown,
  * or a surface belonging to no session at all. These are the ones this page
- * exists for — shepherdd reports them but deliberately will not close an
+ * exists for — lunchboxd reports them but deliberately will not close an
  * unrecognized one by itself, so a caregiver has to make that call.
  */
 function isOrphan(w: WindowInfo, adminMode: boolean): boolean {
@@ -272,7 +272,7 @@ export function WindowsPage() {
   const windows = data ?? [];
   // Orphans on the scratchpad stay under the scratchpad heading: they are
   // stashed rather than loose on the child's screen, which is the same line
-  // shepherdd's own reconciliation sweep draws before it warns.
+  // lunchboxd's own reconciliation sweep draws before it warns.
   const orphaned = windows.filter((w) => !w.in_scratchpad && isOrphan(w, adminMode));
   const onScreen = windows.filter((w) => !w.in_scratchpad && !isOrphan(w, adminMode));
   const scratchpad = windows.filter((w) => w.in_scratchpad);

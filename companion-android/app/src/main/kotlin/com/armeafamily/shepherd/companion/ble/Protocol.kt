@@ -6,7 +6,7 @@ import kotlin.uuid.Uuid
 /**
  * GATT identifiers and constants for the Shepherd Management Service.
  *
- * These mirror `crates/shepherd-ble/src/protocol.rs` in the device
+ * These mirror `crates/lunchbox-ble/src/protocol.rs` in the device
  * firmware verbatim; they are a stable wire contract, not implementation
  * detail. Do not change them without changing the device side.
  */
@@ -22,9 +22,9 @@ object Protocol {
      * Protocol version the app speaks. The app refuses a device that answers
      * with a different one.
      *
-     * Hand-mirrored from `crates/shepherd-ble/src/protocol.rs`, and guarded by
+     * Hand-mirrored from `crates/lunchbox-ble/src/protocol.rs`, and guarded by
      * `protocol_constants_match_the_companion` in
-     * `crates/shepherd-wire-codegen/tests/rpc_codegen_drift.rs` — bumping one
+     * `crates/lunchbox-wire-codegen/tests/rpc_codegen_drift.rs` — bumping one
      * side and not the other is a wire break that compiles cleanly on both and
      * shows up only as a phone refusing to pair, which is exactly how it was
      * found the first time (issue #149).

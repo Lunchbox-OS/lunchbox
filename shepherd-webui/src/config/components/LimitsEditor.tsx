@@ -9,7 +9,7 @@
  * The daemon's own fallbacks come from `field-defaults.generated.ts` rather
  * than being restated here — they are resolved at policy load, so the JSON
  * Schema cannot carry them and they are generated from
- * `shepherd-config::LoadTimeDefaults` instead.
+ * `lunchbox-config::LoadTimeDefaults` instead.
  */
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";

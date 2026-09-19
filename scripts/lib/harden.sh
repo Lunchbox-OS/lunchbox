@@ -10,7 +10,7 @@ HARDEN_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HARDEN_LIB_DIR/common.sh"
 
 # State directory for hardening rollback
-HARDENING_STATE_DIR="/var/lib/shepherdd/hardening"
+HARDENING_STATE_DIR="/var/lib/lunchboxd/hardening"
 
 # State for changes that are system-wide rather than per-user.
 #
@@ -222,7 +222,7 @@ EOF
     #
     # `pam_env`'s `user_readenv=1` makes PAM read `~/.pam_environment` -- a file
     # the kiosk user owns -- and hand what it says to the session it is opening.
-    # That is the session shepherdd runs in, so without this the kiosk user, and
+    # That is the session lunchboxd runs in, so without this the kiosk user, and
     # therefore every activity running as that uid, chooses the daemon's whole
     # environment. Ubuntu 26.04 ships it enabled on every GDM service.
     #

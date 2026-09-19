@@ -47,9 +47,9 @@ BPF_LINKER_VERSION="0.10.3"
 # Gradle project (companion-android/) targets; bump together.
 ANDROID_SDK_ROOT="/opt/android-sdk"
 ANDROID_CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-# The NDK is required for the shepherd-media-android cdylib, which cargo-ndk
+# The NDK is required for the lunchbox-media-android cdylib, which cargo-ndk
 # cross-compiles for aarch64-linux-android. Keep this in sync with the version
-# the crate is validated against (see crates/shepherd-media-android/README.md);
+# the crate is validated against (see crates/lunchbox-media-android/README.md);
 # sdkmanager installs it under $ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION, which
 # is what cargo-ndk finds via ANDROID_NDK_HOME.
 ANDROID_NDK_VERSION="27.2.12479018"
@@ -62,7 +62,7 @@ ANDROID_NDK_VERSION="27.2.12479018"
 # clang/sysroot, so bump it deliberately, alongside the NDK.
 CARGO_NDK_VERSION="4.1.2"
 
-# wasm-pack builds crates/shepherd-config-wasm into the browser artifact the
+# wasm-pack builds crates/lunchbox-config-wasm into the browser artifact the
 # web config editor loads. Pinned for the same reason as the tools above: an
 # unpinned install silently adopts whatever upstream published last, and the
 # generated JS glue has to match the `wasm-bindgen` version the crate compiles
@@ -77,7 +77,7 @@ CARGO_NDK_VERSION="4.1.2"
 WASM_PACK_VERSION="0.13.1"
 # Components sdkmanager installs. compileSdk / build-tools must match
 # companion-android/build.gradle.kts.
-# Rust targets cargo-ndk cross-compiles the shepherd-media-android cdylib for:
+# Rust targets cargo-ndk cross-compiles the lunchbox-media-android cdylib for:
 # arm64-v8a (aarch64) and armeabi-v7a (armv7). Installed alongside cargo-ndk in
 # the android set so the CI image bakes them in.
 ANDROID_RUST_TARGETS=(
@@ -154,8 +154,8 @@ install_lint_components() {
 
 # Install the BPF authoring toolchain: nightly Rust (for `-Zbuild-std`),
 # rust-src (so the BPF crate can build core for bpfel-unknown-none), and
-# `bpf-linker` (which crates/shepherd-firewall-bpf uses to emit the
-# cgroup_skb program object embedded into shepherd-firewall-helper).
+# `bpf-linker` (which crates/lunchbox-firewall-bpf uses to emit the
+# cgroup_skb program object embedded into lunchbox-firewall-helper).
 # Idempotent: each step skips if already satisfied.
 install_bpf_toolchain() {
     # Make sure rustup/cargo are on PATH if install_rust just placed them.
@@ -249,7 +249,7 @@ is_android_sdk_installed() {
 
 # Download the command-line tools and use sdkmanager to install the SDK
 # components the companion-android app builds against, plus the NDK the
-# shepherd-media-android cdylib cross-compiles with. Idempotent: skips
+# lunchbox-media-android cdylib cross-compiles with. Idempotent: skips
 # the cmdline-tools download when already extracted and re-runs
 # sdkmanager (which no-ops for already-installed packages).
 #
@@ -308,17 +308,17 @@ install_android_sdk() {
 }
 
 # Install cargo-ndk + the Android Rust targets used to cross-compile the
-# shepherd-media-android cdylib. Part of the `android` set so the Android CI
+# lunchbox-media-android cdylib. Part of the `android` set so the Android CI
 # image (built FROM the base image, which already has Rust) bakes them in — the
 # release/CI jobs then don't install cargo-ndk at runtime.
 #
 # Requires Rust: skipped with a note when cargo is absent, so `deps install
 # android` still works standalone for the Kotlin-only companion app. On a host
-# that builds shepherd-media-android, run `deps install build` first.
+# that builds lunchbox-media-android, run `deps install build` first.
 install_cargo_ndk() {
     if ! command_exists cargo; then
         warn "cargo not found; skipping cargo-ndk + Android Rust targets."
-        warn "Run 'shepherd deps install build' first to build shepherd-media-android."
+        warn "Run 'shepherd deps install build' first to build lunchbox-media-android."
         return 0
     fi
 
@@ -757,7 +757,7 @@ deps_install() {
     maybe_sudo apt-get install -y $packages
     
     # For build and dev sets, also install Rust + the BPF authoring
-    # toolchain (needed by crates/shepherd-firewall-bpf).
+    # toolchain (needed by crates/lunchbox-firewall-bpf).
     if [[ "$set_name" == "build" ]] || [[ "$set_name" == "dev" ]]; then
         install_rust
         install_bpf_toolchain
@@ -770,7 +770,7 @@ deps_install() {
         install_lint_components
     fi
 
-    # For run and dev sets, add shepherd-media's non-apt dependencies: yt-dlp in
+    # For run and dev sets, add lunchbox-media's non-apt dependencies: yt-dlp in
     # its virtualenv, and the VA-API drivers for this host's GPU. Neither can
     # live in run.pkgs — that file is installed as one unconditional apt
     # transaction, while the right VA driver depends on the hardware and yt-dlp
@@ -906,9 +906,9 @@ Commands:
 Package sets:
     build    Build-time dependencies (+ Rust via rustup)
     run      Runtime dependencies only
-    test     Extra packages needed for the shepherd-e2e harness
+    test     Extra packages needed for the lunchbox-e2e harness
     android  JDK + Android SDK + NDK for the companion-android and
-             shepherd-media-android apps
+             lunchbox-media-android apps
     agent    Headless-dev tooling for 'shepherd dev headless' (grim/wtype/jq)
     cross    Cross-compilation toolchain and the target architecture's half of
              the build set. Needs --arch <debian-arch>; see 'shepherd build --arch'.

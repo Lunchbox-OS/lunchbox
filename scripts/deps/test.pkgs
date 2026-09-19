@@ -1,6 +1,6 @@
 # Test-time system packages for shepherd-launcher
 # These are needed in addition to the build deps to run the
-# `shepherd-e2e` end-to-end suite, which boots a real headless
+# `lunchbox-e2e` end-to-end suite, which boots a real headless
 # Sway compositor and the shepherd binaries inside a temp environment.
 # One package per line, comments start with #
 

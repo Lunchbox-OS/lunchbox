@@ -404,7 +404,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runConnectionLoop(record: ShepherdRecord, conn: ShepherdConnection) {
         // Long enough to ride out a daemon restart (~38s of retries).
         // The old 1+2+5s ladder gave up in 8s — less than a session
-        // restart takes — so a routine shepherdd restart exhausted the
+        // restart takes — so a routine lunchboxd restart exhausted the
         // retries while the device was still coming back up, and the
         // reachability probe below then read "advertising but unusable"
         // and offered to re-pair. Suggesting a trip to the TV for what
@@ -490,7 +490,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
                     // stayed foregrounded. On 2026-08-16 that turned one
                     // power-key suspend into a companion that stayed dead
                     // across the resume, a logout/login, and a whole fresh
-                    // shepherdd: the device-side journal shows it advertising
+                    // lunchboxd: the device-side journal shows it advertising
                     // and answering, with the phone never going on air again
                     // (docs/ai/history/2026-08-16 001
                     // ble-connect-fails-after-long-session.md). The banner
@@ -630,7 +630,7 @@ class ShepherdViewModel(app: Application) : AndroidViewModel(app) {
         // to swallow the error silently, which is exactly what made
         // "the list doesn't appear on reopen" so hard to spot. Surface
         // the message; the device's initial StateChanged push (see
-        // shepherd-ble's events_characteristic) is the redundant
+        // lunchbox-ble's events_characteristic) is the redundant
         // backup that usually fills the UI in regardless.
         runCatching { c.serviceState() }.fold(
             onSuccess = { snap ->

@@ -302,9 +302,9 @@
 #           restore-keys: |
 #             ${{ runner.os }}-cargo-v2-
 #
-#       # wasm-pack builds crates/shepherd-config-wasm, then rsbuild writes
+#       # wasm-pack builds crates/lunchbox-config-wasm, then rsbuild writes
 #       # shepherd-webui/dist-standalone/. Never dist/ — that one is compiled into
-#       # shepherdd by rust-embed.
+#       # lunchboxd by rust-embed.
 #       #
 #       # Building and uploading in one job is forced: Forgejo does not implement
 #       # upload-artifact@v4, so `dist-standalone/` cannot be handed from a
@@ -359,9 +359,9 @@
 #           # media is a NativeActivity app whose Gradle build cross-compiles a
 #           # Rust cdylib via cargo-ndk; rust: true gates the cargo cache below.
 #           - name: media
-#             dir: crates/shepherd-media-android/android
+#             dir: crates/lunchbox-media-android/android
 #             gradle_module: app
-#             artifact: shepherd-media
+#             artifact: lunchbox-media
 #             rust: true
 #     steps:
 #       - uses: actions/checkout@v4

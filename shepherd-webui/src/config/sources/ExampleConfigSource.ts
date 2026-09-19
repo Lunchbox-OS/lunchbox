@@ -15,7 +15,7 @@
  * demo cannot drift from the schema the daemon accepts.
  *
  * It costs ~41 kB, and only in the standalone bundle: this whole tree is
- * absent from the build `rust-embed` compiles into shepherdd. Worth a second
+ * absent from the build `rust-embed` compiles into lunchboxd. Worth a second
  * look if the editor is ever routed into the management UI — see the note in
  * `src/App.tsx` about what else rides along.
  */

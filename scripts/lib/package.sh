@@ -495,9 +495,9 @@ EOF
     #       conffile on every device and either prompted or kept the stale
     #       copy, without anyone having edited anything.
     #
-    # /etc/systemd/system/shepherd-stated@.{service,socket} were never in the
+    # /etc/systemd/system/lunchbox-stated@.{service,socket} were never in the
     # list and stay out of it for the same reason: they are shepherd's units,
-    # `crates/shepherd-state-proto/tests/units_match_the_constants.rs` pins
+    # `crates/lunchbox-state-proto/tests/units_match_the_constants.rs` pins
     # their contents against the Rust constants, and a locally-edited copy
     # surviving an upgrade would break the custodian quietly.
     #
@@ -552,7 +552,7 @@ if [ "$1" = "configure" ]; then
         systemctl reload polkit 2>/dev/null \
             || systemctl restart polkit 2>/dev/null \
             || true
-        # Pick up shepherd-stated@.socket / @.service.
+        # Pick up lunchbox-stated@.socket / @.service.
         systemctl daemon-reload || true
     fi
     # Bluetooth drop-in: rendered here from the staged template, not shipped

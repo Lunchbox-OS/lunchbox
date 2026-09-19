@@ -1,6 +1,6 @@
 # Books
 
-`shepherdd` runs reading activities through [Okular][okular], KDE's document
+`lunchboxd` runs reading activities through [Okular][okular], KDE's document
 viewer, with `type = "ebook"` entries. One entry is one book, and opening it
 puts the child back on the page they stopped on.
 

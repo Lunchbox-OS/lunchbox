@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Firewall enforcement test for the cgroup attach path (issue #151).
 #
-# Drives `cargo test -p shepherd-e2e --test firewall_cgroup`, which creates a
-# cgroup, has `shepherd-firewall-helper apply-cgroup` attach the BPF program to
+# Drives `cargo test -p lunchbox-e2e --test firewall_cgroup`, which creates a
+# cgroup, has `lunchbox-firewall-helper apply-cgroup` attach the BPF program to
 # it, and runs run-firewall-probe.sh inside it to check that an allowed target
 # connects and a denied one does not.
 #
@@ -32,8 +32,8 @@ command -v cargo >/dev/null 2>&1 || fail "cargo not found on PATH"
     || fail "cgroup v2 is not mounted at /sys/fs/cgroup"
 
 echo "[orchestrator] Building the helper and the test..."
-cargo build -p shepherd-firewall-helper
-test_bin="$(cargo test -p shepherd-e2e --test firewall_cgroup --no-run \
+cargo build -p lunchbox-firewall-helper
+test_bin="$(cargo test -p lunchbox-e2e --test firewall_cgroup --no-run \
     --message-format=json 2>/dev/null \
     | python3 -c '
 import json, sys

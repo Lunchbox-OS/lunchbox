@@ -1,5 +1,5 @@
 /**
- * Typed builders for the patch vocabulary in `crates/shepherd-config-wasm`.
+ * Typed builders for the patch vocabulary in `crates/lunchbox-config-wasm`.
  *
  * Paths address a location in the TOML document. Entries and groups are
  * addressed by `id` rather than by index, so deleting or reordering one never

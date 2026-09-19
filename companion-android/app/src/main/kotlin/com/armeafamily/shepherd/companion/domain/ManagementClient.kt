@@ -17,7 +17,7 @@ import kotlinx.serialization.json.buildJsonObject
  * Params come from [RpcParams], generated from the trait's own signatures,
  * so a renamed parameter fails the build here rather than at run time. Only
  * the claim-flow methods below still build their own: they live in
- * `crates/shepherd-ble/src/rpc.rs` rather than on `ManagementService`, so the
+ * `crates/lunchbox-ble/src/rpc.rs` rather than on `ManagementService`, so the
  * RPC schema does not describe them.
  */
 class ManagementClient(private val connection: ShepherdConnection) {

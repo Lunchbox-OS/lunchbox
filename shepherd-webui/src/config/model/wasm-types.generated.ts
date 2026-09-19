@@ -1,7 +1,7 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Rendered from `crates/shepherd-config-wasm/` by
-// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// Rendered from `crates/lunchbox-config-wasm/` by
+// `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`.
 // Edit the Rust types and re-run instead.
 //
 // What the editor decodes back out of the wasm module: the validation report

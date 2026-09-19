@@ -1,6 +1,6 @@
 /**
  * The shape of a subject's availability, whose types are generated from
- * `crates/shepherd-config-wasm/src/windows.rs`.
+ * `crates/lunchbox-config-wasm/src/windows.rs`.
  *
  * Spans are half-open minute ranges from local midnight, seven days Monday
  * first, matching the day bitmask's bit order.

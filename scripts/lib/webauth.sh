@@ -52,7 +52,7 @@ webauth_reset() {
 
     if [[ ! -f "$store" ]]; then
         warn "No credential store at $store — this device already has no web password."
-        info "It will mint a setup code the next time shepherdd starts."
+        info "It will mint a setup code the next time lunchboxd starts."
         return 0
     fi
 
@@ -66,7 +66,7 @@ webauth_reset() {
 
     rm -f "$store"
     success "Removed $store"
-    info "Restart shepherdd. A new setup code appears on the device's screen and in the journal."
+    info "Restart lunchboxd. A new setup code appears on the device's screen and in the journal."
 }
 
 webauth_main() {

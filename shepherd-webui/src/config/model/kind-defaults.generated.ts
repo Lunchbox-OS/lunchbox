@@ -1,8 +1,8 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
 // Rendered from `EntryKindTag`'s own answers in
-// `crates/shepherd-api/src/types.rs` by
-// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// `crates/lunchbox-api/src/types.rs` by
+// `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`.
 // Edit the Rust and re-run instead.
 //
 // What an entry gets when it leaves a field unset and its *kind* decides.

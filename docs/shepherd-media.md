@@ -1,19 +1,19 @@
-# shepherd-media
+# lunchbox-media
 
-`shepherd-media` is a small standalone launcher for media libraries: a
-declarative `.toml` file lists the items, and `shepherd-media` either plays
+`lunchbox-media` is a small standalone launcher for media libraries: a
+declarative `.toml` file lists the items, and `lunchbox-media` either plays
 one of them directly via libmpv or opens a poster grid for the user to pick.
-It is designed to be invoked by `shepherdd` as an activity, the same way
+It is designed to be invoked by `lunchboxd` as an activity, the same way
 TuxMath or ScummVM are.
 
 The implementation lives in three crates:
 
-- `shepherd-media-core` — platform-agnostic library (parsing, source
+- `lunchbox-media-core` — platform-agnostic library (parsing, source
   resolution, session state machine, stdout protocol).
-- `shepherd-media-cache` — the on-disk video cache: keying, the download
-  worker, and LRU eviction. Separate because shepherdd shares it, and a daemon
+- `lunchbox-media-cache` — the on-disk video cache: keying, the download
+  worker, and LRU eviction. Separate because lunchboxd shares it, and a daemon
   must not link libmpv or egui to prefetch (issue #127).
-- `shepherd-media` — Linux binary (`clap` CLI, libmpv via `libmpv2`,
+- `lunchbox-media` — Linux binary (`clap` CLI, libmpv via `libmpv2`,
   egui-based browse UI, async poster prefetch).
 
 ## Installation requirements
@@ -22,7 +22,7 @@ In addition to the standard `shepherd-launcher` build dependencies:
 
 - `libmpv-dev` at build time (provides the libmpv2 client headers).
 - `mpv` and `yt-dlp` at runtime. `yt-dlp` is needed only if you reference
-  YouTube URLs — `shepherd-media` will start without it, but YouTube playback
+  YouTube URLs — `lunchbox-media` will start without it, but YouTube playback
   will fail if `yt-dlp` isn't on `PATH`.
 - A **VA-API driver** at runtime, for hardware video decoding. `mpv` does not
   pull one in, and without it every frame is decoded on the CPU. Which driver is
@@ -35,13 +35,13 @@ In addition to the standard `shepherd-launcher` build dependencies:
 ### Codec selection
 
 YouTube's best rendition at a given resolution is usually VP9 or AV1, and the
-fixed-function decoders in older GPUs cover neither. `shepherd-media` therefore
+fixed-function decoders in older GPUs cover neither. `lunchbox-media` therefore
 asks yt-dlp for H.264 first (`bv*[vcodec^=avc1]…`) and only falls back to other
 codecs when an upload has no H.264 rendition. On an Intel HD 4000 that is the
 difference between roughly 61% and 13% of a CPU core for 1080p30.
 
 Videos already in the local cache were downloaded under whichever selector was
-in force at the time; `shepherd-media` keeps playing them, and replaces them the
+in force at the time; `lunchbox-media` keeps playing them, and replaces them the
 next time it queues that item for download.
 
 ## Video cache
@@ -52,17 +52,17 @@ and the item stays watchable offline. Browse mode queues every remote item in
 the library speculatively at launch, and an item watched to the end is queued
 after playback.
 
-shepherdd also fills this cache in the background, so a library is ready before
+lunchboxd also fills this cache in the background, so a library is ready before
 anyone opens it — see [Background prefetch](#background-prefetch).
 
 The cache is capped by `service.media.cache_max_bytes`, 10 GiB by default.
-shepherdd hands that value to every media activity it launches (as
+lunchboxd hands that value to every media activity it launches (as
 `--cache-max-bytes`), so the daemon filling the cache and the player trimming it
 agree on how big it may be — a disagreement would have the two undoing each
 other's work on one directory.
 
 `SHEPHERD_MEDIA_VIDEO_CACHE_MAX_BYTES` (a byte count) still overrides it, as a
-local escape hatch for debugging and for `shepherd-media` run by hand. Setting
+local escape hatch for debugging and for `lunchbox-media` run by hand. Setting
 it on only one of the two processes is exactly the divergence the config key
 exists to avoid.
 
@@ -100,7 +100,7 @@ each other's downloads. Deleting the directory is always safe.
 
 ## Background prefetch
 
-shepherdd downloads the remote items of every `media` entry ahead of time, so
+lunchboxd downloads the remote items of every `media` entry ahead of time, so
 the first open plays from disk rather than buffering and the library keeps
 working offline. It is on by default whenever a media entry exists.
 
@@ -110,7 +110,7 @@ It holds off while:
   video being watched right now, spends the child's CPU and bandwidth on
   content nobody has asked for. Set
   `service.media.prefetch_while_session_active = true` to allow it anyway;
-- **the internet is down**, per the connectivity checks shepherdd already runs;
+- **the internet is down**, per the connectivity checks lunchboxd already runs;
 - **the disk is nearly full** — below `service.media.free_space_floor_bytes`
   (2 GiB by default) it logs a warning and stops. The cache cap bounds the
   cache, not the volume it sits on;
@@ -155,7 +155,7 @@ do — which is worth being able to see, because from the outside it is otherwis
 indistinguishable from a prefetcher that has quietly stopped working.
 
 Per-item detail (which item was a cache hit, which was skipped and why) is at
-debug: `RUST_LOG=shepherd_media_cache=debug,shepherdd=debug`.
+debug: `RUST_LOG=lunchbox_media_cache=debug,lunchboxd=debug`.
 
 ### What a config reload reaches
 
@@ -184,12 +184,12 @@ also what happens if the entry is added back a week later.
 Prefetch order follows the library's own order, which is what browse shows.
 
 If any media activity references YouTube and `yt-dlp` is not installed,
-shepherdd logs a warning at startup naming the entries — otherwise the failure
+lunchboxd logs a warning at startup naming the entries — otherwise the failure
 only appears when a child taps a tile and the activity dies.
 
-The implementation, including how a running `shepherd-media` and a prefetching
-shepherdd stay off each other's downloads, is documented in
-[`crates/shepherd-media-cache/README.md`](../crates/shepherd-media-cache/README.md).
+The implementation, including how a running `lunchbox-media` and a prefetching
+lunchboxd stay off each other's downloads, is documented in
+[`crates/lunchbox-media-cache/README.md`](../crates/lunchbox-media-cache/README.md).
 
 ### Refreshing now (issue #165)
 
@@ -252,12 +252,12 @@ starting point — copy it to `~/.config/shepherd/movies.toml` and update the
 `uri` paths for your own files.
 
 A library file is TOML with the schema below. Save it anywhere readable by
-the user shepherdd runs as; relative poster paths are resolved against the
+the user lunchboxd runs as; relative poster paths are resolved against the
 library file's directory.
 
 ### M3U / M3U8 playlists
 
-`shepherd-media` also accepts `.m3u` and `.m3u8` playlist files anywhere a
+`lunchbox-media` also accepts `.m3u` and `.m3u8` playlist files anywhere a
 library path is required (CLI `--library`, the entries in `config.toml`,
 etc.). The dispatch is by file extension; the rest of the pipeline doesn't
 care which format the file was authored in.
@@ -291,7 +291,7 @@ Notes:
 
 ### YouTube playlist URLs
 
-`shepherd-media` also accepts a YouTube playlist URL anywhere a library path
+`lunchbox-media` also accepts a YouTube playlist URL anywhere a library path
 is required. The URL is detected by the presence of a `list=…` query
 parameter:
 
@@ -331,10 +331,10 @@ Every source is a YouTube URL, so when the network is down the entire
 grid is unreachable. Pass `--connectivity-check <url>` so the grid empties
 itself out gracefully on a network drop instead of failing on the first
 click. Any reachable HTTPS target works (or a `tcp://host:port` probe);
-forwarding shepherdd's own `internet.check` value is the easiest choice.
+forwarding lunchboxd's own `internet.check` value is the easiest choice.
 
 ```
-shepherd-media browse \
+lunchbox-media browse \
     --library 'https://www.youtube.com/playlist?list=UU...' \
     --connectivity-check https://www.google.com \
     --reverse
@@ -396,7 +396,7 @@ fail validation.
 
 URIs are classified at parse time:
 
-- `file://` — absolute paths only. `shepherd-media` does not check existence;
+- `file://` — absolute paths only. `lunchbox-media` does not check existence;
   mpv reports the failure if the file is missing.
 - `http(s)://` ending in `.mp4`/`.mkv`/`.webm`/`.mov`/`.m4v`/`.mp3`/`.flac`/
   `.opus`/`.ogg`/`.m4a`/`.wav`/`.m3u8`/`.mpd` — direct HTTP stream.
@@ -422,17 +422,17 @@ DRM-protected playback is intentionally out of scope — see issues
 ## CLI
 
 ```
-shepherd-media validate <library-or-url>
+lunchbox-media validate <library-or-url>
     Parse and validate the library file (`.toml`, `.m3u`, `.m3u8`) or
     YouTube playlist URL. Exit 0 on success, 1 on error.
 
-shepherd-media play --library <library-or-url> --item <item-id>
+lunchbox-media play --library <library-or-url> --item <item-id>
     Direct-play mode. Resolve the item, hand off to mpv, exit when playback
-    ends. Used when an item is registered as its own shepherdd activity.
+    ends. Used when an item is registered as its own lunchboxd activity.
 
-shepherd-media browse --library <library-or-url>
+lunchbox-media browse --library <library-or-url>
     Open the egui poster grid. Each playback is a state-machine transition;
-    the process keeps running until the user exits or shepherdd sends
+    the process keeps running until the user exits or lunchboxd sends
     SIGTERM.
 ```
 
@@ -460,7 +460,7 @@ default `--sort-by library` it just flips the file order.
 `--connectivity-check <url>` is honored only by `browse`: the URL is
 probed every 10 seconds and items without a local source are hidden when
 the probe fails. `validate` and `play` accept the flag for invocation
-symmetry but ignore it. Accepts the same format as shepherdd's
+symmetry but ignore it. Accepts the same format as lunchboxd's
 `internet.check` (e.g. `https://www.google.com` or `tcp://8.8.8.8:53`).
 
 Exit codes:
@@ -475,7 +475,7 @@ Exit codes:
 
 ## Stdout protocol
 
-While `shepherd-media` runs, it writes one event per line to stdout
+While `lunchbox-media` runs, it writes one event per line to stdout
 (unless `--no-protocol` is passed). Each line is `EVENT key=value [key=value ...]`,
 with values percent-encoded if they contain spaces or `=`.
 
@@ -491,15 +491,15 @@ with values percent-encoded if they contain spaces or `=`.
 Stderr is for human-readable logging via `tracing`; it is not part of the
 protocol.
 
-`shepherdd` can read this stream to drive playback-only time accounting:
+`lunchboxd` can read this stream to drive playback-only time accounting:
 start the clock on `STARTED_PLAYBACK`, pause on `RETURNED_TO_MENU`. The
-shepherdd-side support for that is tracked separately; for now `shepherd-media`
-emits the protocol unconditionally and works fine when shepherdd ignores it.
+shepherdd-side support for that is tracked separately; for now `lunchbox-media`
+emits the protocol unconditionally and works fine when lunchboxd ignores it.
 
-## shepherdd integration
+## lunchboxd integration
 
-Media activities use `type = "media"` (issue #127). shepherdd builds the
-`shepherd-media` command line itself from the entry, so the flags above do not
+Media activities use `type = "media"` (issue #127). lunchboxd builds the
+`lunchbox-media` command line itself from the entry, so the flags above do not
 have to be restated as a `Process` argv, and a mistake — a `mode = "play"` with
 no `item`, a quality that isn't a preset — is caught by
 `shepherd-admin config validate` instead of on the child's screen.
@@ -513,17 +513,17 @@ no `item`, a quality that isn't a preset — is caught by
 | `sort_by` | `"library"` | `library`, `title`, `id`, `kind`, `category`, `duration`. |
 | `reverse` | `false` | Reverse the final order; combines with `sort_by`. |
 | `resume` | `false` | Remember playback positions — see [Resuming playback](#resuming-playback). |
-| `prefetch` | `service.media.prefetch` | Let shepherdd download this library ahead of time — see [Background prefetch](#background-prefetch). |
+| `prefetch` | `service.media.prefetch` | Let lunchboxd download this library ahead of time — see [Background prefetch](#background-prefetch). |
 
-There is deliberately no field for `--connectivity-check`: shepherdd already
+There is deliberately no field for `--connectivity-check`: lunchboxd already
 knows the check from the entry's `[entries.internet]` block, or
 `[service.internet]` when the entry sets none, and hands it to the activity
 automatically. Set `forward_check = false` under `[entries.internet]` to launch
 without one. `--log-level` and `--no-protocol` are not exposed either; they are
-debugging flags, and shepherdd picks them.
+debugging flags, and lunchboxd picks them.
 
 An activity that needs a flag this kind doesn't expose can still be spelled out
-as `type = "process"` with `command = "shepherd-media"`; nothing about that
+as `type = "process"` with `command = "lunchbox-media"`; nothing about that
 path changed.
 
 ### Direct-play activity (single item)
@@ -541,7 +541,7 @@ mode = "play"
 item = "big-buck-bunny"
 ```
 
-shepherdd supervises this exactly like any other activity: the session ends
+lunchboxd supervises this exactly like any other activity: the session ends
 when the process exits.
 
 ### Browse-mode activity (whole library)
@@ -558,7 +558,7 @@ library = "/etc/shepherd/movies.toml"
 resume = true
 ```
 
-Once shepherdd grows protocol-reader support, the browse activity can opt
+Once lunchboxd grows protocol-reader support, the browse activity can opt
 into playback-only time accounting. Until then, browse-mode time counts as
 "in the activity" for as long as the process runs.
 
@@ -593,7 +593,7 @@ An entry with no `icon` gets one from its mode: `folder-videos` for `browse`,
 
 ## Playback UI
 
-`shepherd-media` embeds mpv into its egui shell rather than letting mpv
+`lunchbox-media` embeds mpv into its egui shell rather than letting mpv
 spawn its own window. The same fullscreen surface hosts the poster grid
 in browse mode and the video + a touch- and controller-friendly control
 overlay during playback.
@@ -610,7 +610,7 @@ back. While paused, the overlay stays visible.
 | Skip +10 seconds  | Tap the 10s » button           | `→`, `L`            | D-pad right, RT                 |
 | Scrub             | Drag the scrubber              | —                   | —                               |
 
-Volume is intentionally not bound in the playback overlay — `shepherd-hud`
+Volume is intentionally not bound in the playback overlay — `lunchbox-hud`
 already exposes global volume controls that work the same everywhere.
 
 In direct-play mode the same UI opens straight into playback and the
@@ -636,7 +636,7 @@ H.264 file from the video cache:
 | `vaapi-copy` | 0 of 12 | 21.7 % |
 | `no` (software) | 0 of 12 | 55.2 % |
 
-Bare `mpv` reproduces it with no `shepherd-media` involved, identically under
+Bare `mpv` reproduces it with no `lunchbox-media` involved, identically under
 `vo=gpu` and `vo=gpu-next`, with `hr-seek-framedrop` either way, and with a
 larger surface pool — so it is a driver bug in the DMABUF export rather than
 anything the player can seek its way around. The only thing that changes it is
@@ -649,7 +649,7 @@ mpv's `--hwdec` accepts. The per-file log line says which path mpv settled on.
 ## Resuming playback
 
 Off by default. Pass `--resume` (Linux) or turn on **Resume playback** for a
-library in the Android app's settings, and `shepherd-media` remembers, per
+library in the Android app's settings, and `lunchbox-media` remembers, per
 library:
 
 - where each item was left off, and
@@ -672,7 +672,7 @@ With it on:
   to the opening titles.
 
 Positions are written while an item plays (at most every 10 s) and when playback
-ends, including when shepherdd stops the activity with SIGTERM — a time limit
+ends, including when lunchboxd stops the activity with SIGTERM — a time limit
 expiring mid-film does not lose the place.
 
 State lives outside the caches, one file per library, at
@@ -755,7 +755,7 @@ it has nothing to look up.
 
 Buckets are cached under `$XDG_CACHE_HOME/shepherd/media/sponsorblock/` for a
 day, and served stale when a refresh fails, so a device that went offline keeps
-skipping what it knew about. shepherdd's prefetcher warms the bucket alongside
+skipping what it knew about. lunchboxd's prefetcher warms the bucket alongside
 the video it downloads, so a library prefetched while online still skips when it
 is played offline.
 

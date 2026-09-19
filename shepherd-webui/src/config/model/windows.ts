@@ -3,7 +3,7 @@
  *
  * The fiddly part of the editor, and pure, so it is unit-tested. Three rules
  * matter, all of them mirroring what the engine does
- * (`shepherd-util/src/time.rs`):
+ * (`lunchbox-util/src/time.rs`):
  *
  * - Days are a bitmask, bit 0 = Monday through bit 6 = Sunday.
  * - `end` is exclusive, so `start === end` is an empty window, not all day.
@@ -121,11 +121,11 @@ function parseU8(field: string): number | null {
 /**
  * `"16:30"` -> `990`. Null when it does not parse.
  *
- * Mirrors `parse_time` in `crates/shepherd-config/src/validation.rs`, down to
+ * Mirrors `parse_time` in `crates/lunchbox-config/src/validation.rs`, down to
  * the parts of it that are accidents of `u8::from_str` rather than decisions:
  * `"16:5"` and `"016:030"` are accepted because the daemon accepts them and
  * runs on them, so the grid has to draw them where they will actually take
- * effect. `crates/shepherd-config-wasm/tests/time_formats.json` pins the pair.
+ * effect. `crates/lunchbox-config-wasm/tests/time_formats.json` pins the pair.
  */
 export function parseTime(value: string): number | null {
   const parts = value.split(":");

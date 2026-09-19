@@ -842,14 +842,14 @@ function TlsEditor({ config }: { config: RawConfig }) {
             label="Certificate (PEM)"
             value={v?.cert ?? ""}
             onChange={(e) => f.setField("cert", e.target.value)}
-            placeholder="/var/lib/shepherdd/tls/fullchain.pem"
+            placeholder="/var/lib/lunchboxd/tls/fullchain.pem"
           />
           <TextField
             size="small"
             label="Private key (PEM)"
             value={v?.key ?? ""}
             onChange={(e) => f.setField("key", e.target.value)}
-            placeholder="/var/lib/shepherdd/tls/privkey.pem"
+            placeholder="/var/lib/lunchboxd/tls/privkey.pem"
           />
         </>
       )}
@@ -946,21 +946,21 @@ function PathsEditor({ config }: { config: RawConfig }) {
         size="small"
         label="Socket path"
         value={s.socket_path ?? ""}
-        placeholder="$XDG_RUNTIME_DIR/shepherdd/shepherdd.sock"
+        placeholder="$XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock"
         onChange={(e) => f.setField("socket_path", e.target.value)}
       />
       <TextField
         size="small"
         label="Data directory"
         value={s.data_dir ?? ""}
-        placeholder="$XDG_DATA_HOME/shepherdd"
+        placeholder="$XDG_DATA_HOME/lunchboxd"
         onChange={(e) => f.setField("data_dir", e.target.value)}
       />
       <TextField
         size="small"
         label="Log directory"
         value={s.log_dir ?? ""}
-        placeholder="$XDG_STATE_HOME/shepherdd"
+        placeholder="$XDG_STATE_HOME/lunchboxd"
         onChange={(e) => f.setField("log_dir", e.target.value)}
       />
       <FormControlLabel

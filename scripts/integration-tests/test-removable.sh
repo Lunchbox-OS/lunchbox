@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The file routes against a real FAT drive.
 #
-# Drives `cargo test -p shepherd-http --test files_removable`, which talks to
+# Drives `cargo test -p lunchbox-http --test files_removable`, which talks to
 # whatever is mounted at /media/shepherd-fat. Every other test in that crate
 # runs on a tempdir -- that is, on ext4 -- and three bugs lived in the gap
 # between what the protocol assumes and what FAT actually promises:
@@ -51,5 +51,5 @@ echo
 
 # --test-threads=1 because the tests share one drive, and one of them waits out
 # a two-second timestamp tick that the others would otherwise disturb.
-exec cargo test -p shepherd-http --test files_removable -- \
+exec cargo test -p lunchbox-http --test files_removable -- \
     --include-ignored --test-threads=1 --nocapture

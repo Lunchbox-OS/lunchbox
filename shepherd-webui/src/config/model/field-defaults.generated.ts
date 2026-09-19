@@ -1,9 +1,9 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Rendered from `crates/shepherd-config/src/schema.rs` (serde defaults, via the
-// JSON Schema) and `crates/shepherd-config/src/load_defaults.rs` (the ones
+// Rendered from `crates/lunchbox-config/src/schema.rs` (serde defaults, via the
+// JSON Schema) and `crates/lunchbox-config/src/load_defaults.rs` (the ones
 // resolved at policy load) by
-// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`.
 // Edit the Rust and re-run instead.
 //
 // What a field falls back to when the config leaves it out. The editor needs

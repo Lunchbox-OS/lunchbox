@@ -8,7 +8,7 @@ link.
 
 Implements the spec at
 [`docs/ai/history/2026-06-21 001 ble-companion-android-spec.md`](../docs/ai/history/2026-06-21%20001%20ble-companion-android-spec.md).
-The wire protocol mirrors `crates/shepherd-ble` and `crates/shepherd-api`
+The wire protocol mirrors `crates/lunchbox-ble` and `crates/lunchbox-api`
 in the parent repo.
 
 ## Install
@@ -49,7 +49,7 @@ sideload-friendly (`adb install`).
 | Wire (UUIDs, framing, RPC envelope, error codes) | `ble/Protocol.kt`, `ble/Framing.kt`, `ble/Rpc.kt` | `u16`-LE length-prefix framing; JSON-RPC over GATT. |
 | Transport | `ble/ShepherdConnection.kt` | Wraps a Kable `Peripheral`: chunked writes, frame reassembly, request/response correlation by `id`, hot event stream. |
 | Scanning / bonding | `ble/ShepherdScanner.kt`, `ble/BondManager.kt` | Kable for GATT; the raw Android `createBond` + bond-state broadcast for Numeric Comparison. |
-| Domain types | `domain/Models.kt` | Kotlin mirrors of `shepherd-api`; snake_case via `JsonNamingStrategy`. |
+| Domain types | `domain/Models.kt` | Kotlin mirrors of `lunchbox-api`; snake_case via `JsonNamingStrategy`. |
 | Typed client | `domain/ManagementClient.kt` | Mirrors the device's `ManagementService` trait. |
 | Persistence | `persistence/AdminRecordStore.kt`, `domain/ShepherdRepository.kt` | Per-device record + secret HTTP token, encrypted at rest. |
 | UI | `ui/**` | Jetpack Compose + Material 3, single activity, one shared `ShepherdViewModel`. |

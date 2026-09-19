@@ -1,0 +1,48 @@
+[package]
+name = "lunchboxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The lunchboxd background service: policy enforcement for child-focused computing"
+
+[[bin]]
+name = "lunchboxd"
+path = "src/main.rs"
+
+[dependencies]
+lunchbox-util = { workspace = true }
+lunchbox-api = { workspace = true }
+lunchbox-bridge = { workspace = true }
+lunchbox-host-api = { workspace = true }
+lunchbox-config = { workspace = true }
+lunchbox-state-proto = { workspace = true }
+lunchbox-store = { workspace = true }
+lunchbox-core = { workspace = true }
+lunchbox-host-linux = { workspace = true }
+lunchbox-ipc = { workspace = true }
+lunchbox-http = { workspace = true }
+lunchbox-management = { workspace = true }
+lunchbox-ble = { workspace = true }
+# Background media prefetch (issue #127). `default-features = false` on the
+# core keeps libmpv out of the daemon — it reads libraries, it never plays them.
+lunchbox-media-app = { path = "../lunchbox-media-app" }
+lunchbox-media-cache = { path = "../lunchbox-media-cache" }
+lunchbox-media-core = { path = "../lunchbox-media-core", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4.5", features = ["derive", "env"] }
+notify = { workspace = true }
+evdev = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
+async-trait = "0.1"
+zbus = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

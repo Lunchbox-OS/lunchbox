@@ -5,7 +5,7 @@ description: >-
   a graphical login session. Use whenever you need to launch/start/run the app,
   take a screenshot, or confirm a UI change (launcher grid, HUD, media, browser,
   availability/bedtime, time limits) actually works in the real stack — not just
-  in unit tests. Boots the real sway + shepherdd + launcher + HUD headless (no
+  in unit tests. Boots the real sway + lunchboxd + launcher + HUD headless (no
   GPU, no parent compositor), so it works over SSH / in an agent sandbox. This is
   the project skill that /run and /verify should use for this repo instead of
   falling back to `./run-dev` (which needs a login session).
@@ -42,9 +42,9 @@ can screenshot and drive.
 `dev-runtime/headless/session.env`, so every later `dev` subcommand reattaches
 automatically. Always `dev stop` when finished (or before starting a fresh one).
 
-**`SWAYSOCK` is not the socket sway made.** shepherdd hard-links the compositor
+**`SWAYSOCK` is not the socket sway made.** lunchboxd hard-links the compositor
 socket to `$XDG_RUNTIME_DIR/shepherd-dev-sway.<n>.sock` and `session.env` records
-*that* — because in production shepherdd unlinks the original so no activity can
+*that* — because in production lunchboxd unlinks the original so no activity can
 reach the compositor (issue #144). Finding the socket yourself
 (`sway --get-socketpath`, globbing `sway-ipc.*`) is therefore not reliable; go
 through `headless_run` in `scripts/lib/headless.sh`, which sources `session.env`,
@@ -53,16 +53,16 @@ installed device does, with the original name removed — everything above still
 works, because it all goes through the alias either way.
 
 **The management socket's peer check is off in dev, and `--harden-ipc` does not
-turn it on.** shepherdd otherwise accepts a client on its own socket only from
+turn it on.** lunchboxd otherwise accepts a client on its own socket only from
 its own cgroup (issue #144). On a device that is the display manager's
 root-owned session scope; here the whole stack shares the cgroup of the shell
 that launched it, so the check would only refuse clients started from another
 terminal while protecting nothing. Every dev entry point passes
 `--no-restrict-ipc-peers`, and `headless.sh` fails loudly if `sway.conf` stops
 doing so. Nothing you drive through `dev shot` / `dev tree` / `dev key` is
-affected — those go through sway, not shepherdd.
+affected — those go through sway, not lunchboxd.
 
-shepherdd hardens by default; `sway.conf` opts out with `--no-harden-sway-ipc`
+lunchboxd hardens by default; `sway.conf` opts out with `--no-harden-sway-ipc`
 because it is the development config, and `--harden-ipc` takes that opt-out back
 off. So a plain `dev headless` leaves the compositor reachable by `swaymsg`, and
 nothing you write by hand needs to remember a flag to keep it that way.
@@ -81,7 +81,7 @@ nothing you write by hand needs to remember a flag to keep it that way.
 
 ### `dev headless` options
 
-- `--config PATH` — boot an arbitrary shepherdd config instead of
+- `--config PATH` — boot an arbitrary lunchboxd config instead of
   `./config.example.toml`. Good for minimal fixtures that isolate one entry/flow.
 - `--time "YYYY-MM-DD HH:MM:SS"` — sets `SHEPHERD_MOCK_TIME` so availability
   windows, the bedtime screen, HUD clock, and time-limit behavior are
@@ -122,13 +122,13 @@ Example (bedtime restriction):
   `connect_clicked` handlers here — a launcher grid tile won't launch and a HUD
   button won't respond, at either logical or physical coordinates. Drive the app
   a different way:
-  - **Launch/stop an activity** (and anything else shepherdd exposes): send
+  - **Launch/stop an activity** (and anything else lunchboxd exposes): send
     newline-delimited JSON-RPC to the daemon socket at
     `./dev-runtime/shepherd.sock`, e.g.
     `printf '{"request_id":1,"api_version":1,"method":"launch","params":{"id":"<entry-id>"}}\n' | nc -U dev-runtime/shepherd.sock`.
     This runs the real launch path (incl. the HiDPI scale hack for
     `xwayland_native_resolution` entries). Method names/params are in
-    `crates/shepherd-ipc/src/client.rs`.
+    `crates/lunchbox-ipc/src/client.rs`.
   - **A page in the web UI** (`shepherd-webui`): `dev click` does not activate
     a link or a nav item in a browser either, and the SPA has no URL routing to
     deep-link with — so to render one page, temporarily change the initial
@@ -145,7 +145,7 @@ Example (bedtime restriction):
     is the reliable way to get more of a long page into one screenshot.
   - **The vertical HUD** (issue #171): export `SHEPHERD_HUD_ANCHOR=left` before
     `dev headless`. That **pins** the bar, so it also stops the HUD following
-    shepherdd — which is what you want to look at the layout, and not what you
+    lunchboxd — which is what you want to look at the layout, and not what you
     want to test the config path. `headless.sh` forwards the variable
     explicitly so it survives the `env -i` on the `--user` path.
 
@@ -154,7 +154,7 @@ Example (bedtime restriction):
     an entry's `hud_orientation`, then launch that entry over the socket. The
     daemon's view is readable at any time with the `get_hud_orientation` RPC,
     and both sides log the transition (`HUD orientation changed` from
-    `shepherdd::hud_layout`, `Rebuilding the HUD` from `shepherd_hud::app`).
+    `lunchboxd::hud_layout`, `Rebuilding the HUD` from `lunchbox_hud::app`).
     Note that a `media`-kind activity exits within a second or two in the
     headless session, so for anything you want to screenshot mid-session use a
     long-lived `process` entry (`command = "/usr/bin/sleep"`, `args = ["600"]`).
@@ -180,7 +180,7 @@ Example (bedtime restriction):
     set, screenshot, then remove the hook. `dev key` (keyboard) *does* reach the
     focused surface, but the always-on HUD bar uses `KeyboardMode::None`, so keys
     won't reach it unless a popover raises it to `OnDemand`.
-- **`dev key` needs a longer-lived keyboard for egui/winit apps.** `shepherd-media`
+- **`dev key` needs a longer-lived keyboard for egui/winit apps.** `lunchbox-media`
   is an eframe (winit) client, and a single `dev key <keysym>` lands nowhere: the
   headless seat has *no* input devices (`swaymsg -t get_seats` shows an empty
   `devices` list), so winit never binds `wl_keyboard`. `wtype` creates a virtual
@@ -211,7 +211,7 @@ Example (bedtime restriction):
   "Loading…"). For the fully-painted UI, poll `dev tree` for the specific entry,
   or take a second `dev shot` a moment later.
 - **Assert the state you meant to capture, in the pixels.** A `launch` that
-  races shepherdd's startup — or hits a daemon that is still running the previous
+  races lunchboxd's startup — or hits a daemon that is still running the previous
   activity — is rejected, and the "No session" bar screenshots just as happily
   (with the volume slider in its *disabled* styling, which measures differently
   from the live one). Before keeping a shot, poll for something only the target
@@ -232,7 +232,7 @@ Example (bedtime restriction):
   `xwayland_native_resolution` HiDPI hack, which needs a non-1x scale
   (`swaymsg output HEADLESS-1 scale 1.5`, via `headless_run` in
   `scripts/lib/headless.sh` — there is no `dev swaymsg` passthrough). `stop_current`
-  returns *before* shepherdd restores the pre-launch scale, so a scale you set
+  returns *before* lunchboxd restores the pre-launch scale, so a scale you set
   immediately afterwards gets clobbered a second later. Wait, then re-read
   `swaymsg -t get_outputs`, and check it again at screenshot time.
 - **Black screenshot?** `swayidle` blanks the output (DPMS off) after ~120s idle
@@ -243,7 +243,7 @@ Example (bedtime restriction):
   `dev-runtime/headless/sway.log` and try `--gpu`.
 - **`--gpu` is not enough for hardware video decoding.** logind grants
   `/dev/dri/renderD128` by ACL to whoever holds the *active seat* session, and an
-  SSH or agent shell has no seat — so `mpv`/`shepherd-media` silently decode in
+  SSH or agent shell has no seat — so `mpv`/`lunchbox-media` silently decode in
   software and anything GPU-specific (VA-API decode paths, driver bugs) cannot be
   reproduced. There is no error; `hwdec-current` just reads `no`. Grant yourself
   the node first:
@@ -254,7 +254,7 @@ Example (bedtime restriction):
   ```
 
   Then boot with `--gpu` and *confirm* the path is live before trusting a result
-  — `shepherd-media --log-level info` logs which decoder mpv settled on, and bare
+  — `lunchbox-media --log-level info` logs which decoder mpv settled on, and bare
   `mpv` answers `{"command":["get_property","hwdec-current"]}` over
   `--input-ipc-server`. This is what made an earlier session conclude the machine
   was "a VM with no GPU access" and ship an unverified fix
@@ -267,15 +267,15 @@ Example (bedtime restriction):
   user owns — including the `sleep`s in your own driver script, which then dies
   mid-scenario (exit 144). Point the fixture at a small wrapper script
   (`exec tail -f /dev/null`) so the name is unique to the fixture.
-- **`dev headless` right after `dev stop` can hang shepherdd at startup — retry
+- **`dev headless` right after `dev stop` can hang lunchboxd at startup — retry
   it.** Twice in four boots (2026-09-07) the daemon stopped dead after
 
   ```
-  INFO shepherd_host_linux::process: Activities will be launched into a cgroup of their own
+  INFO lunchbox_host_linux::process: Activities will be launched into a cgroup of their own
   ```
 
   — the last line of `process::init()` — and never reached the volume-controller
-  line, the compositor, or anything else, so the harness reported "shepherdd did
+  line, the compositor, or anything else, so the harness reported "lunchboxd did
   not connect to the compositor within 30s" against a perfectly healthy sway.
   The GTK clients time out on the portal 25 s later, which makes the log look
   like a compositor problem it is not. It is not caused by the config: the same
@@ -295,7 +295,7 @@ Example (bedtime restriction):
   "[ERROR] Failed to start headless session" with a fully working daemon behind
   it. If `dev stop` denies there is a session while one is actually running, kill
   the survivors directly, `rm dev-runtime/headless/session.env`, and boot again.
-  Also note that killing shepherdd runs `kill_by_command` on the way down, which
+  Also note that killing lunchboxd runs `kill_by_command` on the way down, which
   kills every `sleep` you own — a driver command containing one dies with exit
   144 alongside it, and that is one of the ways you end up orphaned here in the
   first place.
@@ -309,39 +309,39 @@ Example (bedtime restriction):
   instead, and kill the pids it names:
 
   ```sh
-  ps -eo pid,cmd | grep -E "sway.*headless|shepherdd|shepherd-media" | grep -v grep
+  ps -eo pid,cmd | grep -E "sway.*headless|lunchboxd|lunchbox-media" | grep -v grep
   ```
 
   Also check for more than sway: `dev stop` can report "Headless session
-  stopped" and leave the `shepherdd` it spawned (and its two `sh -c` wrappers)
+  stopped" and leave the `lunchboxd` it spawned (and its two `sh -c` wrappers)
   running against your fixture config. Those keep the socket alive, so the next
   boot's launch requests land in the *old* daemon. Kill every pid that listing
   shows before booting again.
 - **`--no-build` against a cleaned `target/debug`** boots a session whose
-  `shepherdd` binary is missing; sway's `|| swaymsg exit` then tears the whole
+  `lunchboxd` binary is missing; sway's `|| swaymsg exit` then tears the whole
   session down a second later. Build once before using `--no-build`.
-- **"shepherdd did not connect to the compositor within 30s" can be a lie.**
+- **"lunchboxd did not connect to the compositor within 30s" can be a lie.**
   A GTK `Cannot get portal org.freedesktop.host.portal.Registry version: Timeout
   was reached` eats ~26s of the 30s budget, and the alias socket then appears at
   around T+50s with a perfectly healthy stack behind it. The damage is that the
   start path bailed **without writing `session.env`**, so `dev stop` says "No
   live headless session to stop" and every `dev` subcommand has nothing to
-  reattach to while sway, shepherdd, the launcher and the HUD all keep running.
+  reattach to while sway, lunchboxd, the launcher and the HUD all keep running.
   Confirm with `ls /run/user/1000/ | grep sway` (the alias is there) and
   `ls -l dev-runtime/shepherd.sock` (live), then kill the pids from
-  `ps -eo pid,cmd | grep -E "sway.*headless|shepherdd"`, `rm
+  `ps -eo pid,cmd | grep -E "sway.*headless|lunchboxd"`, `rm
   dev-runtime/headless/session.env`, and boot again — the second boot is
   usually well inside the budget.
-- **"shepherdd did not connect to the compositor" is a different failure from
+- **"lunchboxd did not connect to the compositor" is a different failure from
   "Sway did not create its IPC socket"**, and the harness now tells them apart:
-  the first waits on the alias (which only exists once shepherdd has connected),
+  the first waits on the alias (which only exists once lunchboxd has connected),
   the second on either socket name. If you get the first, sway is fine and the
   daemon is the problem — read `dev-runtime/headless/sway.log` rather than
   suspecting the compositor.
 
 ## Seeing the web UI (not just the native surfaces)
 
-The management SPA is embedded into `shepherdd` and served on
+The management SPA is embedded into `lunchboxd` and served on
 **`https://127.0.0.1:8080`** — `https`, since issue #156: `config.example.toml`
 binds `0.0.0.0`, and a non-loopback bind now comes up on a generated
 self-signed certificate rather than in the clear. The session has **Firefox**,
@@ -418,9 +418,9 @@ Gotchas here:
 
 - **`npm run build` alone does not reach the running daemon.** `rust_embed`
   embeds `shepherd-webui/dist/` at compile time but does not make cargo consider
-  `shepherdd` dirty when only `dist/` changed, so `dev headless` cheerfully
+  `lunchboxd` dirty when only `dist/` changed, so `dev headless` cheerfully
   reboots the *old* SPA. Touch the embedding source first:
-  `touch crates/shepherd-http/src/web_assets.rs && cargo build -p shepherdd`.
+  `touch crates/lunchbox-http/src/web_assets.rs && cargo build -p lunchboxd`.
 - **A fullscreen window freezes the HUD's pixels.** The compositor stops sending
   frame callbacks to an occluded layer surface, so GTK stops repainting and
   `grim` captures whatever the HUD last drew — a *stale* clock and a stale
@@ -428,12 +428,12 @@ Gotchas here:
   state with the window closed (or non-fullscreen), and sanity-check the HUD
   clock against `date` before believing a HUD screenshot taken over another app.
 - **A session that is up but unreachable: check the socket.** If the launcher and
-  HUD loop on `Failed to connect to shepherdd: No such file or directory` while
-  `[OK] Headless session up` and `pgrep shepherdd` both say everything is fine,
+  HUD loop on `Failed to connect to lunchboxd: No such file or directory` while
+  `[OK] Headless session up` and `pgrep lunchboxd` both say everything is fine,
   look at `ls dev-runtime/shepherd.sock`. Two overlapping daemons used to end
   this way — the outgoing one deleted the path the incoming one had bound — which
   `IpcServer::shutdown()` now guards against by only removing the socket file it
-  bound itself. If you see it anyway, kill every `shepherdd` and
+  bound itself. If you see it anyway, kill every `lunchboxd` and
   `sway.headless.conf` process, remove `session.env`, and boot again.
 - **Real pointer input works through Marionette, unlike `swaymsg`.**
   `WebDriver:PerformActions` with a `pointer` source delivers genuine

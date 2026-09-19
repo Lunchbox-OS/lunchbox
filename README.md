@@ -53,7 +53,7 @@ If it can run on Linux in *any way, shape, or form*, it can be supervised by
 > [Big Buck Bunny](https://peach.blender.org/) playing locally via `mpv`
 
 For collections of media files (local or YouTube), the bundled
-[`shepherd-media`](./docs/shepherd-media.md) launcher reads a declarative
+[`lunchbox-media`](./docs/lunchbox-media.md) launcher reads a declarative
 `.toml` library file and presents either a single direct-play activity or a
 browseable poster grid.
 

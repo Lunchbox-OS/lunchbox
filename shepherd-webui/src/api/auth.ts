@@ -3,7 +3,7 @@
 // Separate from `client.ts` because these are the only calls that are *not*
 // RPC: they are HTTP endpoints under `/api/v1/auth`, five of them reachable
 // without a credential, and the thing they hand back is a cookie rather than a
-// value. See `crates/shepherd-http/src/handlers/auth.rs`.
+// value. See `crates/lunchbox-http/src/handlers/auth.rs`.
 //
 // Nothing here ever sees the session token. It arrives as an `HttpOnly`
 // cookie, which is the point: a script in this page cannot read it, so an XSS

@@ -1,7 +1,7 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Rendered from `crates/shepherd-config/src/schema.rs` by
-// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
+// Rendered from `crates/lunchbox-config/src/schema.rs` by
+// `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`.
 // Edit the Rust types and re-run instead.
 //
 // These describe the *projection* the editor renders — what serde produces
@@ -248,7 +248,7 @@ export type RawDays = string | string[];
  */
 export interface RawDisplayConfig {
   /**
-   * Master switch for docking support. When false, shepherdd leaves display
+   * Master switch for docking support. When false, lunchboxd leaves display
    * configuration entirely to sway (default: true).
    */
   docking_enabled?: boolean;
@@ -287,7 +287,7 @@ export interface RawEntry {
    *
    * Absent, the default comes from the entry's kind: on for everything that
    * can lose work, off for `ebook`, which cannot — see
-   * [`shepherd_api::EntryKind::confirms_on_close_by_default`]. Set it
+   * [`lunchbox_api::EntryKind::confirms_on_close_by_default`]. Set it
    * explicitly to override that either way.
    */
   confirm_on_close?: boolean | null;
@@ -333,7 +333,7 @@ export interface RawEntry {
    * or a list (`input_compat = ["touch_to_mouse", "gamepad_productivity"]`).
    *
    * Absent, the default comes from the entry's kind — see
-   * [`shepherd_api::EntryKind::default_input_compat`], which gives an
+   * [`lunchbox_api::EntryKind::default_input_compat`], which gives an
    * `ebook` the gamepad preset that turns its D-pad into arrow keys. A
    * list given here replaces that wholesale, and `input_compat = []` is
    * how an entry asks for no sidecar at all.
@@ -385,7 +385,7 @@ export interface RawEntry {
    * activity so XWayland clients render at the panel's native resolution.
    * Sway doesn't pass scale through to XWayland (issue #45), so without
    * this an XWayland game at `output * scale 1.5` only fills 1280x720 of
-   * a 1920x1080 panel. shepherdd compensates by telling the HUD to apply
+   * a 1920x1080 panel. lunchboxd compensates by telling the HUD to apply
    * a counter-scale factor so it stays a normal size while the activity
    * runs.
    */
@@ -401,7 +401,7 @@ export interface RawEntryInternet {
    */
   check?: string | null;
   /**
-   * Whether shepherdd tells the activity itself about the connectivity
+   * Whether lunchboxd tells the activity itself about the connectivity
    * check, in addition to using it for availability. Today only the
    * `media` kind consumes it: browse mode polls the target and hides
    * library items that have no local source while it fails, instead of
@@ -499,9 +499,9 @@ export type RawEntryKind =
       driver: string;
     }
   /**
-   * A `shepherd-media` library activity (issue #127).
+   * A `lunchbox-media` library activity (issue #127).
    *
-   * The fields mirror the flags `shepherd-media` accepts, so shepherdd
+   * The fields mirror the flags `lunchbox-media` accepts, so lunchboxd
    * builds the invocation itself. The connectivity check is not among them:
    * it is inherited from `[entries.internet]` / `[service.internet]` — see
    * [`RawEntryInternet::forward_check`].
@@ -524,7 +524,7 @@ export type RawEntryKind =
        */
       mode?: RawMediaMode;
       /**
-       * Let shepherdd download this library's remote items in the
+       * Let lunchboxd download this library's remote items in the
        * background (issue #127). Defaults to `service.media.prefetch`; set
        * `false` to exclude just this library — e.g. a live stream, or a
        * playlist too large to be worth the disk.
@@ -562,7 +562,7 @@ export type RawEntryKind =
     }
   /**
    * A single piece of content played through RetroArch. See
-   * [`shepherd_api::EntryKind::Retroarch`] for what shepherd sets up around
+   * [`lunchbox_api::EntryKind::Retroarch`] for what shepherd sets up around
    * the launch.
    */
   | {
@@ -609,7 +609,7 @@ export type RawEntryKind =
     }
   /**
    * A single book, opened in a reader locked down to reading it. See
-   * [`shepherd_api::EntryKind::Ebook`] for what shepherd sets up around the
+   * [`lunchbox_api::EntryKind::Ebook`] for what shepherd sets up around the
    * launch.
    */
   | {
@@ -669,7 +669,7 @@ export type RawEntryKind =
  *
  * A hardened kiosk account denies SSH and keeps its home at mode 0700, so
  * `scp` and every SFTP file manager are shut out of exactly the directory a
- * parent needs to put a book, a ROM or a video into. shepherdd already runs
+ * parent needs to put a book, a ROM or a video into. lunchboxd already runs
  * as that user, so the web interface is the one door that is already open.
  *
  * There is no runtime toggle. The surface is reachable by a signed-in
@@ -1017,7 +1017,7 @@ export interface RawMediaServiceConfig {
    * Maximum total size of the on-disk video cache, in bytes.
    *
    * Bounds the cache, not the volume it sits on — see
-   * `free_space_floor_bytes` for that. shepherdd hands this to every media
+   * `free_space_floor_bytes` for that. lunchboxd hands this to every media
    * activity it launches, so the daemon prefetching into the cache and the
    * player trimming it agree on how big it may be.
    */
@@ -1108,7 +1108,7 @@ export interface RawServiceConfig {
    */
   cooldown_min_session_seconds?: number | null;
   /**
-   * Data directory for store (default: $XDG_DATA_HOME/shepherdd)
+   * Data directory for store (default: $XDG_DATA_HOME/lunchboxd)
    */
   data_dir?: string | null;
   /**
@@ -1136,7 +1136,7 @@ export interface RawServiceConfig {
    */
   internet?: RawInternetConfig | null;
   /**
-   * Log directory (default: $XDG_STATE_HOME/shepherdd)
+   * Log directory (default: $XDG_STATE_HOME/lunchboxd)
    */
   log_dir?: string | null;
   /**
@@ -1157,7 +1157,7 @@ export interface RawServiceConfig {
    */
   save_grace_seconds?: number | null;
   /**
-   * IPC socket path (default: $XDG_RUNTIME_DIR/shepherdd/shepherdd.sock)
+   * IPC socket path (default: $XDG_RUNTIME_DIR/lunchboxd/lunchboxd.sock)
    */
   socket_path?: string | null;
   /**
@@ -1172,8 +1172,8 @@ export interface RawServiceConfig {
 
 /**
  * Every category the service defines that describes a *span* a player can jump
- * over. Mirrors `shepherd_media_core::sponsorblock::Category`, which this crate
- * cannot depend on (it compiles to wasm for the config editor); shepherdd holds
+ * over. Mirrors `lunchbox_media_core::sponsorblock::Category`, which this crate
+ * cannot depend on (it compiles to wasm for the config editor); lunchboxd holds
  * the test that the two lists agree.
  *
  * An enum rather than a free string so the config editor gets a generated union

@@ -68,7 +68,7 @@ data class RpcError(
 
 /**
  * Wire error codes, serialised as snake_case strings. Mirrors
- * `ErrorCode` in `crates/shepherd-ble/src/protocol.rs`.
+ * `ErrorCode` in `crates/lunchbox-ble/src/protocol.rs`.
  */
 @Serializable
 enum class ErrorCode {

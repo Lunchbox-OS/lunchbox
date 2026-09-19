@@ -21,7 +21,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 # shellcheck source=install.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 
-# Where shepherdd's admin record and factory-reset sentinel live.
+# Where lunchboxd's admin record and factory-reset sentinel live.
 #
 # Two possible homes since issue #157. On a device with the state custodian they
 # are in its shared directory, at a uid the kiosk user does not have; before it,
@@ -29,13 +29,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.sh"
 # own. `bluetooth_clear` picks between them, and that choice is also what decides
 # whether `--user` was needed -- see the comment there.
 #
-# `<data_dir>/<name>`, where data_dir defaults to ~/.local/share/shepherdd
-# (`APP_DIR = "shepherdd"` in shepherd-util).
-SHEPHERD_DEFAULT_DATA_REL=".local/share/shepherdd"
+# `<data_dir>/<name>`, where data_dir defaults to ~/.local/share/lunchboxd
+# (`APP_DIR = "lunchboxd"` in lunchbox-util).
+SHEPHERD_DEFAULT_DATA_REL=".local/share/lunchboxd"
 
 # Refuse to operate on a user who currently has an active login
 # session. The whole point of this command is to clean up *after*
-# logout — running it on a live session would race with shepherdd
+# logout — running it on a live session would race with lunchboxd
 # (which holds the admin record open and could rewrite it after the
 # delete) and could yank a phone out from under a parent who's mid-
 # action in the companion app.
@@ -54,7 +54,7 @@ user_has_active_session() {
 
 # Every kiosk user the custodian holds state for.
 #
-# The admin record is the device's, so any of them could have a shepherdd
+# The admin record is the device's, so any of them could have a lunchboxd
 # holding it open -- not just the one named on the command line. Empty on a
 # device without a custodian, where the record really is per-user and the named
 # one is the only session that matters.
@@ -177,7 +177,7 @@ bluetooth_clear() {
     fi
 
     # The record this deletes is the device's, so the race is with *any* kiosk
-    # user's shepherdd, not only the named one. Checking just `--user` would let
+    # user's lunchboxd, not only the named one. Checking just `--user` would let
     # a second child's live session have the record pulled out from under it --
     # the thing this guard exists to prevent, one user over.
     local busy=()
@@ -188,7 +188,7 @@ bluetooth_clear() {
         busy+=("$candidate")
     done
     if [[ "${#busy[@]}" -gt 0 && "$force" != "true" ]]; then
-        die "Active login session for: ${busy[*]}. shepherd's admin record is the device's, so clearing it races with any running shepherdd; log them out, or pass --force"
+        die "Active login session for: ${busy[*]}. shepherd's admin record is the device's, so clearing it races with any running lunchboxd; log them out, or pass --force"
     fi
 
     info "Admin record: $admin_record"

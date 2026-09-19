@@ -1,0 +1,187 @@
+//! Individual tile widget for the launcher grid
+
+use gtk4::glib;
+use gtk4::prelude::*;
+use gtk4::subclass::prelude::*;
+use lunchbox_api::{EntryView, ReasonCode};
+use std::cell::RefCell;
+
+mod imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct LauncherTile {
+        pub entry: RefCell<Option<EntryView>>,
+        pub icon: gtk4::Image,
+        pub label: gtk4::Label,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for LauncherTile {
+        const NAME: &'static str = "ShepherdLauncherTile";
+        type Type = super::LauncherTile;
+        type ParentType = gtk4::Button;
+    }
+
+    impl ObjectImpl for LauncherTile {
+        fn constructed(&self) {
+            self.parent_constructed();
+
+            let obj = self.obj();
+
+            // Create layout
+            let content = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+            content.set_halign(gtk4::Align::Center);
+            content.set_valign(gtk4::Align::Center);
+
+            // Icon
+            self.icon.set_pixel_size(96);
+            self.icon.set_icon_name(Some("application-x-executable"));
+            content.append(&self.icon);
+
+            // Label
+            self.label.set_wrap(true);
+            self.label.set_wrap_mode(gtk4::pango::WrapMode::Word);
+            self.label.set_justify(gtk4::Justification::Center);
+            self.label.set_max_width_chars(12);
+            self.label.add_css_class("tile-label");
+            content.append(&self.label);
+
+            obj.set_child(Some(&content));
+            obj.add_css_class("launcher-tile");
+            obj.add_css_class("flat");
+            obj.set_size_request(160, 160);
+        }
+    }
+
+    impl WidgetImpl for LauncherTile {}
+    impl ButtonImpl for LauncherTile {}
+}
+
+glib::wrapper! {
+    pub struct LauncherTile(ObjectSubclass<imp::LauncherTile>)
+        @extends gtk4::Button, gtk4::Widget,
+        @implements gtk4::Accessible, gtk4::Actionable, gtk4::Buildable, gtk4::ConstraintTarget;
+}
+
+impl LauncherTile {
+    pub fn new() -> Self {
+        glib::Object::builder().build()
+    }
+
+    pub fn set_entry(&self, entry: EntryView) {
+        let imp = self.imp();
+
+        // Set label
+        imp.label.set_text(&entry.label);
+
+        // Determine fallback icon based on entry kind
+        let fallback_icon = match entry.kind_tag {
+            lunchbox_api::EntryKindTag::Process => "application-x-executable",
+            lunchbox_api::EntryKindTag::Snap => "application-x-executable",
+            lunchbox_api::EntryKindTag::Steam => "application-x-executable",
+            lunchbox_api::EntryKindTag::Flatpak => "application-x-executable",
+            lunchbox_api::EntryKindTag::Vm => "computer",
+            lunchbox_api::EntryKindTag::Media => "video-x-generic",
+            lunchbox_api::EntryKindTag::Retroarch => "applications-games",
+            lunchbox_api::EntryKindTag::Ebook => "application-epub+zip",
+            lunchbox_api::EntryKindTag::Custom => "applications-other",
+        };
+
+        // Set icon, first trying to load as an image file, then as an icon name
+        if let Some(ref icon_ref) = entry.icon_ref {
+            let mut loaded = false;
+
+            // First, try to load as an image file (JPG, PNG, etc.)
+            // Expand ~ to home directory if present
+            let expanded_path = if icon_ref.starts_with("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    icon_ref.replacen("~", &home.to_string_lossy(), 1)
+                } else {
+                    icon_ref.clone()
+                }
+            } else {
+                icon_ref.clone()
+            };
+
+            let path = std::path::Path::new(&expanded_path);
+            if path.exists() && path.is_file() {
+                // Try to load as an image file
+                imp.icon.set_from_file(Some(path));
+                loaded = true;
+            }
+
+            // If not loaded as a file, try as an icon name from the theme
+            if !loaded {
+                let icon_theme = gtk4::IconTheme::for_display(&self.display());
+                if icon_theme.has_icon(icon_ref) {
+                    imp.icon.set_icon_name(Some(icon_ref));
+                } else {
+                    imp.icon.set_icon_name(Some(fallback_icon));
+                }
+            }
+        } else {
+            imp.icon.set_icon_name(Some(fallback_icon));
+        }
+
+        // Entry is available if enabled and has no blocking reasons
+        let available = entry.enabled && entry.reasons.is_empty();
+        self.set_sensitive(available);
+
+        // Add tooltip with reason if not available
+        if !available && !entry.reasons.is_empty() {
+            // Format the first reason for tooltip
+            let reason_text = reason_tooltip(&entry.reasons[0]);
+            self.set_tooltip_text(Some(&reason_text));
+        } else {
+            self.set_tooltip_text(None);
+        }
+
+        *imp.entry.borrow_mut() = Some(entry);
+    }
+
+    pub fn entry(&self) -> Option<EntryView> {
+        self.imp().entry.borrow().clone()
+    }
+
+    pub fn entry_id(&self) -> Option<lunchbox_util::EntryId> {
+        self.imp()
+            .entry
+            .borrow()
+            .as_ref()
+            .map(|e| e.entry_id.clone())
+    }
+}
+
+impl Default for LauncherTile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A short, human-readable tooltip for why a tile is unavailable. Most reasons
+/// fall back to their `Debug` form (as before); the input-dependency reason
+/// (issue #96) is spelled out and names the missing device(s) so a parent can
+/// tell at a glance what to plug in.
+fn reason_tooltip(reason: &ReasonCode) -> String {
+    match reason {
+        ReasonCode::RequiredInputUnavailable { devices } => {
+            let list = devices
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if list.is_empty() {
+                "Requires an input device".to_string()
+            } else {
+                format!("Requires: {list}")
+            }
+        }
+        // Name the category, so a parent can see the limit is shared rather
+        // than specific to this activity (issue #5).
+        ReasonCode::GroupRestricted { label, reason, .. } => {
+            format!("{label}: {}", reason_tooltip(reason))
+        }
+        other => format!("{other:?}"),
+    }
+}

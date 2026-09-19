@@ -7,7 +7,7 @@
 #      so the URL allow/blocklist is actually enforced.
 #   2. `--user-data-dir` lands where shepherd later wipes the profile.
 #
-# It drives `cargo test -p shepherd-host-linux` against the real
+# It drives `cargo test -p lunchbox-host-linux` against the real
 # `com.google.Chrome` flatpak. HOME is redirected to a tempdir inside the test
 # so the user's real Chrome config is never touched; the test self-skips if the
 # flatpak isn't installed.
@@ -47,7 +47,7 @@ fi
 
 echo "[orchestrator] Running cargo test (real Chrome, $APP_ID)..."
 SHEPHERD_CHROME_FLATPAK="$APP_ID" \
-    cargo test -p shepherd-host-linux --lib -- \
+    cargo test -p lunchbox-host-linux --lib -- \
     --ignored --nocapture --test-threads=1 \
     browser::tests::real_flatpak_chrome_enforces_policy_and_user_data_dir
 

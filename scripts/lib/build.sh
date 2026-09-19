@@ -11,30 +11,30 @@ source "$BUILD_LIB_DIR/common.sh"
 
 # Binary names produced by the build
 SHEPHERD_BINARIES=(
-    "shepherdd"
+    "lunchboxd"
     "shepherd-launcher"
-    "shepherd-hud"
-    "shepherd-media"
-    "shepherd-pairing-display"
+    "lunchbox-hud"
+    "lunchbox-media"
+    "lunchbox-pairing-display"
     # The screen lock administrator mode spawns (issue #154). Like the pairing
-    # overlay above it, it is a standalone binary shepherdd starts for one
-    # purpose rather than a daemon or a sidecar -- and like it, shepherdd looks
+    # overlay above it, it is a standalone binary lunchboxd starts for one
+    # purpose rather than a daemon or a sidecar -- and like it, lunchboxd looks
     # for it beside its own executable and then, failing that, on the trusted
     # path (issue #144). Leaving it out of this list left a device where
-    # `lock_device` answered "failed to start shepherd-lock: No such file or
+    # `lock_device` answered "failed to start lunchbox-lock: No such file or
     # directory", because the sibling probe finds nothing next to
-    # /usr/bin/shepherdd and nothing installed it there either. This list is the
+    # /usr/bin/lunchboxd and nothing installed it there either. This list is the
     # only one: `binaries_exist`, `install_bins` and `uninstall_bins` all read
     # it, and the .deb is built by driving install.sh with DESTDIR set.
-    "shepherd-lock"
-    "shepherd-touch-bridge"
-    "shepherd-tablet-bridge"
-    "shepherd-gamepad-bridge"
+    "lunchbox-lock"
+    "lunchbox-touch-bridge"
+    "lunchbox-tablet-bridge"
+    "lunchbox-gamepad-bridge"
     # Not a daemon or a sidecar: the policy validator, shipped because
     # `install policy` validates before it installs and a packaged device has
     # no source tree to build it from (issue #157). Without it on a device the
     # only route to a policy is an unchecked one, and an unparseable policy is
-    # fatal at shepherdd's *startup* -- a session that ends at the next boot,
+    # fatal at lunchboxd's *startup* -- a session that ends at the next boot,
     # on a device whose kiosk user has no shell to fix it from.
     "shepherd-validate-config"
 )
@@ -179,14 +179,14 @@ binaries_exist() {
 # Build the config editor's wasm validator into shepherd-webui/src/config/wasm.
 #
 # Must run before the npm build, which imports it. The editor runs the real
-# `shepherd_config` parser and validator rather than a TypeScript
+# `lunchbox_config` parser and validator rather than a TypeScript
 # reimplementation, so this artifact is a build input, not an optimization.
 build_config_wasm() {
     local repo_root
     repo_root="$(get_repo_root)"
 
-    if [[ ! -d "$repo_root/crates/shepherd-config-wasm" ]]; then
-        warn "shepherd-config-wasm crate not found; skipping wasm build"
+    if [[ ! -d "$repo_root/crates/lunchbox-config-wasm" ]]; then
+        warn "lunchbox-config-wasm crate not found; skipping wasm build"
         return 0
     fi
 
@@ -198,8 +198,8 @@ build_config_wasm() {
     cd "$repo_root" || die "Failed to change directory to $repo_root"
     wasm-pack build --target web --release \
         --out-dir ../../shepherd-webui/src/config/wasm \
-        --out-name shepherd_config \
-        crates/shepherd-config-wasm \
+        --out-name lunchbox_config \
+        crates/lunchbox-config-wasm \
         || die "wasm-pack build failed"
     success "Config editor wasm built"
 }
@@ -234,7 +234,7 @@ build_webui() {
 
 # Build the standalone config editor bundle for static hosting. Separate from
 # build_webui because it writes a different directory: `dist/` is what
-# rust-embed compiles into shepherdd, and the standalone bundle must not land
+# rust-embed compiles into lunchboxd, and the standalone bundle must not land
 # there.
 build_config_editor() {
     local repo_root
@@ -259,7 +259,7 @@ build_config_editor() {
 # Run the rsbuild dev server for the web UI or the standalone config editor.
 #
 # Foreground and hot-reloading; Ctrl-C stops it. The management UI target
-# proxies /api to localhost:8080, so shepherdd still has to be running
+# proxies /api to localhost:8080, so lunchboxd still has to be running
 # separately for anything that talks to the daemon; the standalone config
 # editor target needs no daemon at all.
 dev_webui() {
@@ -292,7 +292,7 @@ Options:
                     which proxies /api to localhost:8080.
     --wasm          Rebuild the config editor's wasm validator first. It is
                     built automatically when missing; use this after changing
-                    crates/shepherd-config-wasm.
+                    crates/lunchbox-config-wasm.
 
 Anything after -- is passed to rsbuild, e.g. --port 3001.
 
@@ -401,7 +401,7 @@ build_cargo() {
     local for_target=""
     if [[ -n "${SHEPHERD_CARGO_TARGET:-}" ]]; then
         # Pass --target on the command line rather than exporting
-        # CARGO_BUILD_TARGET: shepherd-firewall-helper's build.rs shells out to
+        # CARGO_BUILD_TARGET: lunchbox-firewall-helper's build.rs shells out to
         # a nightly cargo for the sibling BPF crate, and an environment
         # variable would beat that crate's own [build] target and try to build
         # the eBPF program for this triple. (build.rs strips it too, belt and
@@ -473,7 +473,7 @@ build_main() {
                 ;;
             config-editor)
                 # The standalone static bundle. Not part of the normal build:
-                # `dist/` is what ships inside shepherdd, and this writes
+                # `dist/` is what ships inside lunchboxd, and this writes
                 # `dist-standalone/` for a static host instead.
                 build_config_editor
                 return

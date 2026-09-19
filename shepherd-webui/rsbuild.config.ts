@@ -5,8 +5,8 @@ import { pluginReact } from "@rsbuild/plugin-react";
  * One source tree, two deploy targets.
  *
  * - `embedded` (default) builds the management UI into `dist/`, which
- *   `rust-embed` compiles into shepherdd (see
- *   `crates/shepherd-http/src/web_assets.rs`). Since issue #185 the config
+ *   `rust-embed` compiles into lunchboxd (see
+ *   `crates/lunchbox-http/src/web_assets.rs`). Since issue #185 the config
  *   editor is part of it: `src/App.tsx` mounts it lazily as the Config tab,
  *   with a `DeviceConfigSource` that edits the device's own policy. That is
  *   about +1.5 MB on `dist/` — most of it the ~950 kB wasm validator — and so

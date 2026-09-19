@@ -1,6 +1,6 @@
 /**
  * Helpers over the validation report, whose types are generated from
- * `crates/shepherd-config-wasm/src/report.rs`.
+ * `crates/lunchbox-config-wasm/src/report.rs`.
  *
  * The three failure modes are kept apart in the Rust because the editor reacts
  * to each differently: a syntax error has a caret position and blocks

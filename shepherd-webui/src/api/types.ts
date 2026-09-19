@@ -1,10 +1,10 @@
-// Wire types for the shepherd-http REST API.
+// Wire types for the lunchbox-http REST API.
 //
 // The payload shapes are **generated** from the Rust definitions — see
 // `wire-types.generated.ts` — and are only re-exported here so that the rest of
 // the UI keeps importing wire types from one place. To change one, edit
-// `crates/shepherd-api/src/types.rs` and run
-// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`; the drift test fails
+// `crates/lunchbox-api/src/types.rs` and run
+// `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`; the drift test fails
 // CI until the regenerated file is checked in.
 //
 // They used to be hand-written, which meant nothing connected them to the

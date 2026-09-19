@@ -65,7 +65,7 @@ RUN chmod -R a+rwX "$CARGO_HOME" "$RUSTUP_HOME"
 # step. This RUN sets them for the length of the check only.
 #
 # Never set CARGO_BUILD_TARGET, here or in a job. It would override
-# crates/shepherd-firewall-bpf's own `[build] target = "bpfel-unknown-none"`
+# crates/lunchbox-firewall-bpf's own `[build] target = "bpfel-unknown-none"`
 # and compile the eBPF program for the host triple; `shepherd build` passes
 # --target on the command line for exactly that reason.
 # `sh` here, not bash: Docker runs each RUN through /bin/sh, which on Ubuntu is

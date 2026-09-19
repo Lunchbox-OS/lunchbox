@@ -53,7 +53,7 @@ DESKTOP_ENTRY_NAME="shepherd.desktop"
 # nothing about it is a local decision. An admin who wants to override it still
 # can, the way polkit intends: a same-named file in /etc/polkit-1/rules.d,
 # which is read first and wins.
-FIREWALL_HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
+FIREWALL_HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
 POLKIT_ACTIONS_DIR="/usr/share/polkit-1/actions"
 POLKIT_RULES_DIR="/usr/share/polkit-1/rules.d"
 # Where the rule used to go, before #177 moved it. Installs and uninstalls
@@ -68,18 +68,18 @@ FIREWALL_GROUP="shepherd-firewall"
 # fixed path regardless of --prefix, because a systemd unit references it
 # absolutely and units are not relocatable. It is not a command an operator
 # runs, so /usr/libexec is where it belongs anyway.
-STATED_PATH="/usr/libexec/shepherd-stated"
+STATED_PATH="/usr/libexec/lunchbox-stated"
 STATED_USER="shepherd-state"
 STATED_UNIT_DIR="/etc/systemd/system"
-STATED_SOCKET_UNIT="shepherd-stated@.socket"
-STATED_SERVICE_UNIT="shepherd-stated@.service"
-# Where the protected files live. `/var/lib/shepherdd` is already the tree's
+STATED_SOCKET_UNIT="lunchbox-stated@.socket"
+STATED_SERVICE_UNIT="lunchbox-stated@.service"
+# Where the protected files live. `/var/lib/lunchboxd` is already the tree's
 # system state root (harden.sh keeps its rollback state there), and both
-# crates/shepherdd/README.md and docs/INSTALL.md have always described state as
+# crates/lunchboxd/README.md and docs/INSTALL.md have always described state as
 # living under it.
-STATED_STATE_ROOT="/var/lib/shepherdd/state"
+STATED_STATE_ROOT="/var/lib/lunchboxd/state"
 # The session watchdog's authority (issue #172). The custodian is outside the
-# kiosk session at its own uid, which is what lets it notice a killed shepherdd
+# kiosk session at its own uid, which is what lets it notice a killed lunchboxd
 # -- and what means logind treats it as a stranger to the session it has to end.
 # This rule is the difference between a watchdog that fires and one that only
 # looks like it will.
@@ -88,17 +88,17 @@ SESSION_GUARD_RULES_NAME="50-shepherd-session-guard.rules"
 # The file names shepherd's protected files have, and what happens to each when
 # a device gains or loses the custodian.
 #
-# These mirror `ProtectedFile` in `shepherd-util`, which is the Rust half of the
-# same list, plus `shepherdd.db`, which the custodian owns without it being a
+# These mirror `ProtectedFile` in `lunchbox-util`, which is the Rust half of the
+# same list, plus `lunchboxd.db`, which the custodian owns without it being a
 # `ProtectedFile` (it is reached through `Store`, not `ProtectedFiles`).
-# `crates/shepherd-util/tests/installer_covers_protected_files.rs` fails if a
+# `crates/lunchbox-util/tests/installer_covers_protected_files.rs` fails if a
 # name is added there and not accounted for here -- the two lists cannot be one
 # list, so they are held together by something that breaks loudly instead of by
 # a comment asking nicely.
 #
-# Moved from `~/.local/share/shepherdd/` into this user's custodian directory,
+# Moved from `~/.local/share/lunchboxd/` into this user's custodian directory,
 # and back again by `uninstall state --restore-to-home`.
-SHEPHERD_MIGRATED_FILES=(shepherdd.db)
+SHEPHERD_MIGRATED_FILES=(lunchboxd.db)
 # The device's files rather than a user's, so they move to the *shared*
 # directory instead. There is one Bluetooth adapter and one BlueZ bond table,
 # and forgetting a bond forgets it for the machine -- so an admin record kept
@@ -110,7 +110,7 @@ SHEPHERD_MIGRATED_FILES=(shepherdd.db)
 SHEPHERD_SYSTEM_FILES=(admin.toml unbond-queue.toml web-auth.toml tls.pem)
 # Where they go. Shared by every kiosk user, at the same uid and mode as the
 # per-user directories, so it is no more reachable from an activity.
-STATED_ADMIN_DIR="/var/lib/shepherdd/admin"
+STATED_ADMIN_DIR="/var/lib/lunchboxd/admin"
 # The policy, moved from `~/.config/shepherd/` -- a different directory, so it
 # is handled apart from the list above rather than being in it.
 SHEPHERD_POLICY_FILE="config.toml"
@@ -118,7 +118,7 @@ SHEPHERD_POLICY_FILE="config.toml"
 # a stale one would factory-reset a device during an upgrade. Declared rather
 # than merely omitted, so the drift test can tell "decided against" apart from
 # "forgotten" -- which is the whole distinction it exists to check. (It is a
-# device file like the ones above, and shepherdd reads it from the shared
+# device file like the ones above, and lunchboxd reads it from the shared
 # directory; it is simply never carried across.)
 # shellcheck disable=SC2034  # read by installer_covers_protected_files.rs
 SHEPHERD_UNMIGRATED_FILES=(.factory-reset-ble)
@@ -137,7 +137,7 @@ SHEPHERD_WEB_AUTH_FILE="web-auth.toml"
 # template names above are the *unit files*, and this is the instance, which is
 # what `systemctl enable` and `systemctl stop` actually take.
 stated_socket_unit_for() {
-    echo "shepherd-stated@$1.socket"
+    echo "lunchbox-stated@$1.socket"
 }
 
 # udev rules. Installed to a fixed system location regardless of --prefix
@@ -231,15 +231,15 @@ install_sway_config() {
     
     # Copy and modify the config for production use.
     #
-    # `--no-harden-sway-ipc` is stripped here (issue #144). shepherdd hardens by
+    # `--no-harden-sway-ipc` is stripped here (issue #144). lunchboxd hardens by
     # default: once it has connected it unlinks sway's IPC socket, and nothing
     # else can reach the compositor for the rest of the session. That matters
-    # because sway's IPC hands any process running as shepherdd's uid — which is
+    # because sway's IPC hands any process running as lunchboxd's uid — which is
     # every activity — `exec`, which starts a process outside supervision *and*
     # outside the cgroup the per-entry firewall is attached to.
     #
     # `--trust-environment` is stripped for the same reason again: it lets the
-    # environment name the binaries shepherdd execs and redirect where the
+    # environment name the binaries lunchboxd execs and redirect where the
     # browser policy is written, and on a device the kiosk user chooses the
     # environment (GDM's PAM stack reads `~/.pam_environment`). Only the e2e
     # suite passes it, but a hand-edited config could.
@@ -249,16 +249,16 @@ install_sway_config() {
     # activity can read and rewrite them (issue #157).
     #
     # `--no-restrict-ipc-peers` is stripped for the same reason. It opens
-    # shepherdd's *own* management socket to every process at this uid, which is
+    # lunchboxd's *own* management socket to every process at this uid, which is
     # every activity: without the check a game can call `logout`, `stop_current`
     # or `launch`. It is in `sway.conf` because a dev stack runs entirely inside
     # one shell's cgroup, where the check cannot mean anything.
     #
     # The two `swaymsg exit` fallbacks are rewritten rather than stripped (issue
-    # #144's defect 2) -- the one that runs when shepherdd exits, and the one
+    # #144's defect 2) -- the one that runs when lunchboxd exits, and the one
     # behind the `Mod4+Shift+Escape` escape hatch, which fires only when there is
-    # no shepherdd to signal. `swaymsg exit` cannot work on a device:
-    # shepherdd unlinks sway's IPC socket once it has connected, so a daemon
+    # no lunchboxd to signal. `swaymsg exit` cannot work on a device:
+    # lunchboxd unlinks sway's IPC socket once it has connected, so a daemon
     # that dies after that leaves sway up with nothing supervising the session.
     # `loginctl terminate-session` needs no compositor socket, and terminating
     # one's own session needs no polkit authorisation. `sway.conf` keeps
@@ -280,24 +280,24 @@ install_sway_config() {
     # literally, for the session's own shell to expand when the fallback runs.
     sed \
         -e "s|./target/debug/shepherd-launcher|$bindir/shepherd-launcher|g" \
-        -e "s|./target/debug/shepherd-hud|$bindir/shepherd-hud|g" \
-        -e "s|./target/debug/shepherdd|$bindir/shepherdd|g" \
+        -e "s|./target/debug/lunchbox-hud|$bindir/lunchbox-hud|g" \
+        -e "s|./target/debug/lunchboxd|$bindir/lunchboxd|g" \
         -e "s|./config.example.toml|~/.config/shepherd/config.toml|g" \
         -e "s|-c ./sway.conf|-c $dst_config|g" \
         -e "s| --no-harden-sway-ipc||g" \
         -e "s| --no-restrict-ipc-peers||g" \
         -e "s| --trust-environment||g" \
         -e "s| --no-state-custodian||g" \
-        -e '/^exec .*shepherdd -c /s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
-        -e '/^bindsym .*pkill -TERM shepherdd/s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
+        -e '/^exec .*lunchboxd -c /s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
+        -e '/^bindsym .*pkill -TERM lunchboxd/s|swaymsg exit|loginctl terminate-session "$XDG_SESSION_ID"|' \
         "$src_config" > "$dst_config"
 
     # Scoped to the exec line: the comment above it names the flag too, and a
     # whole-file grep would fail an install that had stripped it correctly.
     local dst_exec_line
-    dst_exec_line="$(grep -E "^exec .*shepherdd -c [^ ]+" "$dst_config" || true)"
+    dst_exec_line="$(grep -E "^exec .*lunchboxd -c [^ ]+" "$dst_config" || true)"
     if [[ -z "$dst_exec_line" ]]; then
-        die "No 'shepherdd -c <path>' exec line in $dst_config (sway.conf's shepherdd exec line may have changed)"
+        die "No 'lunchboxd -c <path>' exec line in $dst_config (sway.conf's lunchboxd exec line may have changed)"
     fi
     if [[ "$dst_exec_line" == *--no-harden-sway-ipc* ]]; then
         die "Failed to strip --no-harden-sway-ipc from $dst_config; the installed device would leave sway's IPC socket reachable by every activity (issue #144)"
@@ -309,18 +309,18 @@ install_sway_config() {
         die "Failed to strip --no-state-custodian from $dst_config; the installed device would keep policy and state in the kiosk user's home, where every activity can rewrite them (issue #157)"
     fi
     if [[ "$dst_exec_line" == *"swaymsg exit"* ]]; then
-        die "Failed to rewrite the 'swaymsg exit' fallback in $dst_config; shepherdd unlinks sway's IPC socket, so a daemon that died would leave the session running with nothing supervising it (issue #144)"
+        die "Failed to rewrite the 'swaymsg exit' fallback in $dst_config; lunchboxd unlinks sway's IPC socket, so a daemon that died would leave the session running with nothing supervising it (issue #144)"
     fi
     if [[ "$dst_exec_line" != *"terminate-session"* ]]; then
         die "No session-teardown fallback on the exec line in $dst_config; a daemon that died would leave the session running with nothing supervising it (issue #144)"
     fi
     local dst_exit_binding
-    dst_exit_binding="$(grep -E "^bindsym .*pkill -TERM shepherdd" "$dst_config" || true)"
+    dst_exit_binding="$(grep -E "^bindsym .*pkill -TERM lunchboxd" "$dst_config" || true)"
     if [[ -z "$dst_exit_binding" ]]; then
-        die "No 'pkill -TERM shepherdd' exit binding in $dst_config (sway.conf's exit keybinding may have changed)"
+        die "No 'pkill -TERM lunchboxd' exit binding in $dst_config (sway.conf's exit keybinding may have changed)"
     fi
     if [[ "$dst_exit_binding" == *"swaymsg exit"* ]]; then
-        die "Failed to rewrite the 'swaymsg exit' fallback on the exit binding in $dst_config; shepherdd unlinks sway's IPC socket, so the escape hatch would do nothing when there is no shepherdd to signal (issue #144)"
+        die "Failed to rewrite the 'swaymsg exit' fallback on the exit binding in $dst_config; lunchboxd unlinks sway's IPC socket, so the escape hatch would do nothing when there is no lunchboxd to signal (issue #144)"
     fi
     if [[ "$dst_exec_line" == *--trust-environment* ]]; then
         die "Failed to strip --trust-environment from $dst_config; the installed device would take helper binaries, and the browser-policy root, from an environment the kiosk user can write (issue #144)"
@@ -405,7 +405,7 @@ install_config() {
     #
     # An overwrite here used to exist as `--force`, and under the custodian it
     # was the worst of both (issue #157): it replaced the home copy, which is
-    # only the seed, and left the custodian's copy -- the one shepherdd reads --
+    # only the seed, and left the custodian's copy -- the one lunchboxd reads --
     # untouched. The operator saw "Overwrote user configuration" and the device
     # kept running the old policy.
     #
@@ -439,7 +439,7 @@ install_config() {
     fi
 
     # The example config references `~/.config/shepherd/movies.toml` for the
-    # shepherd-media entries. If the user picked the default example config,
+    # lunchbox-media entries. If the user picked the default example config,
     # also drop the matching example library so the entries don't 404 on
     # first launch. The user is still expected to edit the URIs.
     local source_library="$repo_root/movies-library.example.toml"
@@ -458,8 +458,8 @@ install_config() {
 
 # Groups the kiosk user must belong to for shepherd-launcher features.
 #
-# - input: required by shepherd-touch-bridge, shepherd-tablet-bridge, and
-#   shepherd-gamepad-bridge (used when an entry has `input_compat =
+# - input: required by lunchbox-touch-bridge, lunchbox-tablet-bridge, and
+#   lunchbox-gamepad-bridge (used when an entry has `input_compat =
 #   "touch_to_mouse"`, `"tablet_to_touch"`, or `gamepad_*`) so they can read
 #   /dev/input/event* and write /dev/uinput.
 #   The uinput write access also needs the udev rule installed by
@@ -469,7 +469,7 @@ install_config() {
 #   daemon runs as the desktop user, so without this membership every
 #   brightness write fails with EACCES even though brightnessctl is
 #   installed.
-# - bluetooth: required by the BLE management transport (shepherd-ble).
+# - bluetooth: required by the BLE management transport (lunchbox-ble).
 #   BlueZ's polkit rules grant the `bluetooth` group permission to call
 #   org.bluez.Adapter1.SetPairable and AgentManager1.RegisterAgent over
 #   the system bus; without membership the BLE startup fails on the
@@ -724,7 +724,7 @@ install_firewall() {
     require_root
 
     local helper_src
-    helper_src="$(get_target_dir "$release")/shepherd-firewall-helper"
+    helper_src="$(get_target_dir "$release")/lunchbox-firewall-helper"
     local helper_dst="$destdir$FIREWALL_HELPER_PATH"
     local policy_src="$repo_root/dist/polkit/$FIREWALL_POLICY_NAME"
     local policy_dst="$destdir$POLKIT_ACTIONS_DIR/$FIREWALL_POLICY_NAME"
@@ -733,9 +733,9 @@ install_firewall() {
 
     if [[ ! -x "$helper_src" ]]; then
         if [[ "$release" == "true" ]]; then
-            die "shepherd-firewall-helper not found at $helper_src; run 'shepherd build --release' first"
+            die "lunchbox-firewall-helper not found at $helper_src; run 'shepherd build --release' first"
         else
-            die "shepherd-firewall-helper not found at $helper_src; run 'cargo build --bin shepherd-firewall-helper' first"
+            die "lunchbox-firewall-helper not found at $helper_src; run 'cargo build --bin lunchbox-firewall-helper' first"
         fi
     fi
     if [[ ! -f "$policy_src" || ! -f "$rules_src" ]]; then
@@ -811,7 +811,7 @@ setup_state_for_user() {
 
     # Create the state directory here rather than leaving it to the unit's
     # `StateDirectory=`. That would also do it -- but only when the *service*
-    # first starts, and socket activation means that is the moment shepherdd
+    # first starts, and socket activation means that is the moment lunchboxd
     # first connects. Migration has to have already happened by then, or the
     # daemon creates an empty database and the device's history is stranded in
     # the home directory it came from.
@@ -833,13 +833,13 @@ setup_state_for_user() {
 # Install the state custodian: the binary, its systemd units, and the system
 # user that owns shepherd's policy and state (issue #157).
 #
-# Why this exists at all: shepherdd runs as the same uid as every activity it
-# launches, so `shepherdd.db`, `config.toml` and the BLE admin record are
+# Why this exists at all: lunchboxd runs as the same uid as every activity it
+# launches, so `lunchboxd.db`, `config.toml` and the BLE admin record are
 # writable by the software the device is meant to be supervising. That was
 # measured, not inferred — an activity resetting today's usage and adding an
 # unlimited entry to the policy, live, on an installed device
 # (docs/ai/history/2026-08-29 005). No file mode can help at a shared uid, so
-# the files move to a uid the activities do not have and shepherdd reaches them
+# the files move to a uid the activities do not have and lunchboxd reaches them
 # over a socket that admits only its own session's cgroup.
 #
 # Args:
@@ -855,12 +855,12 @@ install_state() {
     require_root
 
     local bin_src
-    bin_src="$(get_target_dir "$release")/shepherd-stated"
+    bin_src="$(get_target_dir "$release")/lunchbox-stated"
     if [[ ! -x "$bin_src" ]]; then
         if [[ "$release" == "true" ]]; then
-            die "shepherd-stated not found at $bin_src; run 'shepherd build --release' first"
+            die "lunchbox-stated not found at $bin_src; run 'shepherd build --release' first"
         else
-            die "shepherd-stated not found at $bin_src; run 'cargo build --bin shepherd-stated' first"
+            die "lunchbox-stated not found at $bin_src; run 'cargo build --bin lunchbox-stated' first"
         fi
     fi
     for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT"; do
@@ -945,7 +945,7 @@ _is_policy_placeholder() {
 # configured yet"; this says where it went and what to do instead.
 #
 # It parses, and grants nothing. Nothing should ever read it as a policy: a
-# device with a signpost has a custodian, and a shepherdd that cannot reach its
+# device with a signpost has a custodian, and a lunchboxd that cannot reach its
 # custodian now refuses to start rather than running on whatever is in the home
 # directory. Keeping the file valid means that if some path ever does read it,
 # what it grants is nothing -- rather than the daemon dying on a parse error
@@ -980,10 +980,10 @@ $POLICY_PLACEHOLDER_MARK
 #
 #     sudo shepherd install policy --user $user --source ./new-config.toml
 #
-# Either way shepherdd reloads within a second; no restart is needed.
+# Either way lunchboxd reloads within a second; no restart is needed.
 #
 # Editing *this* file changes nothing. If the custodian ever cannot be reached,
-# shepherdd refuses to start rather than falling back to this one -- the session
+# lunchboxd refuses to start rather than falling back to this one -- the session
 # ends at the login screen, which says something is wrong, where a device with
 # an empty launcher would look like an ordinary evening with nothing available.
 
@@ -996,7 +996,7 @@ EOF
 
 # Move an existing device's state into the custodian's directory.
 #
-# Without this an upgrade looks like a factory reset: shepherdd would ask the
+# Without this an upgrade looks like a factory reset: lunchboxd would ask the
 # custodian for a database that has never been written, and a child's usage
 # history, quota balances and BLE admin record would still be sitting in their
 # home directory, unread. Silently starting from zero is the worst available
@@ -1032,7 +1032,7 @@ _migrate_state_for_user() {
     # device during an upgrade.
     local src dst name
     for name in "${SHEPHERD_MIGRATED_FILES[@]}"; do
-        src="$home/.local/share/shepherdd/$name"
+        src="$home/.local/share/lunchboxd/$name"
         dst="$state_dir/$name"
         [[ -f "$src" ]] || continue
         if [[ -e "$dst" ]]; then
@@ -1062,7 +1062,7 @@ _migrate_state_for_user() {
     # pairing that still works. The one left behind is reported, not deleted.
     install -d -m 0700 -o "$STATED_USER" -g "$STATED_USER" "$STATED_ADMIN_DIR"
     for name in "${SHEPHERD_SYSTEM_FILES[@]}"; do
-        src="$home/.local/share/shepherdd/$name"
+        src="$home/.local/share/lunchboxd/$name"
         dst="$STATED_ADMIN_DIR/$name"
         [[ -f "$src" ]] || continue
         if [[ -e "$dst" ]]; then
@@ -1103,7 +1103,7 @@ _migrate_state_for_user() {
         success "Migrated $moved state file(s) for $user into $state_dir"
     fi
     if [[ "$skipped" -gt 0 ]]; then
-        info "  $skipped file(s) were left in $home/.local/share/shepherdd (already migrated)"
+        info "  $skipped file(s) were left in $home/.local/share/lunchboxd (already migrated)"
     fi
 }
 
@@ -1137,7 +1137,7 @@ _resolve_validator() {
 #
 # `install config` deploys the *example* config; this is the other direction --
 # take a policy and make it the one the daemon reads. That is the remedy
-# shepherdd's divergence warning names, so it has to exist as a command an
+# lunchboxd's divergence warning names, so it has to exist as a command an
 # operator can actually run.
 #
 # With `--source` the policy comes straight from a path the administrator
@@ -1185,9 +1185,9 @@ install_policy() {
     [[ -d "$STATED_STATE_ROOT/$user" ]] \
         || die "No state custodian for $user; run 'shepherd install state --user $user' first"
 
-    # Validate before installing, not after. shepherdd tolerates a bad policy on
+    # Validate before installing, not after. lunchboxd tolerates a bad policy on
     # *reload* -- it keeps the running one and logs -- but at startup
-    # `load_policy` is fatal, and since #172 a shepherdd that exits takes the
+    # `load_policy` is fatal, and since #172 a lunchboxd that exits takes the
     # session down with `loginctl terminate-session`. So a policy with a typo
     # costs nothing until the next boot, and then costs the whole session, on a
     # device whose kiosk user has no shell to fix it from. The validator already
@@ -1203,7 +1203,7 @@ or reinstall the package, which ships it"
     install -m 0600 -o "$STATED_USER" -g "$STATED_USER" \
         "$src" "$STATED_STATE_ROOT/$user/config.toml"
     success "Pushed $src to $user's state custodian"
-    info "shepherdd reloads it within a second; no restart needed."
+    info "lunchboxd reloads it within a second; no restart needed."
 }
 
 
@@ -1261,7 +1261,7 @@ install_all() {
     info "       sudoedit $STATED_STATE_ROOT/$user/config.toml"
     info "     or install one from anywhere, validated before it is applied:"
     info "       sudo shepherd install policy --user $user --source PATH"
-    info "     Either way shepherdd reloads within a second."
+    info "     Either way lunchboxd reloads within a second."
     info "  2. Have $user log out and back in (so the new shepherd-firewall"
     info "     group membership takes effect for per-entry firewall rules)"
     info "  3. Select 'Shepherd Kiosk' session at login"
@@ -1429,7 +1429,7 @@ uninstall_desktop_entry() {
 #
 # Non-destructive in the same direction as the forward migration: a file
 # already in the home directory is never overwritten. On this path that copy is
-# the one shepherdd would read next, so it is the one that wins.
+# the one lunchboxd would read next, so it is the one that wins.
 #
 # Args:
 #   $1 -- the user whose state is being restored
@@ -1443,7 +1443,7 @@ _restore_state_to_home() {
     fi
     state_dir="$STATED_STATE_ROOT/$user"
     [[ -d "$state_dir" ]] || return 0
-    data_dir="$home/.local/share/shepherdd"
+    data_dir="$home/.local/share/lunchboxd"
 
     info "Restoring $user's state to $data_dir..."
     # Each component explicitly: `install -d` applies its mode and ownership to
@@ -1553,8 +1553,8 @@ _stop_stated_instances() {
         [[ -n "$unit" ]] || continue
         info "Stopping $unit"
         systemctl disable --now "$unit" 2>/dev/null || true
-    done < <(systemctl list-units --all --no-legend 'shepherd-stated@*' 2>/dev/null \
-        | awk '{print $1}' | grep -E '^shepherd-stated@' || true)
+    done < <(systemctl list-units --all --no-legend 'lunchbox-stated@*' 2>/dev/null \
+        | awk '{print $1}' | grep -E '^lunchbox-stated@' || true)
 }
 
 # Put every user's state back in their home directory.
@@ -1664,7 +1664,7 @@ uninstall_state() {
             done
             info "  Remove them by hand if you mean to discard a child's usage history"
             info "  and this device's pairing."
-            info "  To put it back where shepherdd looks without the custodian, re-run with"
+            info "  To put it back where lunchboxd looks without the custodian, re-run with"
             info "  --restore-to-home (a build older than issue #157 will not find it here)."
         fi
     fi
@@ -1838,7 +1838,7 @@ Options:
     --prefix PREFIX   Installation prefix the files were installed under
                       (default: $DEFAULT_PREFIX)
     --restore-to-home For 'state' and 'all': move each user's database and BLE
-                      admin record back to ~/.local/share/shepherdd first, where
+                      admin record back to ~/.local/share/lunchboxd first, where
                       a build without the state custodian looks for them. The
                       migration that put them under the custodian moved them, so
                       without this a downgrade starts from an empty database and
@@ -1941,7 +1941,7 @@ Commands:
     state             Install the state custodian: its binary, systemd units
                       and system user (issue #157)
     policy            Push a policy to the custodian, making it the one
-                      shepherdd reads. Takes the user's edited
+                      lunchboxd reads. Takes the user's edited
                       ~/.config/shepherd/config.toml, or any file named with
                       --source. Validated before it is installed.
     config            Deploy user configuration

@@ -1,8 +1,8 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
 // Rendered from the Rust wire types by
-// `cargo run -p shepherd-wire-codegen --bin rpc-codegen`.
-// Edit `crates/shepherd-api/src/types.rs` and re-run instead.
+// `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`.
+// Edit `crates/lunchbox-api/src/types.rs` and re-run instead.
 //
 // Helper affordances (extension properties, custom serializers, and the
 // types listed as hand-written in `kotlin_types.rs`) live in
@@ -129,8 +129,8 @@ enum class AdminRole(val wire: String) {
  * other client's token does not need to be revoked to keep using the device
  * after it has been.
  *
- * Here rather than in `shepherd-ble` because both transports return it and
- * `shepherd-ble` sits *above* this crate — the same reason
+ * Here rather than in `lunchbox-ble` because both transports return it and
+ * `lunchbox-ble` sits *above* this crate — the same reason
  * [`crate::webauth::WebSessionInfo`] lives here.
  */
 @Serializable
@@ -205,7 +205,7 @@ enum class AudioOutputKind(val wire: String) {
  * An audio output the device has seen, together with any per-output volume
  * limit the parent has set for it.
  *
- * These rows are how per-output limits are configured: shepherdd records every
+ * These rows are how per-output limits are configured: lunchboxd records every
  * output it observes, the management UIs list them, and the parent sets a cap
  * on the row they recognise. Nothing has to be predicted or hand-written —
  * which matters because an output often cannot be classified at all (see
@@ -441,7 +441,7 @@ data class DailyOverride(
  * One launchable application from the system's `.desktop` files, as
  * administrator mode's app picker sees it (issue #154).
  *
- * Enumerated by `shepherd_config::desktop`, which does the Desktop Entry
+ * Enumerated by `lunchbox_config::desktop`, which does the Desktop Entry
  * parsing; this is only the shape that crosses the wire. Deliberately carries
  * no `Exec`: what a client may do is ask for an id to be launched, not hand
  * the daemon a command line.
@@ -550,12 +550,12 @@ enum class DiagnosticCode(val wire: String) {
      */
     COMPOSITOR_NOT_HARDENED("compositor_not_hardened"),
     /**
-     * Something replaced or removed shepherdd's management socket, so the
+     * Something replaced or removed lunchboxd's management socket, so the
      * daemon is no longer reachable at the path its clients use (issue #144).
      *
      * An activity can do this: the socket lives in a directory owned by the
      * uid every activity runs as, and no file mode prevents it — a root-owned
-     * directory stops shepherdd binding at all, and the sticky bit restricts
+     * directory stops lunchboxd binding at all, and the sticky bit restricts
      * deletion to the file's owner, which an activity is. Clients refuse to
      * talk to whatever bound the name instead, so this is a denial rather than
      * a breach; without saying so, it looks like a launcher that stopped
@@ -563,7 +563,7 @@ enum class DiagnosticCode(val wire: String) {
      */
     IPC_SOCKET_REPLACED("ipc_socket_replaced"),
     /**
-     * shepherdd's own management socket is reachable by processes that are
+     * lunchboxd's own management socket is reachable by processes that are
      * not part of the session — the peer allow-list is not armed, or it is
      * armed somewhere it cannot mean anything (issue #144).
      *
@@ -598,11 +598,11 @@ enum class DiagnosticCode(val wire: String) {
      * activity can leave the session running with nothing supervising it
      * (issue #172).
      *
-     * Every activity runs as shepherdd's own uid, and signal permission is a
+     * Every activity runs as lunchboxd's own uid, and signal permission is a
      * uid comparison — so `kill`, or `SIGSTOP`, is available to anything the
      * device is supervising. The answer is the state custodian, which is
      * outside the session at a uid nothing in it can signal: it watches a
-     * connection shepherdd holds and ends the session when the feeding stops.
+     * connection lunchboxd holds and ends the session when the feeding stops.
      *
      * This is raised when that watchdog exists but cannot act — the polkit
      * rule that lets the custodian end a session is missing, or the connection
@@ -1113,9 +1113,9 @@ sealed interface EntryKind {
     ) : EntryKind
 
     /**
-     * A `shepherd-media` library activity (issue #127).
+     * A `lunchbox-media` library activity (issue #127).
      *
-     * The fields mirror the flags `shepherd-media` accepts, so shepherdd can
+     * The fields mirror the flags `lunchbox-media` accepts, so lunchboxd can
      * build the invocation itself instead of an admin restating it as a
      * `Process` argv. `connectivity_check` is not among them: it is resolved
      * from the entry's `internet` policy at spawn time and reaches the host
@@ -1139,7 +1139,7 @@ sealed interface EntryKind {
          */
         val mode: MediaMode? = null,
         /**
-         * Whether shepherdd may prefetch this library's remote items in the
+         * Whether lunchboxd may prefetch this library's remote items in the
          * background. `None` inherits `service.media.prefetch`.
          */
         val prefetch: Boolean? = null,
@@ -1175,7 +1175,7 @@ sealed interface EntryKind {
      * close, restore it on open, flush the in-game save periodically, and
      * stay out of its own menu. The host adapter renders those into a config
      * fragment it passes with `--appendconfig`; the user's own `retroarch.cfg`
-     * is never edited. See `shepherd-host-linux::retroarch`.
+     * is never edited. See `lunchbox-host-linux::retroarch`.
      */
     @Serializable
     @SerialName("retroarch")
@@ -1229,7 +1229,7 @@ sealed interface EntryKind {
      * The reader keeps the page: shepherd's job is to hand it a private
      * configuration that closes every door out of the book, and to close the
      * window politely at the end of the session so the position is written.
-     * See [`shepherd_host_linux::ebook`] for what is generated.
+     * See [`lunchbox_host_linux::ebook`] for what is generated.
      */
     @Serializable
     @SerialName("ebook")
@@ -1742,8 +1742,8 @@ enum class MediaMode(val wire: String) {
 /**
  * Maximum video quality for a [`EntryKind::Media`] activity.
  *
- * Mirrors `shepherd_media_app::Quality`; kept here so the wire schema and the
- * config layer don't depend on the media crates. `shepherd-media`'s `cli`
+ * Mirrors `lunchbox_media_app::Quality`; kept here so the wire schema and the
+ * config layer don't depend on the media crates. `lunchbox-media`'s `cli`
  * module holds the test that keeps the two spellings in agreement.
  */
 @Serializable(with = MediaQuality.Serializer::class)
@@ -1787,7 +1787,7 @@ enum class MediaQuality(val wire: String) {
 /**
  * How a [`EntryKind::Media`] activity orders its library.
  *
- * Mirrors `shepherd-media`'s `--sort-by` values; see [`MediaQuality`] for
+ * Mirrors `lunchbox-media`'s `--sort-by` values; see [`MediaQuality`] for
  * where that agreement is tested.
  */
 @Serializable(with = MediaSortBy.Serializer::class)

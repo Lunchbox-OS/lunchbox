@@ -140,7 +140,7 @@ class WireTest {
 
     @Test
     fun `every reason code the device can emit decodes`() {
-        // These four were added to shepherdd after the app shipped and were
+        // These four were added to lunchboxd after the app shipped and were
         // missing here, so any entry carrying one failed the decode of the
         // whole `list_entries` response.
         assertTrue(decode<ReasonCode>("""{"code":"not_ready","kind":"steam"}""") is ReasonCode.NotReady)

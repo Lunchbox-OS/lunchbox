@@ -10,7 +10,7 @@
  * gigabytes.
  *
  * The device's own half of each of these contracts is tested in
- * `crates/shepherd-http/tests/files.rs`; these are the two ends of the same
+ * `crates/lunchbox-http/tests/files.rs`; these are the two ends of the same
  * wire, and both have to be pinned for either to mean anything.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

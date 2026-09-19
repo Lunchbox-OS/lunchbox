@@ -1,0 +1,53 @@
+[package]
+name = "lunchbox-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local-network management HTTP API for lunchboxd"
+
+[dependencies]
+lunchbox-util = { workspace = true }
+lunchbox-api = { workspace = true }
+lunchbox-host-api = { workspace = true }
+lunchbox-config = { workspace = true }
+lunchbox-store = { workspace = true }
+lunchbox-core = { workspace = true }
+lunchbox-management = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+axum = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+# `fs` for `statvfs` (how much room is left on a root) and `access` (whether
+# this device's kiosk user may write to one) -- issue #195.
+nix = { workspace = true, features = ["fs"] }
+rust-embed = { version = "8", features = ["include-exclude"] }
+subtle = { workspace = true }
+axum-server = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+rustls-pemfile = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+# Setting an mtime by hand, for the tests about validators going stale.
+filetime = "0.2"
+async-trait = "0.1"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tempfile = { workspace = true }
+lunchbox-store = { workspace = true }
+lunchbox-core = { workspace = true }
+lunchbox-host-api = { workspace = true }
+lunchbox-config = { workspace = true }
+lunchbox-api = { workspace = true }
+lunchbox-util = { workspace = true }
+lunchbox-management = { workspace = true }

@@ -130,7 +130,7 @@ cmd_run() {
     if [ -n "$cand" ] && ! echo "$cand" | grep -qiE "scanning|make sure"; then hit="$cand"; break; fi
     sleep 1
   done
-  [ -z "$hit" ] && { log "device row never appeared — is shepherdd advertising?"; exit 1; }
+  [ -z "$hit" ] && { log "device row never appeared — is lunchboxd advertising?"; exit 1; }
   log "tapping row: $(echo "$hit" | cut -f2)"
   tap_hit "$hit"
 

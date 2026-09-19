@@ -4,7 +4,7 @@
  * Hand-written rather than generated, like the policy document's, because
  * these routes are not RPCs: `#[management_rpc]` carries every async trait
  * method to BLE, and a file transfer there would be a method that exists and
- * cannot work. The Rust side is `crates/shepherd-http/src/files/mod.rs`.
+ * cannot work. The Rust side is `crates/lunchbox-http/src/files/mod.rs`.
  */
 
 /** Where a root came from, which decides its icon and its grouping. */

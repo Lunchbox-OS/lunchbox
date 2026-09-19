@@ -1,11 +1,11 @@
-# Example shepherd-media library file.
+# Example lunchbox-media library file.
 #
 # Copy this to `~/.config/shepherd/movies.toml` (or wherever the entries in
 # `config.example.toml` point) and adjust the `uri` values for your own
-# files. See `docs/shepherd-media.md` for the schema reference.
+# files. See `docs/lunchbox-media.md` for the schema reference.
 #
 # Validate after editing:
-#   shepherd-media validate ~/.config/shepherd/movies.toml
+#   lunchbox-media validate ~/.config/shepherd/movies.toml
 
 schema_version = 1
 library_id = "movies"

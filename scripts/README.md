@@ -180,9 +180,9 @@ Notes:
   or the firewall BPF suites runs on the target architecture. Those need a
   native host.
 - Do **not** cross-compile by exporting `CARGO_BUILD_TARGET`. It would override
-  `crates/shepherd-firewall-bpf`'s own target and try to build the eBPF program
+  `crates/lunchbox-firewall-bpf`'s own target and try to build the eBPF program
   for the host triple. `shepherd build` passes `--target` on the command line
-  instead, and `shepherd-firewall-helper`'s build script strips the variable.
+  instead, and `lunchbox-firewall-helper`'s build script strips the variable.
 
 ## Hardening
 
@@ -199,7 +199,7 @@ sudo ./shepherd harden status --user kiosk
 sudo ./shepherd harden revert --user kiosk
 ```
 
-All changes are tracked in `/var/lib/shepherdd/hardening/<user>/` for rollback.
+All changes are tracked in `/var/lib/lunchboxd/hardening/<user>/` for rollback.
 
 Applied restrictions:
 - SSH access denied

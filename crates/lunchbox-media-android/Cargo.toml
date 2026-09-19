@@ -1,0 +1,76 @@
+[package]
+name = "lunchbox-media-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android build of lunchbox-media: eframe UI over lunchbox-media-core and lunchbox-media-app"
+
+[lib]
+# `cdylib` is the .so the APK loads via NativeActivity; `rlib` lets the desktop
+# preview example (and unit tests) link the same code on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Core is shared verbatim, with the libmpv-backed player compiled out — the
+# Android player backend is plugged in separately (libmpv via JNI, later).
+lunchbox-media-core = { path = "../lunchbox-media-core", default-features = false }
+lunchbox-media-app = { path = "../lunchbox-media-app" }
+# Shared egui browse UI (poster grid), used by both the Linux binary and here.
+lunchbox-media-ui = { path = "../lunchbox-media-ui" }
+
+log = { workspace = true }
+thiserror = { workspace = true }
+
+# Synchronous HTTP with rustls (no OpenSSL), matching the Linux binary's choice
+# so it cross-compiles cleanly for Android. Used off the UI thread.
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+# LRU bookkeeping for the video cache via file mtimes (as the Linux binary does).
+filetime = "0.2"
+
+# Phone hand-off server (src/handoff.rs): the same axum/tokio the management API
+# (lunchbox-http) uses, run on a background thread off the egui loop.
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
+# eframe/egui are cross-platform: the same MediaApp renders on the host (for the
+# desktop preview example) and on Android (via the native-activity backend).
+eframe = { version = "0.34", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+    "android-native-activity",
+] }
+egui = "0.34"
+# Image loader for the shared poster grid (decodes the bytes:// poster URIs).
+egui_extras = { version = "0.34", features = ["image"] }
+glow = "0.17"
+url = "2.5"
+# Decode poster bytes into egui textures (formats match the Linux binary).
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
+qrcode = { version = "0.14.1", default-features = false }
+
+# Android-only glue. Target-gated so the host build (and workspace CI) never
+# pulls the NDK-linked crates.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.21"
+# Global access to the JavaVM + Activity for the youtubedl-android JNI bridge.
+ndk-context = "0.1"
+# Enable the libmpv-backed PlayerHandle from core on Android. It links against
+# the vendored libmpv under vendor/libmpv/ (see build.rs); the runtime .so are
+# packaged from there into the APK's jniLibs (see android/app/build.gradle.kts).
+lunchbox-media-core = { path = "../lunchbox-media-core", features = ["libmpv"] }
+# Force libmpv2-sys (pulled transitively via libmpv2) to regenerate its bindings
+# with bindgen instead of copying its pregenerated ones, which bake in a 64-bit
+# struct layout and fail to compile for the 32-bit armeabi-v7a target (Fire TV).
+# cargo-ndk sets BINDGEN_EXTRA_CLANG_ARGS_<triple> so bindgen picks the right
+# per-ABI data model. Android-only; the host build keeps the pregenerated path.
+libmpv2-sys = { version = "4", features = ["use-bindgen"] }
+

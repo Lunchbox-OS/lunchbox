@@ -2,7 +2,7 @@ package com.armeafamily.shepherd.companion.ble
 
 /**
  * `u16` little-endian length-prefix framing, matching
- * `crates/shepherd-ble/src/framing.rs`.
+ * `crates/lunchbox-ble/src/framing.rs`.
  *
  * On the wire each logical frame is `[len: u16 LE][payload: len bytes]`,
  * fragmented across ATT writes/notifies. Writes are chunked by the

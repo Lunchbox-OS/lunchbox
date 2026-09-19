@@ -3,15 +3,15 @@
 #
 # Builds a tiny "shepherd-firewall-probe" snap from this repo, installs it
 # via `snap try` (classic confinement), then drives
-# `cargo test -p shepherd-e2e --test firewall_real_snap` which boots a real
-# shepherdd, configures an entry with kind=snap, and waits for the snap's
-# systemd scope to appear. shepherdd then invokes
-# `shepherd-firewall-helper apply-cgroup` (via pkexec) which attaches a
+# `cargo test -p lunchbox-e2e --test firewall_real_snap` which boots a real
+# lunchboxd, configures an entry with kind=snap, and waits for the snap's
+# systemd scope to appear. lunchboxd then invokes
+# `lunchbox-firewall-helper apply-cgroup` (via pkexec) which attaches a
 # cgroup_skb BPF program to the scope. The probe inside the snap reports
 # allow=OPEN deny=BLOCKED.
 #
 # Prerequisites (same as test-firewall.sh, plus snap):
-#   - shepherd-firewall-helper installed (run setup-firewall-dev.sh)
+#   - lunchbox-firewall-helper installed (run setup-firewall-dev.sh)
 #   - The user a member of the shepherd-firewall group (re-login required)
 #   - polkit running and the rule loaded
 #   - snapd installed and running
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
+HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
 POLKIT_ACTION="org.shepherd.firewall.apply-process"
 DENY_TARGET="${SHEPHERD_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
 SNAP_NAME="shepherd-firewall-probe"
@@ -85,7 +85,7 @@ version: '1.0'
 summary: Test snap for shepherd-launcher firewall enforcement
 description: |
   Probes one allowed and one denied TCP target inside the snap's systemd
-  scope. Used by crates/shepherd-e2e/tests/firewall_real_snap.rs only.
+  scope. Used by crates/lunchbox-e2e/tests/firewall_real_snap.rs only.
 confinement: classic
 grade: stable
 apps:
@@ -103,5 +103,5 @@ echo "[orchestrator] Running cargo test..."
 SHEPHERD_FIREWALL_PROBE_LOG="$PROBE_LOG_PATH" \
 SHEPHERD_FIREWALL_PROBE_DENY="$DENY_TARGET" \
 SHEPHERD_FIREWALL_PROBE_SNAP="$SNAP_NAME" \
-    cargo test -p shepherd-e2e --test firewall_real_snap -- \
+    cargo test -p lunchbox-e2e --test firewall_real_snap -- \
     --include-ignored --test-threads=1 --nocapture

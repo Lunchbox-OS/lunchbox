@@ -10,7 +10,7 @@
  * over the current document rather than a text field. The picker also has to
  * know what the validator forbids, because "a thing cannot unlock itself" takes
  * four forms depending on who owns the gate — see `validate_tokens` in
- * `crates/shepherd-config/src/validation.rs`.
+ * `crates/lunchbox-config/src/validation.rs`.
  */
 import Alert from "@mui/material/Alert";
 import Autocomplete from "@mui/material/Autocomplete";

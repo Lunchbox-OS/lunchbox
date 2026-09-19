@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mount two loopback FAT images where the file manager looks for removable
-# drives, so `cargo test -p shepherd-http --test files_removable` has something
+# drives, so `cargo test -p lunchbox-http --test files_removable` has something
 # real to talk to.
 #
 # Why images rather than a USB stick: the tests need a drive *smaller than the

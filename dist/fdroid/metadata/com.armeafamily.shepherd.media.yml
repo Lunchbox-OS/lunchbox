@@ -1,4 +1,4 @@
-# F-Droid metadata for the shepherd-media Android app.
+# F-Droid metadata for the lunchbox-media Android app.
 #
 # Consumed by `fdroid update` — see dist/fdroid/README.md for who runs it and
 # when. Deliberately carries NO version fields: fdroidserver reads versionCode
@@ -30,7 +30,7 @@ AntiFeatures:
       not use it.
 
 Description: |-
-  The Android build of shepherd-media, the media player from shepherd-launcher —
+  The Android build of lunchbox-media, the media player from shepherd-launcher —
   a child-friendly, parent-guided desktop environment for Wayland.
 
   Plays from libraries you define: a local directory, a YouTube channel or

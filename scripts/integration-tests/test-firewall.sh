@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Manual end-to-end firewall enforcement test.
 #
-# Drives `cargo test -p shepherd-e2e --test firewall_real`, which boots a
-# real shepherdd, launches an activity through the privileged
-# shepherd-firewall-helper, and verifies the BPF address filter is actually
+# Drives `cargo test -p lunchbox-e2e --test firewall_real`, which boots a
+# real lunchboxd, launches an activity through the privileged
+# lunchbox-firewall-helper, and verifies the BPF address filter is actually
 # enforced (loopback reachable; an external host blocked).
 #
 # Prerequisites on the host:
-#   - shepherd-firewall-helper installed at /usr/libexec/shepherd-firewall-helper
+#   - lunchbox-firewall-helper installed at /usr/libexec/lunchbox-firewall-helper
 #   - The invoking user a member of the shepherd-firewall group
 #   - polkit running and the rule loaded
 #   - Outbound connectivity to the deny target (Google DNS, 8.8.8.8:53)
-#   - The shepherd-e2e runtime deps (sway, dbus-daemon, etc.)
+#   - The lunchbox-e2e runtime deps (sway, dbus-daemon, etc.)
 #
 # If any of those is missing the underlying cargo test prints a clear
 # `[SKIP]` line and exits 0; this orchestrator pre-checks the same things
@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
+HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
 POLKIT_ACTION="org.shepherd.firewall.apply-process"
 DENY_TARGET="${SHEPHERD_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
 
@@ -70,6 +70,6 @@ exec 3<&- || true
 echo "[orchestrator] Building shepherd binaries..."
 ./scripts/shepherd build
 
-echo "[orchestrator] Running cargo test -p shepherd-e2e --test firewall_real..."
-exec cargo test -p shepherd-e2e --test firewall_real -- \
+echo "[orchestrator] Running cargo test -p lunchbox-e2e --test firewall_real..."
+exec cargo test -p lunchbox-e2e --test firewall_real -- \
     --include-ignored --test-threads=1 --nocapture

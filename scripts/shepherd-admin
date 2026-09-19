@@ -65,7 +65,7 @@ Commands:
                       add USER to the groups shepherd needs
                       (input/video/bluetooth/shepherd-firewall)
     policy USER       Install a policy from a file, validated first. The one
-      --source PATH   shepherdd reads lives with the state custodian, so this is
+      --source PATH   lunchboxd reads lives with the state custodian, so this is
                       how a packaged device changes what it allows
     migrate-state USER
                       Move USER's existing state under the state custodian. Part
@@ -75,7 +75,7 @@ Commands:
                       their home directory. Run this BEFORE downgrading to a
                       release without the custodian, or the older build starts
                       from an empty database and an unclaimed device
-    media-deps <cmd>  Install everything shepherd-media needs: va-api + yt-dlp
+    media-deps <cmd>  Install everything lunchbox-media needs: va-api + yt-dlp
     va-api <cmd>      Install/detect VA-API drivers for hardware video decoding
     yt-dlp install    Install/upgrade yt-dlp (only needed for YouTube media)
     apps install APP  Install an activity backend (steam via snap, chrome via

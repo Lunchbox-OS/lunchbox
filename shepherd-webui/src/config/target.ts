@@ -3,7 +3,7 @@
  *
  * Set by `rsbuild.config.ts` via `source.define`, so rspack inlines the value
  * and drops the dead branch. `standalone` is the static-host bundle;
- * `embedded` is the copy that rides inside shepherdd.
+ * `embedded` is the copy that rides inside lunchboxd.
  */
 export type UiTarget = "embedded" | "standalone";
 

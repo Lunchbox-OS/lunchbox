@@ -1,8 +1,8 @@
 // GENERATED FILE — DO NOT EDIT BY HAND
 //
-// Run `cargo run -p shepherd-wire-codegen --bin rpc-codegen`
+// Run `cargo run -p lunchbox-wire-codegen --bin rpc-codegen`
 // after changing the `ManagementService` trait in
-// `crates/shepherd-management/src/service.rs`.
+// `crates/lunchbox-management/src/service.rs`.
 
 package com.armeafamily.shepherd.companion.domain
 

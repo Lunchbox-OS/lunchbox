@@ -30,7 +30,7 @@ export const KIND_HINTS: Record<KindTag, string> = {
   steam: "Launched through the Steam snap by App ID.",
   flatpak: "Launched through flatpak by application ID.",
   vm: "Handed to a VM driver.",
-  media: "Opens a shepherd-media library.",
+  media: "Opens a lunchbox-media library.",
   retroarch: "Boots one ROM or disc image through RetroArch.",
   ebook: "Opens one book in a reader locked to reading it.",
   custom: "Passed through to a host adapter that understands the type name.",

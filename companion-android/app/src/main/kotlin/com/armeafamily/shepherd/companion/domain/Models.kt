@@ -15,7 +15,7 @@ import kotlinx.serialization.json.put
  *
  * Everything with a plain serde shape is generated into
  * `WireTypes.generated.kt` from the Rust types — see
- * `crates/shepherd-management/src/bin/kotlin_types.rs`. What stays here is
+ * `crates/lunchbox-management/src/bin/kotlin_types.rs`. What stays here is
  * what a generator cannot faithfully produce:
  *
  * - [LaunchOutcome] is externally tagged (`{"Approved": {…}}`) and needs a

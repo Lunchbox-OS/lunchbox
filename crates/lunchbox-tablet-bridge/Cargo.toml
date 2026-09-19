@@ -1,0 +1,19 @@
+[package]
+name = "lunchbox-tablet-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sidecar that grabs absolute pointers/tablets and emits synthetic touch events (via /dev/uinput) for activities that only handle touch input"
+
+[[bin]]
+name = "lunchbox-tablet-bridge"
+path = "src/main.rs"
+
+[dependencies]
+lunchbox-bridge = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+nix = { workspace = true }
+evdev = "0.13"

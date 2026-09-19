@@ -1,0 +1,39 @@
+[package]
+name = "lunchbox-ble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Bluetooth LE management transport for lunchboxd"
+
+[dependencies]
+schemars = { workspace = true, optional = true }
+lunchbox-util = { workspace = true }
+lunchbox-api = { workspace = true }
+lunchbox-management = { workspace = true }
+
+bluer = { version = "0.17", features = ["bluetoothd"] }
+# Already in the tree via bluer. Used directly for the one BlueZ property
+# bluer does not wrap — `Device1.PreferredBearer`, which is flagged
+# experimental upstream and so absent from bluer's generated API.
+dbus = "0.9"
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+schema = ["dep:schemars", "lunchbox-api/schema", "lunchbox-management/schema"]

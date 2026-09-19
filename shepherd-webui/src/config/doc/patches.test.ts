@@ -1,7 +1,7 @@
 /**
  * The TypeScript half of the patch wire contract.
  *
- * These builders produce the JSON that `crates/shepherd-config-wasm` parses,
+ * These builders produce the JSON that `crates/lunchbox-config-wasm` parses,
  * and nothing else checks that the two agree: the Rust tests construct `Patch`
  * values directly and never see this code, and this code never leaves the
  * browser. A renamed serde tag, a reordered tuple, a path grammar that drifted
@@ -13,7 +13,7 @@
  * one deserializes and does what it claims.
  */
 import { describe, expect, it } from "vitest";
-import shapes from "../../../../crates/shepherd-config-wasm/tests/patch_shapes.json";
+import shapes from "../../../../crates/lunchbox-config-wasm/tests/patch_shapes.json";
 import {
   entryPath,
   groupPath,

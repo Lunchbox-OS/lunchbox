@@ -55,7 +55,7 @@ import kotlin.uuid.ExperimentalUuidApi
  * of the companion silently loses responses (manifesting as the 15s
  * `service_state` timeout). Read-poll has no CCCD machinery to get
  * stuck on: the client just reads the characteristic and the server
- * drains its byte queue (see `crates/shepherd-ble/src/outbox.rs`).
+ * drains its byte queue (see `crates/lunchbox-ble/src/outbox.rs`).
  *
  * Construct via [fromAdvertisement] (pairing / first contact) or
  * [fromIdentifier] (reconnect to a bonded device by MAC). Call [start]
@@ -548,7 +548,7 @@ class ShepherdConnection private constructor(
             // the pollers would hand the assembler a desynced byte stream
             // and we'd trade a bounded retry for a framing-error loop.
             // Dropping the link makes the daemon clear both outboxes
-            // (see `disconnect_monitor` in shepherd-ble), so the caller's
+            // (see `disconnect_monitor` in lunchbox-ble), so the caller's
             // retry starts clean. Deliberately NOT wrapped as
             // LinkUnauthenticatedException: the link is fine, it's the
             // backlog that isn't, and conflating the two would point

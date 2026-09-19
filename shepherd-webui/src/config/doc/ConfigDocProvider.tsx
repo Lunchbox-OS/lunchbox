@@ -16,7 +16,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import init, { ConfigDoc, versions as wasmVersions } from "../wasm/shepherd_config";
+import init, { ConfigDoc, versions as wasmVersions } from "../wasm/lunchbox_config";
 import type { RawConfig } from "../model/config.generated";
 import type { AvailabilityView } from "../model/availability";
 import type { Report } from "../model/report";

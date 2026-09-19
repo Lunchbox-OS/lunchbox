@@ -259,7 +259,7 @@ jobs:
         # --arch (not --target): build.sh derives the triple with
         # dpkg-architecture and passes --target on the command line, which is
         # what keeps CARGO_BUILD_TARGET out of the environment and so out of
-        # the sibling eBPF build. See crates/shepherd-firewall-helper/build.rs.
+        # the sibling eBPF build. See crates/lunchbox-firewall-helper/build.rs.
         run: ./scripts/shepherd build --arch arm64
 
       - name: Assert the binaries are actually arm64
@@ -269,7 +269,7 @@ jobs:
         run: |
           set -euo pipefail
           dir=target/aarch64-unknown-linux-gnu/debug
-          for bin in shepherdd shepherd-launcher shepherd-hud shepherd-media; do
+          for bin in lunchboxd shepherd-launcher lunchbox-hud lunchbox-media; do
             out="$(file -b "$dir/$bin")"
             echo "$bin: $out"
             grep -q "ARM aarch64" <<<"$out" || {
@@ -286,7 +286,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          obj=crates/shepherd-firewall-bpf/target/bpfel-unknown-none/release/shepherd-firewall-bpf
+          obj=crates/lunchbox-firewall-bpf/target/bpfel-unknown-none/release/lunchbox-firewall-bpf
           out="$(file -b "$obj")"
           echo "$obj: $out"
           grep -q "eBPF" <<<"$out" || {
@@ -367,7 +367,7 @@ jobs:
             "SHEPHERD_REQUIRE_PEER_CGROUP=$SHEPHERD_REQUIRE_PEER_CGROUP" \
             cargo test --workspace --all-targets
         env:
-          # Insist that the peer-cgroup check in shepherd-ipc actually runs
+          # Insist that the peer-cgroup check in lunchbox-ipc actually runs
           # (issue #144). It needs SO_PEERPIDFD + PIDFD_GET_INFO, and these jobs
           # run in a container, so they get the *host's* kernel however new the
           # image is. Below the floor those tests skip -- and a skip is
@@ -415,10 +415,10 @@ jobs:
       - name: Unpack target/debug
         run: |
           tar -xf /tmp/target-debug.tar.gz -C "$GITHUB_WORKSPACE"
-          ls -l target/debug/shepherdd target/debug/shepherd-launcher
+          ls -l target/debug/lunchboxd target/debug/shepherd-launcher
 
       - name: Run e2e tests
-        run: cargo test -p shepherd-e2e -- --include-ignored --test-threads=1
+        run: cargo test -p lunchbox-e2e -- --include-ignored --test-threads=1
         env:
           # As in the `test` job: a kernel too old for the peer check must fail
           # here rather than skip quietly (issue #144).
@@ -590,8 +590,8 @@ jobs:
             exit 1
           }
           dpkg-deb -x "$deb" /tmp/debcheck
-          out="$(file -b /tmp/debcheck/usr/bin/shepherdd)"
-          echo "shepherdd: $out"
+          out="$(file -b /tmp/debcheck/usr/bin/lunchboxd)"
+          echo "lunchboxd: $out"
           case "${{ matrix.arch }}" in
             arm64) grep -q "ARM aarch64" <<<"$out" ;;
             *)     ! grep -q "ARM aarch64" <<<"$out" ;;
@@ -716,7 +716,7 @@ jobs:
     name: Firewall E2E
     needs: [image-base, build]
     runs-on: ubuntu-latest
-    # The test (crates/shepherd-e2e/tests/firewall_real.rs) needs systemd
+    # The test (crates/lunchbox-e2e/tests/firewall_real.rs) needs systemd
     # as PID1 + polkit + dbus + a writable cgroup hierarchy + the BPF
     # capabilities for cgroup_skb attach. So this job does not run *in* a
     # container: it runs on the runner host and launches a private privileged
@@ -800,17 +800,17 @@ jobs:
           # stdin, and this arrives down a pipe. Without it: "tar: Archive is
           # compressed. Use -z option".
           docker exec -i "$cid" tar -xzf - -C "$ws" < /tmp/target-debug.tar.gz
-          docker exec "$cid" ls -l "$ws/target/debug/shepherdd"
+          docker exec "$cid" ls -l "$ws/target/debug/lunchboxd"
 
-          # shepherdd, shepherd-launcher, shepherd-hud and the firewall helper
+          # lunchboxd, shepherd-launcher, lunchbox-hud and the firewall helper
           # are already under target/debug, unpacked above from `build`'s
           # artifact -- this job no longer builds them. Install the helper via
           # the project's own installer (drops polkit policy + rule, creates
           # the shepherd-firewall group, adds the test user to it).
           #
           # The helper rejects `--uid 0` to prevent a polkit-blessed user
-          # from launching activities as root through it, so shepherdd —
-          # and therefore the test process that boots shepherdd — must
+          # from launching activities as root through it, so lunchboxd —
+          # and therefore the test process that boots lunchboxd — must
           # run as a non-root user. Create a `tester` account and run
           # cargo test under it via `runuser`, which re-execs with the
           # full supplementary group set (incl. shepherd-firewall just
@@ -831,7 +831,7 @@ jobs:
             # REQUIRED=1 turns an unmet precondition into a failure, so a
             # sidecar that cannot run it says so instead of passing quietly.
             SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
-              cargo test -p shepherd-e2e --test firewall_cgroup -- \
+              cargo test -p lunchbox-e2e --test firewall_cgroup -- \
                 --include-ignored --test-threads=1 --nocapture
 
             # Again, with /sys/fs/cgroup forced read-only. Whether the sidecar
@@ -853,7 +853,7 @@ jobs:
                 exit 1
               fi
               SHEPHERD_FIREWALL_CGROUP_REQUIRED=1 \
-                cargo test -p shepherd-e2e --test firewall_cgroup -- \
+                cargo test -p lunchbox-e2e --test firewall_cgroup -- \
                   --include-ignored --test-threads=1 --nocapture 2>&1 \
                 | tee /tmp/firewall-cgroup-readonly.log
               # Belt and braces: prove the run really took the fallback rather
@@ -882,14 +882,14 @@ jobs:
               PATH="$PATH" \
               bash -c "
                 cd '"$ws"'
-                cargo test -p shepherd-e2e --test firewall_real -- \
+                cargo test -p lunchbox-e2e --test firewall_real -- \
                   --include-ignored --test-threads=1 --nocapture
               "
           '
 
-  # (Removed: the `android-portability` job cargo-checked shepherd-media-core
+  # (Removed: the `android-portability` job cargo-checked lunchbox-media-core
   # for aarch64-linux-android with --no-default-features. That's now redundant:
-  # `android-media` below builds shepherd-media-android, which depends on core
+  # `android-media` below builds lunchbox-media-android, which depends on core
   # with `default-features = false` for the same target — a strict superset that
   # would catch any Linux-specific dep added to the core.)
 
@@ -938,7 +938,7 @@ jobs:
 
   android-media:
     name: Android media (cargo-ndk build)
-    # Cross-compiles the shepherd-media-android Rust cdylib for
+    # Cross-compiles the lunchbox-media-android Rust cdylib for
     # aarch64-linux-android exactly as the app's Gradle build does (the
     # `cargoNdkBuild` task in android/app/build.gradle.kts), so a break in the
     # device build fails CI without paying for the full AGP/APK assembly.
@@ -985,8 +985,8 @@ jobs:
       # compile-and-link gate, and a debug build catches the same breakage in
       # roughly half the time. cargo-ndk + the target + ANDROID_NDK_HOME come
       # from the image.
-      - name: Build shepherd-media-android cdylib
-        run: cargo ndk -t arm64-v8a build -p shepherd-media-android
+      - name: Build lunchbox-media-android cdylib
+        run: cargo ndk -t arm64-v8a build -p lunchbox-media-android
 
   config-editor:
     name: Config editor
@@ -1010,7 +1010,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-v2-
 
-      # Builds crates/shepherd-config-wasm with wasm-pack, then the standalone
+      # Builds crates/lunchbox-config-wasm with wasm-pack, then the standalone
       # static bundle. Typechecking lives here rather than in the `webui` job
       # because `src/config/wasm/` is generated by this step and tsc needs it.
       - name: Build the standalone config editor

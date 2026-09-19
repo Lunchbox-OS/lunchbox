@@ -14,7 +14,7 @@
 # fails loudly). The synced literals live in:
 #
 #   * Cargo.toml                              [workspace.package] version
-#   * crates/shepherd-firewall-bpf/Cargo.toml (excluded from the workspace, so
+#   * crates/lunchbox-firewall-bpf/Cargo.toml (excluded from the workspace, so
 #                                             it can't use version.workspace)
 #   * shepherd-webui/package.json + package-lock.json
 
@@ -54,11 +54,11 @@ _version_cargo_workspace() {
 # Read the [package] version literal from the excluded bpf crate.
 _version_cargo_bpf() {
     grep -m1 -E '^version = "' \
-        "$(get_repo_root)/crates/shepherd-firewall-bpf/Cargo.toml" \
+        "$(get_repo_root)/crates/lunchbox-firewall-bpf/Cargo.toml" \
         | sed -E 's/^version = "(.*)"/\1/'
 }
 
-# Read the shepherd-firewall-bpf pin from that crate's *own* Cargo.lock.
+# Read the lunchbox-firewall-bpf pin from that crate's *own* Cargo.lock.
 #
 # The bpf crate is excluded from the workspace (it builds for a different
 # target), so it carries a separate lockfile that `cargo update --workspace`
@@ -66,10 +66,10 @@ _version_cargo_bpf() {
 # behind and then resurfaces as an unexplained modified file the next time
 # anyone builds that crate.
 _version_cargo_bpf_lock() {
-    awk '/^name = "shepherd-firewall-bpf"$/ { found = 1; next }
+    awk '/^name = "lunchbox-firewall-bpf"$/ { found = 1; next }
          found && /^version = "/ {
              sub(/^version = "/, ""); sub(/"$/, ""); print; exit
-         }' "$(get_repo_root)/crates/shepherd-firewall-bpf/Cargo.lock"
+         }' "$(get_repo_root)/crates/lunchbox-firewall-bpf/Cargo.lock"
 }
 
 # Read the top-level "version" field from a package.json / package-lock.json.
@@ -104,7 +104,7 @@ version_set() {
     printf '%s\n' "$new" > "$(version_file)"
 
     _version_set_cargo "$root/Cargo.toml" "$new"
-    _version_set_cargo "$root/crates/shepherd-firewall-bpf/Cargo.toml" "$new"
+    _version_set_cargo "$root/crates/lunchbox-firewall-bpf/Cargo.toml" "$new"
 
     # npm owns the package.json + package-lock.json pair; `npm version` rewrites
     # both while preserving their formatting (a hand-rolled JSON edit would
@@ -125,13 +125,13 @@ version_set() {
         (cd "$root" && cargo update --workspace --offline >/dev/null 2>&1) || true
         # And again for the excluded bpf crate, which the line above cannot
         # see. See _version_cargo_bpf_lock for why this is worth its own call.
-        (cd "$root/crates/shepherd-firewall-bpf" \
+        (cd "$root/crates/lunchbox-firewall-bpf" \
             && cargo update --workspace --offline >/dev/null 2>&1) || true
     fi
 
     success "Bumped version: $old -> $new"
     info "Review the changes and commit them together: VERSION, Cargo.toml,"
-    info "Cargo.lock, crates/shepherd-firewall-bpf/Cargo.{toml,lock}, and"
+    info "Cargo.lock, crates/lunchbox-firewall-bpf/Cargo.{toml,lock}, and"
     info "shepherd-webui/package*.json."
 }
 
@@ -151,11 +151,11 @@ version_check() {
     [[ "$actual" == "$canonical" ]] || mismatches+=("Cargo.toml [workspace.package]: $actual")
 
     actual="$(_version_cargo_bpf)"
-    [[ "$actual" == "$canonical" ]] || mismatches+=("shepherd-firewall-bpf: $actual")
+    [[ "$actual" == "$canonical" ]] || mismatches+=("lunchbox-firewall-bpf: $actual")
 
     actual="$(_version_cargo_bpf_lock)"
     [[ "$actual" == "$canonical" ]] \
-        || mismatches+=("shepherd-firewall-bpf Cargo.lock: $actual")
+        || mismatches+=("lunchbox-firewall-bpf Cargo.lock: $actual")
 
     if command_exists node; then
         actual="$(_version_npm "$root/shepherd-webui/package.json")"

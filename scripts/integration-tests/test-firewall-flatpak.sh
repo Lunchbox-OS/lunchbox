@@ -3,12 +3,12 @@
 #
 # Builds a tiny "org.shepherd.firewall.Probe" flatpak from this repo with
 # flatpak-builder, installs it user-scoped, then drives `cargo test
-# -p shepherd-e2e --test firewall_real_flatpak`. Same shape as
+# -p lunchbox-e2e --test firewall_real_flatpak`. Same shape as
 # test-firewall-snap.sh but for the flatpak path of
 # `apply_firewall_to_existing_scope`.
 #
 # Prerequisites:
-#   - shepherd-firewall-helper installed (run setup-firewall-dev.sh)
+#   - lunchbox-firewall-helper installed (run setup-firewall-dev.sh)
 #   - The user a member of the shepherd-firewall group
 #   - polkit rule loaded
 #   - flatpak + flatpak-builder + a working flathub remote
@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-HELPER_PATH="/usr/libexec/shepherd-firewall-helper"
+HELPER_PATH="/usr/libexec/lunchbox-firewall-helper"
 POLKIT_ACTION="org.shepherd.firewall.apply-process"
 DENY_TARGET="${SHEPHERD_INTEGRATION_DENY_TARGET:-8.8.8.8:53}"
 APP_ID="org.shepherd.firewall.Probe"
@@ -112,5 +112,5 @@ echo "[orchestrator] Running cargo test..."
 SHEPHERD_FIREWALL_PROBE_LOG="$PROBE_LOG_DIR/probe.log" \
 SHEPHERD_FIREWALL_PROBE_DENY="$DENY_TARGET" \
 SHEPHERD_FIREWALL_PROBE_FLATPAK="$APP_ID" \
-    cargo test -p shepherd-e2e --test firewall_real_flatpak -- \
+    cargo test -p lunchbox-e2e --test firewall_real_flatpak -- \
     --include-ignored --test-threads=1 --nocapture

@@ -1,0 +1,19 @@
+[package]
+name = "lunchbox-gamepad-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sidecar that grabs gamepads and emits synthetic mouse + keyboard events (via /dev/uinput) for activities that ignore raw gamepad input"
+
+[[bin]]
+name = "lunchbox-gamepad-bridge"
+path = "src/main.rs"
+
+[dependencies]
+lunchbox-bridge = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+nix = { workspace = true }
+gilrs = "0.11"
