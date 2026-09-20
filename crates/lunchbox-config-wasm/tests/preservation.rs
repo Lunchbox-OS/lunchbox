@@ -230,7 +230,7 @@ fn an_ebook_entrys_own_fields_survive_the_round_trip() {
     let mut doc = ConfigDoc::open(&example()).unwrap();
     doc.apply(
         &set(
-            "entries[id=the-hobbit].kind.font_size",
+            "entries[id=alice-in-wonderland].kind.font_size",
             serde_json::json!(22),
         ),
         None,
@@ -238,7 +238,7 @@ fn an_ebook_entrys_own_fields_survive_the_round_trip() {
     .unwrap();
     doc.apply(
         &set(
-            "entries[id=the-hobbit].kind.layout",
+            "entries[id=alice-in-wonderland].kind.layout",
             serde_json::json!("single"),
         ),
         None,
@@ -252,7 +252,7 @@ fn an_ebook_entrys_own_fields_survive_the_round_trip() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["id"] == "the-hobbit")
+        .find(|e| e["id"] == "alice-in-wonderland")
         .expect("the example config still has the ebook entry");
     assert_eq!(entry["kind"]["type"], "ebook", "{entry}");
     assert_eq!(entry["kind"]["font_size"], 22, "{entry}");
@@ -274,25 +274,25 @@ fn a_kind_read_from_the_view_can_be_written_back() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["id"] == "the-hobbit")
+        .find(|e| e["id"] == "alice-in-wonderland")
         .expect("the example config still has the ebook entry")["kind"]
         .clone();
     assert!(kind["open_at"].is_null(), "sanity: {kind}");
 
-    kind["book"] = serde_json::json!("~/Books/the-silmarillion.epub");
+    kind["book"] = serde_json::json!("~/Books/through-the-looking-glass.epub");
     let changed = doc
-        .apply(&set("entries[id=the-hobbit].kind", kind), None)
+        .apply(&set("entries[id=alice-in-wonderland].kind", kind), None)
         .unwrap();
     assert!(changed);
 
     let text = doc.text();
     assert!(
-        text.contains(r#"book = "~/Books/the-silmarillion.epub""#),
+        text.contains(r#"book = "~/Books/through-the-looking-glass.epub""#),
         "got: {text}"
     );
     let hobbit = text
         .split("[[entries]]")
-        .find(|s| s.contains(r#"id = "the-hobbit""#))
+        .find(|s| s.contains(r#"id = "alice-in-wonderland""#))
         .unwrap();
     for key in ["open_at", "command"] {
         assert!(

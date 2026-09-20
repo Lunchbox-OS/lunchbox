@@ -173,6 +173,84 @@ and unexercised is the 120 ms press animation that precedes the launch call.
   `a_shut_category_has_no_floor_yet` is the test that will change.
 - Category header icons for pre-readers, and book cover art (§9).
 
+## Follow-up: the example config, and one real bug it found
+
+Asked afterwards to "reorganize the example config into groups so that
+screenshots generated from it demonstrate the branding" — the option declined
+at the start of this work, now wanted.
+
+`config.example.toml` had one group, `attention-heavy` ("Games"), holding three
+Steam/RetroArch entries. It is now five categories — Books, Learn, Play, Watch,
+Listen — with thirteen more entries assigned. The old group was *renamed* to
+`play` rather than replaced, so it keeps its schedule, its 15-minute burst cap,
+its combined hour-a-day quota and its cooldown: the only group with limits, and
+still the file's worked example of a shared budget. The other four carry an `id`
+and a `label` and nothing else, which is all a category needs.
+
+**No entry moved in the file.** It is still ordered by `[entries.kind]` under
+its `## ===` headers, because that ordering is what teaches a reader the kinds.
+Category order comes from the `[[groups]]` block and member order from the
+entries, so the screen could be arranged without disturbing the lesson.
+
+One semantic change, deliberate: Celeste's gate was
+`from = ["tuxmath", "gcompris", "scummvm-putt-putt"]` and is now
+`from = ["group:learn"]`. It reads better ("time on anything in Learn earns
+Celeste time"), it survives a new learning activity being added, it exercises
+the `group:` subject prefix that the config docs describe but nothing used, and
+it is what puts the earn pill on the Learn *compartment* rather than repeating
+it on each of Learn's members. Putt Putt stops being a source, which is right
+now that it sits in Play.
+
+### The bug the screenshot found
+
+At 1280x720 the Play compartment was clipped along the bottom edge. Three rows
+plus a header plus a floor did not fit, because the item cell had drifted to
+178px against the 150px `ITEM_H` the geometry is built on: the art slot, the
+name and the badge added up to 150 *before* the item's own 6px padding and 4px
+focus border, and those are inside the cell, not outside it.
+
+Trimmed back — the name reserve from 46 to 40, the item padding from 6 to 3, and
+the compartment header and floor margins from 12/10 to 8/8. Worth remembering
+that `ITEM_H` is the whole cell including its outline, and that a compartment's
+worst case is fixed by construction: three rows is the maximum a stack holds, so
+three rows plus a header plus a floor has to fit the design's shortest screen,
+and if it does not the row clips rather than scrolls.
+
+### Books, and the two things actually keeping it off screen
+
+The category would not render, and the reason was twice not what it looked like.
+
+The example's only book was `~/Books/the-hobbit.epub` — a copyrighted title the
+config tells the reader to supply and ships no file for. It is now two Project
+Gutenberg books instead, Alice's Adventures in Wonderland and The Wonderful
+Wizard of Oz, both public domain, with the two `curl` commands that fetch them
+in a comment above. The example is reproducible now: anyone can run those two
+lines and get the screenshot.
+
+That was necessary and not sufficient. With the files in place the compartment
+still did not appear, and the obvious suspect — `EbookReaderMissing`, okular not
+being installed — was the wrong one: that is a *Warning* diagnostic and blocks
+nothing. The actual reason on both entries was `ProtectionUnavailable`. A book
+declares `[entries.firewall] default = "deny"`, this host had no firewall
+helper, and an activity whose protection cannot be applied does not launch. The
+launcher hides that rather than dimming it, by the rule above — the child cannot
+act on it — so the category emptied and was dropped.
+
+`scripts/integration-tests/setup-firewall-dev.sh`, which the diagnostic's own
+remedy names, fixes it. Worth knowing before spending time on a missing reader:
+**read the reason code, not the most plausible-looking diagnostic.** Both were
+attached to the same entry and only one of them mattered.
+
+### What the screenshots show
+
+All five categories, the mockup's own set. Books (two members) and Listen (one)
+as single stacks; Learn (four, double-wide) wearing the earn pill on its header
+and not repeating it on its members; Play (seven, triple-wide) with locked
+members dimmed, Celeste's own `0/10` under its name, and `Until 6:00 PM` on the
+floor; Watch (three). On a wide enough output all five sit on screen with no
+chevron chip, which is also the check that the chip appears only on real
+overflow.
+
 ---
 
 ## Appendix: the brief, as delivered

@@ -20,9 +20,10 @@ const PRESS_MS: u64 = 120;
 
 /// Height reserved for an item's name: two lines of 16/800 plus its leading.
 /// See `set_entry` for why it is reserved rather than measured.
-const NAME_TWO_LINES: i32 = 46;
+const NAME_TWO_LINES: i32 = 40;
 
-/// Height reserved for an item's badge, whether or not it has one.
+/// Height reserved for an item's badge, whether or not it has one. Enough for
+/// the pill itself — 14px type inside a 3px outline — and no more.
 const BADGE_SLOT: i32 = 26;
 
 /// Whether an activity the policy has switched off should still be drawn.

@@ -186,14 +186,14 @@ window.lb-launcher {
 }
 
 .lb-compartment__header {
-    margin-bottom: 12px;
+    margin-bottom: 8px;
 }
 
 /* The floor: a hairline, then the category's closing time today. */
 .lb-compartment__floor {
     border-top: 3px solid #E5E2DA;
-    margin-top: 12px;
-    padding-top: 10px;
+    margin-top: 8px;
+    padding-top: 8px;
 }
 
 .lb-compartment__schedule {
@@ -211,7 +211,7 @@ window.lb-launcher {
     background-image: none;
     border: 4px solid transparent;
     border-radius: 18px;
-    padding: 6px;
+    padding: 3px;
     box-shadow: none;
     outline: none;
     color: #1C1B18;
