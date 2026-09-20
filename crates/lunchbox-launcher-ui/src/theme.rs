@@ -1,9 +1,16 @@
 //! The Lunchbox look: palette, geometry and the launcher stylesheet.
 //!
-//! Every number here comes from `assets/branding/tokens.json`, which is the
-//! hand-off from the design canvas and the one source of truth. Keep the two in
-//! step: if a value moves there, move it here, and say so in the note under
-//! `docs/ai/history` rather than editing the token file to match the code.
+//! **Nothing here is a number somebody typed twice.** `assets/branding/tokens.json`
+//! is the hand-off from the design canvas and the one place a colour, a radius
+//! or a type size is decided; `build.rs` turns it into `tokens.rs` in `OUT_DIR`
+//! and this file includes it. The constants below are that module, and the
+//! stylesheet reaches it through `@name@` placeholders substituted on the way
+//! out. Move a value in the token file and it moves here, or the build fails.
+//!
+//! What is *not* generated is anything the design file does not decide: the
+//! shape of the CSS, the two sizes the brief gives in prose rather than tokens,
+//! and the handful of places the implementation deliberately departs from the
+//! design (each says so, and why).
 //!
 //! The idea the numbers serve: Lunchbox is a sectioned tin. The field is the
 //! enamel, each category is a cream compartment *sunk into* it — which is why
@@ -11,64 +18,60 @@
 //! lives on the compartment or the item it applies to, never in a panel of its
 //! own.
 
-/// The palette, as the components cairo wants.
-///
-/// Only the three colours that are *drawn* rather than styled live here. Every
-/// other colour in the branding reaches the screen through `CSS_TEMPLATE`
-/// below, which is the one place they are written; duplicating them as Rust
-/// constants nothing reads would only give them somewhere to drift to. The
-/// tests at the foot of this file check that these three still agree with the
-/// stylesheet.
-///
-/// Ink: the only outline colour, and the colour of type.
-pub const INK_RGB: (f64, f64, f64) = (
-    0x1C as f64 / 255.0,
-    0x1B as f64 / 255.0,
-    0x18 as f64 / 255.0,
-);
+include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
+
+/// Ink, as the components cairo draws with: the only outline colour, and the
+/// colour of type.
+pub const INK_RGB: (f64, f64, f64) = tokens::INK_RGB;
 /// Yellow: "you can" — the coin on an earn or a have/need pill.
-pub const YELLOW_RGB: (f64, f64, f64) = (
-    0xFF as f64 / 255.0,
-    0xD1 as f64 / 255.0,
-    0x66 as f64 / 255.0,
-);
+pub const YELLOW_RGB: (f64, f64, f64) = tokens::YELLOW_RGB;
 /// Cream: the coin on the deep-teal bank pill, where yellow would lose its ring.
-pub const CREAM_RGB: (f64, f64, f64) = (
-    0xFA as f64 / 255.0,
-    0xF9 as f64 / 255.0,
-    0xF5 as f64 / 255.0,
-);
+pub const CREAM_RGB: (f64, f64, f64) = tokens::CREAM_RGB;
 
 /// The logical width the geometry below is drawn for. A wider output scales
 /// the whole field rather than reflowing it: the layout is one row at every
-/// size, and scaling is what keeps the ratios (§3 of the branding brief).
+/// size, and scaling is what keeps the ratios.
+///
+/// From §3 of the brief rather than the token file, which gives the parts of
+/// the screen but never the screen.
 pub const DESIGN_WIDTH: f64 = 1280.0;
-/// The logical height of the *field* — the 720 px screen the design targets,
-/// less the 56 px HUD bar that sits above this window rather than inside it.
-pub const DESIGN_HEIGHT: f64 = 664.0;
+/// The logical height of the *field*: the 720 px screen the design targets,
+/// less the HUD bar that sits above this window rather than inside it.
+pub const DESIGN_HEIGHT: f64 = 720.0 - tokens::HUD_H as f64;
 
 /// Items in a stack before the category spills into a second stack beside it.
-pub const ROWS_PER_STACK: usize = 3;
+pub const ROWS_PER_STACK: usize = tokens::ROWS_PER_STACK as usize;
 /// Item cell, unscaled.
+pub const ITEM_W: i32 = tokens::ITEM_W;
+/// The cell's height: the design's row height less the row the badge used to
+/// occupy under the name.
 ///
-/// The height is the brief's 150 less the row the badge used to occupy under
-/// the name: the badge now rides the icon, so every item is the same height
-/// whether or not it has one, and the space goes back to the field.
-pub const ITEM_W: i32 = 160;
-pub const ITEM_H: i32 = 132;
+/// A deliberate departure — the badge rides the icon now, so every item is the
+/// same height whether or not it has one and the space goes back to the field.
+/// Subtracted from the token rather than written as a new number, so a change
+/// to the design's row height still carries.
+pub const ITEM_H: i32 = tokens::ITEM_ROW_H - BADGE_ROW_RECLAIMED;
+
+/// The height the badge no longer needs under the name. See `ITEM_H`.
+const BADGE_ROW_RECLAIMED: i32 = 18;
+
 /// The art slot inside an item, and the icon drawn in the middle of it.
+///
+/// The slot is the one measurement the token file states only in prose — it
+/// describes `space.icon` as "App icon size inside a 78 px slot" — so the icon
+/// is generated and its slot is not.
 pub const ART_SLOT: i32 = 78;
-pub const ICON_PX: i32 = 64;
+pub const ICON_PX: i32 = tokens::ICON_PX;
 /// Radius of the ink keyline traced around an icon's silhouette.
-pub const KEYLINE: f64 = 2.5;
+pub const KEYLINE: f64 = tokens::KEYLINE;
 
 /// Type size of an activity's name, unscaled.
 ///
-/// Written here as well as in `.lb-item__name` below because the leading is a
-/// Pango attribute rather than a CSS rule — GTK4 CSS has no `line-height` —
-/// and computing an absolute leading needs the size in Rust. The test at the
-/// foot of this file fails if the two spellings drift apart.
-pub const ITEM_FONT_PX: i32 = 16;
+/// Needed in Rust as well as in the stylesheet because the leading is a Pango
+/// attribute rather than a CSS rule — GTK4 CSS has no `line-height` — and an
+/// absolute leading is computed from the size. Both spellings now come from
+/// `type.item.size`, so they cannot disagree.
+pub const ITEM_FONT_PX: i32 = tokens::ITEM_FONT_PX;
 
 /// How much to scale the design for an output of `width` × `height` logical
 /// pixels. Both axes are considered so a short screen shrinks the row rather
@@ -124,9 +127,48 @@ fn scale_px_literals(template: &str, factor: f64) -> String {
     out
 }
 
-/// The launcher stylesheet, scaled for the output it will be shown on.
+/// The launcher stylesheet, resolved against the design tokens and scaled for
+/// the output it will be shown on.
+///
+/// Tokens first, scaling second, and the order matters: a token carries a bare
+/// number (`24`), the stylesheet spells the unit (`@radius-compartment@px`),
+/// and only once it is `24px` can the scaler see it. Substituting afterwards
+/// would drop every token-derived length back to its design size.
 pub fn stylesheet(scale: f64) -> String {
-    scale_px_literals(CSS_TEMPLATE, scale)
+    scale_px_literals(&resolve_tokens(CSS_TEMPLATE), scale)
+}
+
+/// Replace every `@name@` in the stylesheet with its design token.
+///
+/// An unknown name is a panic rather than a silent pass-through: it means the
+/// stylesheet asked for a token the design file does not define, and a CSS rule
+/// containing a stray `@earn-colour@` would be dropped by GTK's parser without
+/// a word — the kind of failure that reaches a screenshot rather than a build.
+fn resolve_tokens(template: &str) -> String {
+    let mut out = String::with_capacity(template.len() + 512);
+    let mut rest = template;
+    while let Some(start) = rest.find('@') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('@') else {
+            panic!(
+                "unterminated `@` in the stylesheet near: {}",
+                &rest[start..rest.len().min(start + 40)]
+            );
+        };
+        let name = &after[..end];
+        let value = tokens::CSS
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| *value)
+            .unwrap_or_else(|| {
+                panic!("the stylesheet wants `@{name}@`, which tokens.json does not define")
+            });
+        out.push_str(value);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Written at the design size; see `scale_px_literals` for why every length is
@@ -138,10 +180,9 @@ const CSS_TEMPLATE: &str = r#"
 /* The field: enamel with a soft sheen across it, so a 1280 px span of flat
    teal doesn't read as a solid colour swatch. */
 window.lb-launcher {
-    background-image: linear-gradient(90deg,
-        #27A093 0%, #35C2B1 18%, #2FB5A5 50%, #35C2B1 82%, #27A093 100%);
-    background-color: #2FB5A5;
-    color: #1C1B18;
+    background-image: @color-enamel-sheen@;
+    background-color: @color-enamel@;
+    color: @color-ink@;
     /* Baloo 2 is shipped with Lunchbox (`assets/fonts`, OFL) and installed by
        `scripts/lunchbox deps install fonts`, because the kiosk is offline by
        default and no distribution packages it. The fallbacks are what the
@@ -150,7 +191,7 @@ window.lb-launcher {
        ordinary. If it renders ordinary when you expect otherwise, the cause is
        almost always a stale fontconfig cache rather than a missing file --
        `fc-cache -f` and look again. */
-    font-family: "Baloo 2", "Comic Neue", sans-serif;
+    font-family: @font-display@;
 }
 
 /* Vertical margins only. The side margins belong to the *row*, not the field,
@@ -159,24 +200,25 @@ window.lb-launcher {
    lets a scrolled compartment run off the screen rather than stopping 40px
    short of it. */
 .lb-field {
-    padding: 24px 0 28px 0;
+    padding: @space-field-y@px 0 28px 0;
 }
 
 /* The field's side margins, carried by the row so they scroll with it: the
    first compartment starts 40px in, and the last one keeps 40px after it when
    the row is scrolled to the end. */
 .lb-field__row {
-    padding: 0 40px;
+    padding: 0 @space-field-x@px;
 }
 
 /* The edge the row runs out under, at whichever side it continues past.
 
    Enamel at the outer edge fading to nothing inwards, so a compartment clipped
    by the viewport dissolves into the field rather than ending on a hard
-   vertical cut. The colour is the *edge* stop of the field's own sheen
-   (#27A093), because that is the enamel this sits on top of.
+   vertical cut. The colour is `color.enamel-sheen`'s own end stop, pulled out
+   of the gradient by `build.rs`, because that is the enamel this sits on top
+   of — and matching it is the whole job.
 
-   `rgba(39, 160, 147, 0)` rather than `transparent`: GTK interpolates a
+   `rgba(@color-enamel-edge-rgb@, 0)` rather than `transparent`: GTK interpolates a
    gradient through its stop colours, and `transparent` is transparent *black*,
    so the fade would dip grey on its way out. */
 .lb-field__fade {
@@ -185,30 +227,30 @@ window.lb-launcher {
 
 .lb-field__fade--right {
     background-image: linear-gradient(to right,
-        rgba(39, 160, 147, 0), rgba(39, 160, 147, 1));
+        rgba(@color-enamel-edge-rgb@, 0), rgba(@color-enamel-edge-rgb@, 1));
 }
 
 .lb-field__fade--left {
     background-image: linear-gradient(to left,
-        rgba(39, 160, 147, 0), rgba(39, 160, 147, 1));
+        rgba(@color-enamel-edge-rgb@, 0), rgba(@color-enamel-edge-rgb@, 1));
 }
 
 /* The yellow chevron chip at the edge the row continues past. */
 .lb-more {
     /* Held off the screen edge by hand now that the overlay reaches it. */
     margin: 0 20px;
-    background-color: #FFD166;
+    background-color: @color-yellow@;
     /* The GTK theme gives a button its own `background-image` gradient, which
        paints straight over a `background-color` and left this chip white. Any
        control the branding recolours has to clear the image as well as set the
        colour — `.lb-item` and `.lb-button` already do. */
     background-image: none;
-    border: 4px solid #1C1B18;
-    border-radius: 999px;
+    border: @stroke-outline@px solid @color-ink@;
+    border-radius: @radius-pill@px;
     min-width: 48px;
     min-height: 48px;
-    color: #1C1B18;
-    box-shadow: 3px 3px 0 #1C1B18;
+    color: @color-ink@;
+    box-shadow: @shadow-chip@;
 }
 
 /* -------------------------------------------------------- the compartment */
@@ -217,21 +259,17 @@ window.lb-launcher {
    inner bottom, a faint shade down each inner side, and a dark ring just
    outside the outline. No drop shadow, ever — it is a well, not a card. */
 .lb-compartment {
-    background-color: #F7F5EE;
-    border: 4px solid #1C1B18;
-    border-radius: 24px;
-    padding: 16px;
-    box-shadow: inset 0 10px 0 rgba(0, 0, 0, 0.10),
-                inset 0 -4px 0 rgba(255, 255, 255, 0.70),
-                inset 4px 0 0 rgba(0, 0, 0, 0.05),
-                inset -4px 0 0 rgba(0, 0, 0, 0.05),
-                0 0 0 3px rgba(0, 0, 0, 0.12);
+    background-color: @color-compartment@;
+    border: @stroke-outline@px solid @color-ink@;
+    border-radius: @radius-compartment@px;
+    padding: @space-compartment-pad@px;
+    box-shadow: @shadow-compartment-sunk@;
 }
 
 .lb-compartment__name {
-    font-size: 22px;
-    font-weight: 800;
-    color: #1C1B18;
+    font-size: @type-category-size@px;
+    font-weight: @type-category-weight@;
+    color: @color-ink@;
     padding: 0 4px;
 }
 
@@ -241,16 +279,16 @@ window.lb-launcher {
 
 /* The floor: a hairline, then the category's closing time today. */
 .lb-compartment__floor {
-    border-top: 3px solid #E5E2DA;
+    border-top: @stroke-hud-rule@px solid @color-putty@;
     margin-top: 8px;
     padding-top: 8px;
 }
 
 .lb-compartment__schedule {
-    font-family: system-ui, -apple-system, sans-serif;
-    font-size: 14px;
-    font-weight: 700;
-    color: #5C5A55;
+    font-family: @font-ui@;
+    font-size: @type-footer-size@px;
+    font-weight: @type-footer-weight@;
+    color: @color-muted@;
 }
 
 /* --------------------------------------------------------------- the item */
@@ -259,12 +297,12 @@ window.lb-launcher {
     background: none;
     background-color: transparent;
     background-image: none;
-    border: 4px solid transparent;
-    border-radius: 18px;
+    border: @stroke-outline@px solid transparent;
+    border-radius: @radius-selection@px;
     padding: 3px;
     box-shadow: none;
     outline: none;
-    color: #1C1B18;
+    color: @color-ink@;
     transition: background-color 80ms ease-out, border-color 80ms ease-out;
 }
 
@@ -283,9 +321,9 @@ window.lb-launcher {
       depend on a pseudo-class whose behaviour varies with how the toplevel got
       its keyboard focus, the launcher styles the state it already tracks. */
 .lb-item.lb-item--selected {
-    background-color: #FFD166;
+    background-color: @color-yellow@;
     background-image: none;
-    border-color: #1C1B18;
+    border-color: @color-ink@;
     outline: none;
 }
 
@@ -304,29 +342,29 @@ window.lb-launcher {
    is that a locked item *keeps* its badge. */
 .lb-item.lb-item--locked .lb-item__art,
 .lb-item.lb-item--locked .lb-item__name {
-    opacity: 0.50;
+    opacity: @opacity-locked@;
 }
 
 .lb-item__name {
-    font-size: 16px;
-    font-weight: 800;
-    color: #1C1B18;
+    font-size: @type-item-size@px;
+    font-weight: @type-item-weight@;
+    color: @color-ink@;
 }
 
 /* -------------------------------------------------------------- the pills */
 
 .lb-badge {
-    border-radius: 999px;
-    border: 3px solid #1C1B18;
+    border-radius: @radius-pill@px;
+    border: @stroke-pill@px solid @color-ink@;
     padding: 1px 10px 1px 4px;
-    font-size: 14px;
-    font-weight: 800;
+    font-size: @type-badge-size@px;
+    font-weight: @type-badge-weight@;
 }
 
 /* "You can earn here." */
 .lb-badge.lb-badge--earn {
-    background-color: #FFD166;
-    color: #1C1B18;
+    background-color: @color-yellow@;
+    color: @color-ink@;
 }
 
 /* The one place two yellows meet. A selected cell is filled yellow, so an earn
@@ -337,25 +375,25 @@ window.lb-launcher {
    Only the earn pill needs this: bank is deep teal and need is putty, both of
    which stand off yellow by themselves. */
 .lb-item.lb-item--selected .lb-badge.lb-badge--earn {
-    background-color: #FAF9F5;
+    background-color: @color-cream@;
 }
 
 /* "This much is banked and ready to spend." */
 .lb-badge.lb-badge--bank {
-    background-color: #1F7A72;
-    color: #FAF9F5;
+    background-color: @color-enamel-deep@;
+    color: @color-cream@;
 }
 
 /* "Not yet": have against need. */
 .lb-badge.lb-badge--need {
-    background-color: #E5E2DA;
-    color: #1C1B18;
+    background-color: @color-putty@;
+    color: @color-ink@;
 }
 
 /* Cooling down. Same shape as the others so the row doesn't jump. */
 .lb-badge.lb-badge--wait {
-    background-color: #E5E2DA;
-    color: #5C5A55;
+    background-color: @color-putty@;
+    color: @color-muted@;
 }
 
 /* ------------------------------------------------- everything that is not
@@ -365,41 +403,41 @@ window.lb-launcher {
 .lb-message-title {
     font-size: 28px;
     font-weight: 800;
-    color: #1C1B18;
+    color: @color-ink@;
 }
 
 .lb-message-body {
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: @font-ui@;
     font-size: 16px;
     font-weight: 600;
-    color: #5C5A55;
+    color: @color-muted@;
 }
 
 .lb-card {
-    background-color: #F7F5EE;
-    border: 4px solid #1C1B18;
-    border-radius: 24px;
+    background-color: @color-compartment@;
+    border: @stroke-outline@px solid @color-ink@;
+    border-radius: @radius-compartment@px;
     padding: 32px 40px;
     box-shadow: inset 0 10px 0 rgba(0, 0, 0, 0.10),
                 0 0 0 3px rgba(0, 0, 0, 0.12);
 }
 
 .lb-button {
-    background-color: #FFD166;
+    background-color: @color-yellow@;
     background-image: none;
-    border: 4px solid #1C1B18;
-    border-radius: 999px;
+    border: @stroke-outline@px solid @color-ink@;
+    border-radius: @radius-pill@px;
     padding: 8px 24px;
     font-size: 18px;
     font-weight: 800;
-    color: #1C1B18;
-    box-shadow: 3px 3px 0 #1C1B18;
+    color: @color-ink@;
+    box-shadow: @shadow-chip@;
 }
 
 .lb-spinner {
     min-width: 48px;
     min-height: 48px;
-    color: #1C1B18;
+    color: @color-ink@;
 }
 
 /* Vertical only. The field inside spans the full width, for the same reason
@@ -413,13 +451,13 @@ window.lb-launcher {
    lines up with the first compartment rather than floating over its own
    margin. */
 .admin-search {
-    margin: 0 40px;
+    margin: 0 @space-field-x@px;
     font-size: 20px;
     padding: 10px 14px;
-    border-radius: 999px;
-    border: 4px solid #1C1B18;
-    background-color: #FAF9F5;
-    color: #1C1B18;
+    border-radius: @radius-pill@px;
+    border: @stroke-outline@px solid @color-ink@;
+    background-color: @color-cream@;
+    color: @color-ink@;
 }
 "#;
 
@@ -433,11 +471,12 @@ mod tests {
         format!("#{:02X}{:02X}{:02X}", c(rgb.0), c(rgb.1), c(rgb.2))
     }
 
-    /// The three drawn colours are written twice — once as components for
-    /// cairo, once as hex in the stylesheet. This is what stops the two halves
-    /// of the palette drifting apart.
+    /// Both halves of the palette now come from one token, so they cannot
+    /// disagree — what can still go wrong is the substitution not happening at
+    /// all, leaving a rule GTK silently drops. Looking for the resolved colour
+    /// catches that.
     #[test]
-    fn the_drawn_colours_are_the_styled_colours() {
+    fn the_drawn_colours_reach_the_stylesheet() {
         let css = stylesheet(1.0);
         for (name, rgb) in [
             ("ink", INK_RGB),
@@ -453,9 +492,47 @@ mod tests {
         }
     }
 
-    /// The item name's type size is written twice — once for the stylesheet,
-    /// once for the Pango leading that CSS cannot express. They must agree, or
-    /// the leading is computed for a size the text is not set at.
+    /// Nothing may reach GTK still asking for a token. A stray `@name@` makes
+    /// the whole rule invalid, and GTK drops invalid rules without a word — so
+    /// the failure would be a missing style in a screenshot rather than an
+    /// error anywhere.
+    #[test]
+    fn no_placeholder_survives() {
+        let css = stylesheet(1.0);
+        assert!(
+            !css.contains('@'),
+            "an unresolved token is left in the stylesheet: {}",
+            css.split('@').nth(1).unwrap_or_default()
+        );
+    }
+
+    /// And asking for one the design file does not define is a build-time
+    /// noise, not a silent pass-through.
+    #[test]
+    #[should_panic(expected = "tokens.json does not define")]
+    fn an_unknown_token_is_loud() {
+        resolve_tokens("a { color: @color-chartreuse@; }");
+    }
+
+    /// Tokens are substituted before the scaler runs, so a length that came
+    /// from the design file scales like any other. Written the other way round,
+    /// every token-derived size would stay stuck at its design value.
+    #[test]
+    fn token_lengths_scale_like_the_rest() {
+        let radius: i32 = tokens::CSS
+            .iter()
+            .find(|(k, _)| *k == "radius-compartment")
+            .expect("radius.compartment is a token")
+            .1
+            .parse()
+            .expect("a number");
+        assert!(stylesheet(1.0).contains(&format!("border-radius: {radius}px")));
+        assert!(stylesheet(2.0).contains(&format!("border-radius: {}px", radius * 2)));
+    }
+
+    /// The item name's size is read in Rust as well as styled, because the
+    /// leading is a Pango attribute and CSS has no `line-height`. One token
+    /// feeds both; this checks the styled half actually arrived.
     #[test]
     fn the_item_type_size_matches_the_stylesheet() {
         let css = stylesheet(1.0);

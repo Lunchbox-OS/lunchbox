@@ -446,6 +446,51 @@ categories carry the earn pill and a compartment header is not selectable, but
 it is reachable from any config that names an entry rather than its group as a
 token source.
 
+## Review: one source, not two
+
+> not a huge fan of the duplication here, let's have one generate the other
+
+`theme.rs` opened by asking whoever edited `tokens.json` to come and make the
+same edit again, which is a comment admitting a design problem rather than
+solving one. The token file now generates the Rust.
+
+`build.rs` reads `assets/branding/tokens.json` and writes `tokens.rs` into
+`OUT_DIR`, in two shapes because there are two kinds of consumer: typed
+constants for the code that measures and draws, and a name-to-text table for
+the stylesheet, which is a string and wants text. `theme.rs` includes it, and
+the CSS reaches the table through `@name@` placeholders resolved on the way out.
+Every colour literal is gone from the stylesheet — including the sunk
+compartment's five-part shadow and the field's sheen, which were the two worst
+things to have been copying by hand.
+
+Build-time rather than committed, which is the opposite of what the wire codegen
+in this repository does. That one commits its output and pays for it with a
+drift test, because it crosses into Kotlin and TypeScript where a build script
+cannot follow. Nothing here leaves Rust, so there is no artifact to go stale and
+nothing to check.
+
+Three things worth knowing about the result:
+
+- **Order matters.** Tokens are substituted before `scale_px_literals` runs,
+  because a token carries a bare number and the stylesheet spells the unit
+  (`@radius-compartment@px`). Substituting afterwards would leave every
+  token-derived length stuck at its design size. There is a test.
+- **An unknown token is a panic.** A stray `@earn-colour@` would make its rule
+  invalid, and GTK drops invalid rules silently — a failure that reaches a
+  screenshot rather than a build.
+- **Deliberate departures stay visible.** `ITEM_H` is the design's row height
+  *minus* the row the badge no longer needs, written as a subtraction from the
+  token rather than as a new number, so a change to the design still carries.
+  The art slot stays hand-written because the token file states it only in a
+  description.
+
+Checked by turning `color.yellow` magenta and rebuilding: the selection fill,
+the earn pills and the cairo-drawn coin all followed, with no Rust touched.
+
+Also: generated code has to pass the same lints as written code. The first cut
+emitted `255.0 / 255.0` — clearer about where the number came from, and rejected
+by clippy's `eq_op`.
+
 ## What this does to administrator mode
 
 The picker (#154) shares the item widget and the stylesheet with the child's

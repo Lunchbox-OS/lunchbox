@@ -245,8 +245,19 @@ If connection to service is lost:
 
 ## Styling
 
-Everything visual comes from `src/theme.rs`, which is the Rust half of
-`assets/branding/tokens.json`. Keep the two in step.
+Everything visual comes from `assets/branding/tokens.json`, the hand-off from
+the design canvas. `build.rs` turns it into constants that `src/theme.rs`
+includes, and the stylesheet reaches the same table through `@name@`
+placeholders. **There is no second copy to keep in step**: change a colour, a
+radius or a type size in the token file and it changes here, or the build fails
+saying which token the stylesheet wanted and the design file does not define.
+
+Generated at build time rather than committed, unlike the wire codegen: nothing
+here leaves Rust, so there is no artifact to go stale and no drift test to need.
+What is *not* generated is what the design file does not decide — the shape of
+the CSS, the two sizes the brief gives only in prose, and the few places the
+implementation deliberately departs from the design. Each of those says so, and
+why.
 
 The display face is **Baloo 2** (SIL Open Font License), shipped in
 `assets/fonts` because no Ubuntu release packages it and the kiosk is offline by
