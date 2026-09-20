@@ -251,6 +251,49 @@ floor; Watch (three). On a wide enough output all five sit on screen with no
 chevron chip, which is also the check that the chip appears only on real
 overflow.
 
+## Follow-up: demonstrating the token gate
+
+The config showed the gate's *locked* half and nothing else: Celeste wearing
+`0/10`. The pill that says what the feature is actually for — the deep-teal one
+with the banked time remaining, `25m` — never appeared, for two reasons.
+
+**A balance is runtime state, not configuration.** A fresh install is at zero by
+definition, so no amount of editing `config.example.toml` produces a bank pill.
+It is earned by playing the `from` activities, or granted outright through the
+management UI's `adjust_tokens`.
+
+**And Celeste cannot show the unlocked half on a development machine anyway.**
+It is a Steam entry, so on a host without Steam it carries `NotReady` whatever
+its balance is, and stays dimmed.
+
+So the example gained a *second* gate, on Pokemon FireRed — a RetroArch entry,
+which evaluates as available on a plain host. It also shows the other spelling
+of a source: Celeste earns from `group:learn`, this one from `["tuxmath"]`, so
+the file now demonstrates both. Its comment says in as many words what the
+launcher draws at each balance, and points at the management UI as the quick way
+to see it without playing twenty minutes of Tux Math.
+
+Driven through `adjust_tokens`, the whole lifecycle is now visible from the
+example:
+
+| Balance | What the launcher draws |
+| --- | --- |
+| 0s | `0/10` on putty, item at 50% |
+| 300s | `5/10` on putty, item at 50% |
+| 1500s | `25m` on deep teal, item live |
+
+### Talking to the daemon by hand
+
+Worth writing down, because the first attempt failed silently and looked like a
+refused connection. **The management socket is not JSON-RPC 2.0**, despite the
+shape. The frame is newline-terminated
+`{request_id, api_version, method, params}` — see `Request` in
+`crates/lunchbox-api/src/commands.rs`. A `{"jsonrpc": "2.0", "id": 1, …}`
+envelope deserialises to nothing, and the daemon simply never answers: the
+connection stays open, and the client blocks until its own timeout. There is no
+error frame to read, so the symptom is indistinguishable from the peer check
+having rejected you.
+
 ---
 
 ## Appendix: the brief, as delivered

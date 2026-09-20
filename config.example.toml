@@ -1190,6 +1190,37 @@ max_run_seconds = 2700     # 45 minutes -- long enough to reach a save point
 daily_quota_seconds = 5400
 cooldown_seconds = 1800
 
+# A second token gate, so this file shows both halves of the feature and both
+# ways of naming a source. Celeste's gate above is the one with the full
+# explanation; read that first.
+#
+# The difference worth seeing here is what the *launcher* draws, which depends
+# entirely on the balance:
+#
+#   below minimum_seconds   a putty "have/need" pill -- `5/10` -- and the
+#                           activity dimmed to half, still on screen, because
+#                           the pill is what tells the child how much further
+#                           there is to go
+#   at or above it          a deep-teal pill with the banked time remaining --
+#                           `25m` -- and the activity live again
+#
+# A fresh install starts at zero, so the first thing this shows is `0/10`. The
+# balance is earned by playing the `from` activities, or granted outright from
+# the management UI ("Adjust banked time"), which is the quick way to see both
+# pills without playing twenty minutes of Tux Math.
+[entries.tokens]
+# Named individually rather than as `group:learn` -- both spellings work, and
+# Celeste above uses the other one. Tux Math alone earns this game.
+from = ["tuxmath"]
+# One second banked per second played, where Celeste's gate is half that: this
+# game is the cheaper reward.
+earn_ratio = 1.0
+# Ten minutes banked before it unlocks at all, and it relocks below that.
+minimum_seconds = 600
+# And a ceiling, so a long afternoon of Tux Math cannot bank a whole evening of
+# this. Time past the cap is not kept.
+max_balance_seconds = 2700
+
 ## === Reading (ebook) ===
 # Install the reader with:
 #   sudo lunchbox-admin apps install okular
