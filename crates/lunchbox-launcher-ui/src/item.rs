@@ -140,7 +140,7 @@ mod imp {
         pub entry: RefCell<Option<EntryView>>,
         pub art: super::IconArt,
         pub label: gtk4::Label,
-        pub badge_slot: super::ShakeBox,
+        pub badge_slot: crate::offset::OffsetBin,
         /// Whether a press should launch. Kept beside the entry rather than
         /// read off `is_sensitive`, because a locked item stays *focusable* —
         /// the child has to be able to reach it to read its badge.
@@ -153,7 +153,7 @@ mod imp {
                 entry: RefCell::new(None),
                 art: super::IconArt::new(),
                 label: gtk4::Label::new(None),
-                badge_slot: super::ShakeBox::new(),
+                badge_slot: crate::offset::OffsetBin::new(),
                 launchable: Cell::new(false),
             }
         }
@@ -557,122 +557,6 @@ impl IconArt {
 }
 
 impl Default for IconArt {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ------------------------------------------------------------- the badge slot
-
-mod shake_imp {
-    use super::*;
-
-    #[derive(Default)]
-    pub struct ShakeBox {
-        pub child: RefCell<Option<gtk4::Widget>>,
-        /// Horizontal offset, in px, applied at draw time.
-        pub offset: Cell<f64>,
-    }
-
-    #[glib::object_subclass]
-    impl ObjectSubclass for ShakeBox {
-        const NAME: &'static str = "LunchboxShakeBox";
-        type Type = super::ShakeBox;
-        type ParentType = gtk4::Widget;
-    }
-
-    impl ObjectImpl for ShakeBox {
-        fn dispose(&self) {
-            if let Some(child) = self.child.borrow_mut().take() {
-                child.unparent();
-            }
-        }
-    }
-
-    impl WidgetImpl for ShakeBox {
-        fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
-            match self.child.borrow().as_ref() {
-                Some(child) => child.measure(orientation, for_size),
-                None => (0, 0, -1, -1),
-            }
-        }
-
-        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            if let Some(child) = self.child.borrow().as_ref() {
-                child.allocate(width, height, baseline, None);
-            }
-        }
-
-        /// The shake is applied here rather than in the allocation, so it
-        /// cannot disturb the layout of everything around it — a badge that
-        /// re-laid-out its compartment 60 times a second would jog the whole
-        /// row sideways.
-        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
-            let Some(child) = self.child.borrow().clone() else {
-                return;
-            };
-            let dx = self.offset.get();
-            if dx != 0.0 {
-                snapshot.save();
-                snapshot.translate(&gtk4::graphene::Point::new(dx as f32, 0.0));
-            }
-            self.obj().snapshot_child(&child, snapshot);
-            if dx != 0.0 {
-                snapshot.restore();
-            }
-        }
-    }
-}
-
-glib::wrapper! {
-    /// Holds an item's badge, and can shake it when a locked item is pressed.
-    pub struct ShakeBox(ObjectSubclass<shake_imp::ShakeBox>)
-        @extends gtk4::Widget,
-        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
-}
-
-impl ShakeBox {
-    pub fn new() -> Self {
-        glib::Object::builder().build()
-    }
-
-    pub fn set_child(&self, child: Option<gtk4::Widget>) {
-        if let Some(old) = self.imp().child.borrow_mut().take() {
-            old.unparent();
-        }
-        if let Some(child) = child {
-            child.set_parent(self.upcast_ref::<gtk4::Widget>());
-            *self.imp().child.borrow_mut() = Some(child);
-        }
-        self.queue_resize();
-    }
-
-    /// A 120 ms shake: the refusal a locked item gives back to a press.
-    pub fn shake(&self) {
-        if self.imp().child.borrow().is_none() {
-            return;
-        }
-        let start = std::time::Instant::now();
-        self.add_tick_callback(move |slot, _| {
-            let t = start.elapsed().as_millis() as f64 / PRESS_MS as f64;
-            if t >= 1.0 {
-                slot.imp().offset.set(0.0);
-                slot.queue_draw();
-                return glib::ControlFlow::Break;
-            }
-            // Three swings, decaying to nothing at the end so it settles
-            // rather than stopping mid-swing.
-            let amplitude = 4.0 * (1.0 - t);
-            slot.imp()
-                .offset
-                .set((t * 3.0 * 2.0 * std::f64::consts::PI).sin() * amplitude);
-            slot.queue_draw();
-            glib::ControlFlow::Continue
-        });
-    }
-}
-
-impl Default for ShakeBox {
     fn default() -> Self {
         Self::new()
     }

@@ -31,6 +31,12 @@ use crate::theme;
 /// activities into categories still gets a tin rather than an error.
 const UNGROUPED_LABEL: &str = "Everything else";
 
+/// How long a chevron chip takes to slide out of its edge.
+const CHIP_SLIDE_MS: u32 = 160;
+
+/// How long the row takes to ease from one scroll position to the next.
+const SCROLL_MS: u64 = 220;
+
 /// How far the selection is kept from either edge when scrolling to it.
 /// Matches the width of `.lb-field__fade`, so the selected item is never the
 /// thing the fade is dissolving.
@@ -48,6 +54,12 @@ pub struct Stack {
     /// one stack at a time.
     compartment: gtk4::Widget,
     items: Vec<LauncherItem>,
+}
+
+/// A compartment and the header that has to stay on screen with it.
+pub struct Header {
+    well: gtk4::Widget,
+    bin: crate::offset::OffsetBin,
 }
 
 /// Decide the categories and their members, in the order they are drawn.
@@ -101,6 +113,40 @@ fn categorise<'a>(
     out
 }
 
+/// How far to slide a compartment's header so it stays on screen.
+///
+/// Pure arithmetic, separated from the widgets because it is the part with the
+/// edge cases — and because the headless harness cannot scroll a row, so this
+/// is the half that can be checked at all.
+///
+/// * `view_left` — where the viewport starts, in row coordinates.
+/// * `inset` — how far clear of the edge the header should sit, so it is not
+///   dissolving under the fade.
+/// * `well_left` / `well_width` — the compartment, in the same coordinates.
+/// * `header_width` — how wide the thing being slid is.
+fn header_offset(
+    view_left: f64,
+    inset: f64,
+    well_left: f64,
+    well_width: f64,
+    header_width: f64,
+) -> f64 {
+    // How much of this compartment is off the left of the screen. Nothing
+    // to do until the edge actually cuts into it — and the inset must not
+    // apply before then, or a compartment sitting innocently near the left
+    // margin would have its title shoved sideways for no reason. (The inset
+    // exists to clear the left fade, and that fade only appears once the row
+    // is scrolled.)
+    let cut = view_left - well_left;
+    if cut <= 0.0 {
+        return 0.0;
+    }
+    // Never past the compartment's own trailing edge: a title that outran its
+    // well would read as the next category's.
+    let room = (well_width - header_width - inset).max(0.0);
+    (cut + inset).min(room)
+}
+
 mod imp {
     use super::*;
 
@@ -111,11 +157,16 @@ mod imp {
         pub row: gtk4::Box,
         pub more_left: gtk4::Button,
         pub more_right: gtk4::Button,
+        /// What slides each chip in and out from its edge.
+        pub reveal_left: gtk4::Revealer,
+        pub reveal_right: gtk4::Revealer,
         /// The soft edge the row disappears under, one per side. Shown with
         /// the chip above it, and on the same condition.
         pub fade_left: gtk4::Box,
         pub fade_right: gtk4::Box,
         pub stacks: RefCell<Vec<Stack>>,
+        /// One per compartment, in row order. See `slide_headers`.
+        pub headers: RefCell<Vec<Header>>,
         /// (stack, row within it). Meaningless when `stacks` is empty.
         pub cursor: Cell<(usize, usize)>,
         pub on_launch: LaunchCallback,
@@ -126,6 +177,11 @@ mod imp {
         /// Set when the field is rebuilt, cleared once the selection has
         /// actually been scrolled into view. See `wire_scroll_chips`.
         pub pending_scroll: Cell<bool>,
+        /// Whether the selection is *shown*. The cursor always has a position;
+        /// this is whether the child has done anything to deserve seeing it.
+        pub selection_active: Cell<bool>,
+        /// Bumped whenever a scroll animation starts, so an older one stops.
+        pub scroll_generation: Cell<u64>,
         /// The snapshot the field is currently drawing, kept so a change of
         /// scale can redraw it without waiting for the daemon to say anything
         /// new. The launcher is fullscreen on an output whose size it learns
@@ -141,14 +197,19 @@ mod imp {
                 row: gtk4::Box::new(gtk4::Orientation::Horizontal, 0),
                 more_left: gtk4::Button::new(),
                 more_right: gtk4::Button::new(),
+                reveal_left: gtk4::Revealer::new(),
+                reveal_right: gtk4::Revealer::new(),
                 fade_left: gtk4::Box::new(gtk4::Orientation::Vertical, 0),
                 fade_right: gtk4::Box::new(gtk4::Orientation::Vertical, 0),
                 stacks: RefCell::new(Vec::new()),
+                headers: RefCell::new(Vec::new()),
                 cursor: Cell::new((0, 0)),
                 on_launch: Rc::new(RefCell::new(None)),
                 last_launched: RefCell::new(None),
                 scale: Cell::new(1.0),
                 pending_scroll: Cell::new(false),
+                selection_active: Cell::new(false),
+                scroll_generation: Cell::new(0),
                 last_state: RefCell::new((Vec::new(), Vec::new())),
             }
         }
@@ -215,18 +276,46 @@ mod imp {
                 button.add_css_class("lb-more");
                 button.set_halign(align);
                 button.set_valign(gtk4::Align::Center);
-                button.set_visible(false);
                 // Not a tab stop: it is a signpost for a row that the D-pad
                 // already scrolls, not a control to land on.
                 button.set_can_focus(false);
+            }
+
+            // Each chip rides a revealer, so it slides out of the edge it
+            // belongs to rather than appearing there (#208 review): on a
+            // touchscreen a control that blinks into existence reads as a
+            // glitch, where one that slides in reads as an invitation.
+            //
+            // A hidden revealer measures zero, so the chip cannot take a tap
+            // while it is away — no `can_target` juggling needed.
+            for (revealer, button, transition, align) in [
+                (
+                    &self.reveal_left,
+                    &self.more_left,
+                    gtk4::RevealerTransitionType::SlideRight,
+                    gtk4::Align::Start,
+                ),
+                (
+                    &self.reveal_right,
+                    &self.more_right,
+                    gtk4::RevealerTransitionType::SlideLeft,
+                    gtk4::Align::End,
+                ),
+            ] {
+                revealer.set_child(Some(button));
+                revealer.set_transition_type(transition);
+                revealer.set_transition_duration(CHIP_SLIDE_MS);
+                revealer.set_reveal_child(false);
+                revealer.set_halign(align);
+                revealer.set_valign(gtk4::Align::Center);
             }
 
             let overlay = gtk4::Overlay::new();
             overlay.set_child(Some(&self.scroller));
             overlay.add_overlay(&self.fade_left);
             overlay.add_overlay(&self.fade_right);
-            overlay.add_overlay(&self.more_left);
-            overlay.add_overlay(&self.more_right);
+            overlay.add_overlay(&self.reveal_left);
+            overlay.add_overlay(&self.reveal_right);
             overlay.set_parent(obj.upcast_ref::<gtk4::Widget>());
         }
 
@@ -250,7 +339,34 @@ impl LauncherField {
     pub fn new() -> Self {
         let obj: Self = glib::Object::builder().build();
         obj.wire_scroll_chips();
+        obj.wire_background_taps();
         obj
+    }
+
+    /// A tap that lands on no activity puts the selection away (#208 review).
+    ///
+    /// Decided by asking what is under the point rather than by letting the
+    /// press bubble: an item is a button and handles its own press, but the
+    /// compartment, the enamel and the header are all plain widgets a press
+    /// would reach either way, and none of them is a choice.
+    fn wire_background_taps(&self) {
+        let click = gtk4::GestureClick::new();
+        let field = self.downgrade();
+        click.connect_pressed(move |_, _, x, y| {
+            let Some(field) = field.upgrade() else {
+                return;
+            };
+            let hit = field.pick(x, y, gtk4::PickFlags::DEFAULT);
+            let on_item = hit
+                .map(|w| {
+                    w.is::<LauncherItem>() || w.ancestor(LauncherItem::static_type()).is_some()
+                })
+                .unwrap_or(false);
+            if !on_item {
+                field.clear_selection();
+            }
+        });
+        self.add_controller(click);
     }
 
     /// Called when an item is pressed and the press is allowed to launch.
@@ -288,9 +404,14 @@ impl LauncherField {
 
         let categories = categorise(&entries, &groups);
         let mut stacks: Vec<Stack> = Vec::new();
+        let mut headers: Vec<Header> = Vec::new();
         for (label, group, members) in categories {
             let built = compartment::build(&label, group, members, scale);
             imp.row.append(&built.widget);
+            headers.push(Header {
+                well: built.widget.clone(),
+                bin: built.header,
+            });
             for items in built.stacks {
                 stacks.push(Stack {
                     compartment: built.widget.clone(),
@@ -298,6 +419,7 @@ impl LauncherField {
                 });
             }
         }
+        *imp.headers.borrow_mut() = headers;
 
         for (s, stack) in stacks.iter().enumerate() {
             for (r, item) in stack.items.iter().enumerate() {
@@ -306,6 +428,7 @@ impl LauncherField {
         }
         *imp.stacks.borrow_mut() = stacks;
 
+        self.clear_selection();
         self.restore_focus(previous);
         // `restore_focus` scrolls, but nothing is allocated yet at this point:
         // the viewport still measures zero, so the scroll is a no-op and an
@@ -324,6 +447,7 @@ impl LauncherField {
         let field = self.downgrade();
         motion.connect_enter(move |_, _, _| {
             if let Some(field) = field.upgrade() {
+                field.imp().selection_active.set(true);
                 field.imp().cursor.set((stack, row));
                 field.focus_cursor();
             }
@@ -335,6 +459,7 @@ impl LauncherField {
             let Some(field) = field.upgrade() else {
                 return;
             };
+            field.imp().selection_active.set(true);
             field.imp().cursor.set((stack, row));
             field.press(item);
         });
@@ -357,6 +482,14 @@ impl LauncherField {
 
     /// Press whatever is focused. The keyboard and gamepad paths come here.
     pub fn launch_selected(&self) {
+        // Nothing is selected until something has been selected. Pressing A on
+        // a launcher showing no highlight must not start whatever the cursor
+        // happens to be resting on, unseen — it reveals it instead, and the
+        // next press starts it.
+        if self.wake_selection() {
+            self.focus_cursor();
+            return;
+        }
         if let Some(item) = self.focused_item() {
             self.press(&item);
         }
@@ -365,10 +498,17 @@ impl LauncherField {
     /// Move the focus. `dx` steps between stacks, `dy` within one.
     pub fn move_selection(&self, dx: i32, dy: i32) {
         let imp = self.imp();
-        let stacks = imp.stacks.borrow();
-        if stacks.is_empty() {
+        if imp.stacks.borrow().is_empty() {
             return;
         }
+        // The press that wakes the selection shows where it already is. Moving
+        // as well would slide it one step away from the place the child is
+        // about to look for it.
+        if self.wake_selection() {
+            self.focus_cursor();
+            return;
+        }
+        let stacks = imp.stacks.borrow();
         let (mut s, mut r) = imp.cursor.get();
         s = s.min(stacks.len() - 1);
 
@@ -403,10 +543,46 @@ impl LauncherField {
     }
 
     /// Give keyboard focus to the item under the cursor and scroll it in.
+    /// Reveal the selection if it is not already showing.
+    ///
+    /// The launcher boots, and returns from an activity, with no selection at
+    /// all (#208 review). A highlight sitting on the first activity before
+    /// anyone has touched anything is noise on a touchscreen, where there is no
+    /// cursor to explain it — and it suggests a choice has been made when none
+    /// has. The cursor still *has* a position throughout; this is only whether
+    /// it is drawn.
+    ///
+    /// Returns whether this call is what woke it, so a first key press can
+    /// reveal where the selection is instead of moving it somewhere else.
+    fn wake_selection(&self) -> bool {
+        if self.imp().selection_active.get() {
+            return false;
+        }
+        self.imp().selection_active.set(true);
+        true
+    }
+
+    /// Put the selection away again: nothing is selected until the next input.
+    pub fn clear_selection(&self) {
+        if !self.imp().selection_active.get() {
+            return;
+        }
+        self.imp().selection_active.set(false);
+        for stack in self.imp().stacks.borrow().iter() {
+            for item in &stack.items {
+                item.remove_css_class(SELECTED_CLASS);
+            }
+        }
+    }
+
     fn focus_cursor(&self) {
         let Some(item) = self.focused_item() else {
             return;
         };
+        if !self.imp().selection_active.get() {
+            // Keep the cursor where it is, draw nothing.
+            return;
+        }
 
         // The look is carried by a class rather than `:focus`; see the note on
         // `.lb-item--selected` in theme.rs. Every other item has it taken off,
@@ -496,6 +672,10 @@ impl LauncherField {
     ///   one compartment holding every application on the host, so this is the
     ///   case it lives in permanently.
     fn scroll_to_cursor(&self) {
+        // The scroll that follows a rebuild has nothing to animate from — the
+        // row has only just appeared — so it lands instantly. Every later one
+        // eases.
+        let animate = !self.imp().pending_scroll.get();
         let imp = self.imp();
         let adj = imp.scroller.hadjustment();
         let page = adj.page_size();
@@ -518,7 +698,7 @@ impl LauncherField {
             let left = alloc.x() as f64;
             let right = left + alloc.width() as f64;
             if left < adj.value() || right > adj.value() + page {
-                adj.set_value(left);
+                self.scroll_to(left, animate);
             }
             return;
         }
@@ -535,20 +715,109 @@ impl LauncherField {
         let left = x - margin;
         let right = x + item.width() as f64 + margin;
         if left < adj.value() {
-            adj.set_value(left.max(0.0));
+            self.scroll_to(left.max(0.0), animate);
         } else if right > adj.value() + page {
-            adj.set_value(right - page);
+            self.scroll_to(right - page, animate);
         }
+    }
+
+    /// Move the row to `target`, easing unless told not to.
+    fn scroll_to(&self, target: f64, animate: bool) {
+        if animate {
+            self.animate_scroll_to(target);
+            return;
+        }
+        let adj = self.imp().scroller.hadjustment();
+        let upper = (adj.upper() - adj.page_size()).max(0.0);
+        adj.set_value(target.clamp(0.0, upper));
+    }
+
+    /// Ease the row to `target` instead of teleporting there (#208 review).
+    ///
+    /// A jump gives no sense of which way the row went or how far, which on a
+    /// touchscreen is the difference between "it moved" and "something
+    /// happened". Retargeting mid-flight is fine: the next call reads the
+    /// adjustment where it currently *is* and starts again from there, so
+    /// holding a direction runs the row along smoothly rather than stuttering
+    /// between finished animations.
+    fn animate_scroll_to(&self, target: f64) {
+        let adj = self.imp().scroller.hadjustment();
+        let upper = (adj.upper() - adj.page_size()).max(0.0);
+        let target = target.clamp(0.0, upper);
+        let from = adj.value();
+        if (target - from).abs() < 1.0 {
+            return;
+        }
+
+        // Bump the generation so any animation already running stands down.
+        let generation = self.imp().scroll_generation.get().wrapping_add(1);
+        self.imp().scroll_generation.set(generation);
+
+        let start = std::time::Instant::now();
+        let field = self.downgrade();
+        self.add_tick_callback(move |_, _| {
+            let Some(field) = field.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if field.imp().scroll_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let adj = field.imp().scroller.hadjustment();
+            let t = start.elapsed().as_millis() as f64 / SCROLL_MS as f64;
+            if t >= 1.0 {
+                adj.set_value(target);
+                return glib::ControlFlow::Break;
+            }
+            // Ease out: quick away from the old position, gentle into the new.
+            let eased = 1.0 - (1.0 - t).powi(3);
+            adj.set_value(from + (target - from) * eased);
+            glib::ControlFlow::Continue
+        });
     }
 
     /// Push the row along when the child steers past either end.
     fn nudge(&self, dx: i32) {
         let adj = self.imp().scroller.hadjustment();
         let step = theme::px(theme::ITEM_W, self.imp().scale.get()) as f64;
-        adj.set_value(
-            (adj.value() + step * dx as f64).clamp(0.0, (adj.upper() - adj.page_size()).max(0.0)),
-        );
-        self.update_scroll_chips();
+        self.animate_scroll_to(adj.value() + step * dx as f64);
+    }
+
+    /// Keep each compartment's name and badge on screen while the compartment
+    /// itself scrolls past (#208 review).
+    ///
+    /// A category wider than the viewport used to take its own title off the
+    /// left with it, leaving a screenful of activities belonging to nothing
+    /// visible. The header now slides along inside its own compartment: pinned
+    /// to the left edge of whatever part of that compartment is showing, and
+    /// never further right than the compartment's own end, so it always reads
+    /// as belonging to the well it is sitting in rather than floating over the
+    /// row.
+    ///
+    /// Administrator mode is the case this matters most in — one compartment
+    /// holding every installed application, whose title would otherwise be
+    /// gone after the first swipe.
+    fn slide_headers(&self) {
+        let imp = self.imp();
+        let adj = imp.scroller.hadjustment();
+        let view_left = adj.value();
+        let page = adj.page_size();
+        if page <= 0.0 {
+            return;
+        }
+        // Clear of the fade, or the title dissolves into the edge it is
+        // trying to stay ahead of.
+        let inset = theme::px(EDGE_MARGIN, imp.scale.get()) as f64;
+
+        for header in imp.headers.borrow().iter() {
+            let alloc = header.well.allocation();
+            header.bin.set_offset(header_offset(
+                view_left,
+                inset,
+                alloc.x() as f64,
+                alloc.width() as f64,
+                header.bin.width() as f64,
+            ));
+        }
     }
 
     /// Keep the chevron chips honest: each shows only while the row really does
@@ -561,8 +830,8 @@ impl LauncherField {
         // that disappears a pixel early.
         let more_left = adj.value() > 1.0;
         let more_right = adj.value() + adj.page_size() < adj.upper() - 1.0;
-        imp.more_left.set_visible(more_left);
-        imp.more_right.set_visible(more_right);
+        imp.reveal_left.set_reveal_child(more_left);
+        imp.reveal_right.set_reveal_child(more_right);
         // The fade and its chip say the same thing, so they appear together.
         imp.fade_left.set_visible(more_left);
         imp.fade_right.set_visible(more_right);
@@ -576,6 +845,7 @@ impl LauncherField {
         adj.connect_value_changed(move |_| {
             if let Some(field) = field.upgrade() {
                 field.update_scroll_chips();
+                field.slide_headers();
             }
         });
         let field = self.downgrade();
@@ -591,6 +861,7 @@ impl LauncherField {
                 field.scroll_to_cursor();
             }
             field.update_scroll_chips();
+            field.slide_headers();
         });
 
         for (button, dx) in [
@@ -662,6 +933,39 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// A compartment fully on screen keeps its header where it was drawn.
+    #[test]
+    fn a_visible_compartment_does_not_move_its_header() {
+        assert_eq!(header_offset(0.0, 56.0, 40.0, 400.0, 120.0), 0.0);
+        // Still nothing to do while the viewport has not reached it.
+        assert_eq!(header_offset(100.0, 56.0, 400.0, 400.0, 120.0), 0.0);
+    }
+
+    /// Once the viewport cuts into a compartment, the header follows the cut.
+    #[test]
+    fn a_header_follows_the_viewport_into_its_compartment() {
+        // Viewport at 300, compartment starts at 40, inset 56: the header sits
+        // 316 into the well so it lands 56 past the screen edge.
+        assert_eq!(header_offset(300.0, 56.0, 40.0, 3000.0, 120.0), 316.0);
+    }
+
+    /// And stops at its own compartment's end rather than running into the
+    /// next category's.
+    #[test]
+    fn a_header_stops_at_the_end_of_its_own_compartment() {
+        // A narrow well, scrolled far past: the offset is capped by the room
+        // left in it, not by how far the viewport has gone.
+        let room = 400.0 - 120.0 - 56.0;
+        assert_eq!(header_offset(5000.0, 56.0, 40.0, 400.0, 120.0), room);
+    }
+
+    /// A header as wide as its compartment has nowhere to go, and must not be
+    /// pushed backwards trying.
+    #[test]
+    fn a_header_that_fills_its_compartment_stays_put() {
+        assert_eq!(header_offset(5000.0, 56.0, 40.0, 100.0, 120.0), 0.0);
     }
 
     #[test]

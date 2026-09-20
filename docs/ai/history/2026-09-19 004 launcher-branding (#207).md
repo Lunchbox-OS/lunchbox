@@ -387,6 +387,53 @@ over the colour. `.lb-item` and `.lb-button` had already been given
 `background-image: none` for exactly this reason; the chip was missed. Any
 control the branding recolours needs both.
 
+## Review, second round: what a touchscreen found
+
+Three things, none of which the headless harness could have shown.
+
+**The chevron chips appeared rather than arrived**, and pressing one teleported
+the row. Each chip now rides a `GtkRevealer` sliding out of its own edge, and
+every programmatic scroll eases over 220 ms instead of jumping — retargetable
+mid-flight, so holding a direction runs the row along smoothly rather than
+stuttering between finished animations. The scroll that follows a rebuild still
+lands instantly: there is nothing to animate from when the row has only just
+appeared.
+
+**A wide compartment took its own title off the left with it**, leaving a
+screenful of activities belonging to nothing visible. The header now slides
+inside its compartment, pinned to the left of whatever part of that compartment
+is showing and never past the compartment's own end. Administrator mode is the
+case that needed it most — one compartment holding every installed application,
+whose title was gone after the first swipe.
+
+**The selection was present before anyone had chosen anything.** It now starts
+absent and wakes on first use: a direction press, a hover, or a tap. The press
+that wakes it *reveals* it where it already is rather than moving, so the child
+sees the starting point before navigating; a tap on empty space puts it away
+again; and a rebuild — boot, or coming back from an activity — starts absent
+once more.
+
+That one contradicts the brief, which asks for exactly one focused item at all
+times. It is right for a touchscreen, where there is no cursor to explain a
+standing highlight and a selection implies a choice nobody has made. Two
+consequences worth knowing: pressing A on a launcher showing no selection
+reveals it instead of launching — launching something unseen is the worse
+failure — and nothing scrolls on boot any more, because there is no selection to
+scroll to, so the row simply starts at its beginning.
+
+### The part that could be checked
+
+Keyboard input did not reach the launcher *at all* during this round — eight
+presses, zero handler calls, confirmed with a temporary log rather than assumed.
+So the input-driven halves are unverified here and want the device again.
+
+What could be done instead was to make the hard part checkable without a
+display: the header's slide is pure arithmetic over four numbers, so it moved
+out of the widget code into `header_offset` with tests. That paid immediately —
+the first version applied the fade's inset unconditionally and nudged every
+header 16 px right even when its compartment was fully visible and no fade was
+showing. The inset only belongs once the edge actually cuts in.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here

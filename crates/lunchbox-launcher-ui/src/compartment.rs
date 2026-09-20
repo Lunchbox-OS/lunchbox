@@ -19,6 +19,10 @@ use crate::theme;
 pub struct Compartment {
     /// The well itself, to put in the row.
     pub widget: gtk4::Widget,
+    /// The name and badge, in the bin that slides them along so they stay on
+    /// screen while a wide compartment scrolls past (#208 review). The field
+    /// drives it; the compartment only has to hand it over.
+    pub header: crate::offset::OffsetBin,
     /// The items, grouped into the stacks they were laid out in. The field's
     /// D-pad model is built on exactly this shape: left/right move between
     /// stacks, up/down within one.
@@ -55,6 +59,10 @@ pub fn build(
     // ------------------------------------------------------------- header
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(10, scale));
     header.add_css_class("lb-compartment__header");
+    // Its own row, so sliding the header sideways cannot drag the stacks with
+    // it — and so the name keeps the compartment's left padding as its origin.
+    let header_bin = crate::offset::OffsetBin::around(&header);
+    header_bin.set_halign(gtk4::Align::Fill);
 
     let name = gtk4::Label::new(Some(label));
     name.add_css_class("lb-compartment__name");
@@ -76,7 +84,7 @@ pub fn build(
         badge.set_halign(gtk4::Align::End);
         header.append(&badge);
     }
-    well.append(&header);
+    well.append(&header_bin);
 
     // -------------------------------------------------------------- items
     let stacks = split_into_stacks(entries);
@@ -120,6 +128,7 @@ pub fn build(
 
     Compartment {
         widget: well.upcast(),
+        header: header_bin,
         stacks: built,
     }
 }

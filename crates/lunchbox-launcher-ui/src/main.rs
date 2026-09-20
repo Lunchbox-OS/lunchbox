@@ -9,6 +9,7 @@ mod client;
 mod compartment;
 mod field;
 mod item;
+mod offset;
 mod state;
 mod theme;
 
