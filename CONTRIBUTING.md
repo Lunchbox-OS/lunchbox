@@ -51,6 +51,21 @@ For runtime-only systems:
 
 See `./scripts/lunchbox --help` for all available commands.
 
+#### The launcher's typeface
+
+`deps install dev` and `deps install run` also link **Baloo 2** — the display
+face the launcher is branded with (issue #207) — from `assets/fonts` into your
+own font directory and refresh the font cache. It is shipped in the repository
+under the SIL Open Font License because no Ubuntu release packages it, and an
+installed device gets it under `/usr/share/fonts` from `lunchbox install`
+instead.
+
+The launcher names it first in a fallback stack, so skipping this only means
+ordinary lettering, not a broken screen. If the launcher renders in an ordinary
+sans when you expect Baloo 2, suspect a **stale fontconfig cache** before a
+missing file: run `fc-cache -f` and look again. Refreshing only the font's own
+directory is not enough, and the failure is silent.
+
 ### Running in development
 
 Start a development instance:

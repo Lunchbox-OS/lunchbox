@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Lunchbox">
+<rect x="92" y="18" width="72" height="28" rx="14" fill="#FAF9F5"></rect>
+<rect x="22" y="34" width="212" height="202" rx="36" fill="#2FB5A5"></rect>
+<rect x="46" y="58" width="102" height="154" rx="18" fill="#F7F5EE"></rect>
+<rect x="160" y="58" width="50" height="70" rx="14" fill="#FFD166"></rect>
+<rect x="160" y="142" width="50" height="70" rx="14" fill="#1F7A72"></rect>
+<path d="M82 110l40 25-40 25z" fill="#FFD166"></path>
+</svg>

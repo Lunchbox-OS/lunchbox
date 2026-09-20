@@ -672,6 +672,63 @@ remove_superseded_copy() {
 # root-only by default; the rule grants the 'input' group access (the same
 # group `install_user_groups` already adds the user to). This is what lets
 # the sidecars run on any Wayland compositor, not just wlroots ones.
+# Install the display face the launcher is branded with (issue #207).
+#
+# Lunchbox ships Baloo 2 itself (`assets/fonts`, SIL Open Font License) because
+# no Ubuntu release packages it and the kiosk is offline by default, so there is
+# nothing to fetch it from at first boot. The launcher names it first in a
+# fallback stack, so a device without it still comes up -- just in an ordinary
+# sans rather than the branded one.
+install_fonts() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+    local destdir="${DESTDIR:-}"
+    local repo_root
+    repo_root="$(get_data_dir)"
+
+    require_root
+
+    local src_dir="$repo_root/assets/fonts"
+    local dst_dir="$destdir$prefix/share/fonts/truetype/lunchbox"
+
+    if [[ ! -d "$src_dir" ]]; then
+        die "Branding fonts missing at $src_dir"
+    fi
+
+    info "Installing branding fonts to $dst_dir..."
+    ensure_dir "$dst_dir" 0755
+
+    local font
+    for font in "$src_dir"/*.ttf; do
+        [[ -f "$font" ]] || die "No .ttf found in $src_dir"
+        install -m 0644 -o root -g root "$font" "$dst_dir/"
+    done
+    # The licence travels with the font: the OFL requires it to be distributed
+    # alongside, and a font sitting in /usr/share with no licence beside it is
+    # exactly what a downstream packager then has to go looking for.
+    if [[ -f "$src_dir/OFL.txt" ]]; then
+        install -m 0644 -o root -g root "$src_dir/OFL.txt" "$dst_dir/"
+    fi
+
+    # Refresh the font cache only on a real install. Under DESTDIR this would
+    # cache the build host's fonts, which is wrong for packaging -- and the .deb
+    # does not need it, because files under /usr/share/fonts fire dpkg's own
+    # fontconfig trigger.
+    #
+    # Do not drop this from the from-source path: a stale cache is the usual
+    # reason a correctly-installed font still renders as the fallback, and it
+    # fails silently, which makes it an expensive hour to debug.
+    if [[ -z "$destdir" ]]; then
+        if command -v fc-cache >/dev/null 2>&1; then
+            fc-cache -f >/dev/null 2>&1 \
+                || warn "Could not refresh the font cache; run 'fc-cache -f'"
+        else
+            warn "fc-cache not found; the launcher will use its fallback font"
+        fi
+    fi
+
+    success "Installed branding fonts"
+}
+
 install_udev() {
     local destdir="${DESTDIR:-}"
     local repo_root
@@ -1231,6 +1288,7 @@ install_system() {
     install_state "$firewall_user" "true"
     install_sway_config "$prefix"
     install_desktop_entry "$prefix"
+    install_fonts "$prefix"
     install_udev
     install_bluetooth_dropin
 }
@@ -1716,6 +1774,27 @@ uninstall_bluetooth_dropin() {
 }
 
 # Remove the udev rule. Mirrors install_udev.
+# Remove the branding fonts. Mirrors install_fonts.
+uninstall_fonts() {
+    local prefix="${1:-$DEFAULT_PREFIX}"
+    local destdir="${DESTDIR:-}"
+
+    require_root
+
+    local dst_dir="$destdir$prefix/share/fonts/truetype/lunchbox"
+
+    info "Removing branding fonts..."
+    remove_path "$dst_dir"
+
+    # Rebuild the cache so the removed font stops being offered. Same DESTDIR
+    # reasoning as install_fonts.
+    if [[ -z "$destdir" ]] && command -v fc-cache >/dev/null 2>&1; then
+        fc-cache -f >/dev/null 2>&1 || true
+    fi
+
+    success "Removed branding fonts"
+}
+
 uninstall_udev() {
     local destdir="${DESTDIR:-}"
 
@@ -1753,6 +1832,7 @@ uninstall_system() {
     uninstall_state "$restore"
     uninstall_sway_config
     uninstall_desktop_entry "$prefix"
+    uninstall_fonts "$prefix"
     uninstall_udev
     uninstall_bluetooth_dropin
 }

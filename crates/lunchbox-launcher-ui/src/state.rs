@@ -1,6 +1,6 @@
 //! Launcher application state management
 
-use lunchbox_api::{EntryView, Event, EventPayload, ServiceStateSnapshot};
+use lunchbox_api::{EntryView, Event, EventPayload, GroupView, ServiceStateSnapshot};
 use lunchbox_util::SessionId;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -13,8 +13,16 @@ pub enum LauncherState {
     Disconnected,
     /// Connected, waiting for initial state
     Connecting,
-    /// Connected, no session running - show grid
-    Idle { entries: Vec<EntryView> },
+    /// Connected, no session running - show the field.
+    ///
+    /// Carries the categories alongside the entries (issue #207) because the
+    /// field draws one compartment per category: the two are one picture, and
+    /// splitting them would let a compartment's badge disagree with the items
+    /// sitting in it.
+    Idle {
+        entries: Vec<EntryView>,
+        groups: Vec<GroupView>,
+    },
     /// Launch requested, waiting for response
     Launching {
         #[allow(dead_code)]
@@ -226,6 +234,7 @@ impl SharedState {
         } else {
             self.set(LauncherState::Idle {
                 entries: snapshot.entries,
+                groups: snapshot.groups,
             });
         }
     }

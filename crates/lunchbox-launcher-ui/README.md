@@ -10,8 +10,9 @@ This is what users see when no session is active—the "home screen" of the envi
 
 ## Features
 
-- **Entry grid** - Large, touch-friendly tiles for each available entry
-- **Availability display** - Visual indication of enabled/disabled entries
+- **The field** - One sunk compartment per category, activities inside them
+- **Time badges** - What a category or activity has banked, needs, or earns
+- **Availability display** - Locked activities stay visible, wearing their badge
 - **Launch requests** - Send launch commands to the service
 - **State synchronization** - Always reflects service's authoritative state
 
@@ -72,28 +73,78 @@ lunchboxd. The service applies the configured `[volume]` policy
 (`max_volume`, `min_volume`, `allow_mute`, `allow_change`) and broadcasts
 a `VolumeChanged` event so the HUD slider follows the change.
 
-## Grid Behavior
+## Field Behaviour
 
-### Entry Tiles
+The home screen is a row of **compartments**, one per category, in config order
+(`src/field.rs`). Entries belonging to no category fall into a trailing
+"Everything else". A category with nothing to show is not drawn at all.
 
-Each tile displays:
+Lunchbox is a sectioned tin, and the launcher is that tin at screen size: an
+enamel field with cream compartments sunk into it. The design tokens and the
+mark live in `assets/branding`; `src/theme.rs` is their Rust half.
 
-- **Icon** - Large, recognizable icon
-- **Label** - Entry name
-- **Status** - Enabled (bright) or disabled (dimmed)
-- **Time indicator** - Max duration if started now (e.g., "30 min")
+### Compartments
 
-### Enabled Entries
+Each compartment shows its category's name, at most one badge, its members in
+stacks of three that spill *rightwards*, and — when the category is on a
+schedule — its closing time today on the floor.
 
-When an entry is enabled:
-1. Tile is fully visible and interactive
-2. Tapping sends `Launch` command to service
-3. Grid shows "Launching..." state
-4. On success: launcher hides, application starts
+Height never grows: a category with more members gets wider, and if the row
+overflows the screen the row scrolls **horizontally**. The field never scrolls
+vertically.
 
-### Disabled Entries
+### Items
 
-When an entry is disabled it is not displayed.
+Each item shows the activity's own icon at 64px with an ink keyline traced
+around its silhouette, its name, and its badge.
+
+### Time badges
+
+Time is shown where it applies — on the compartment when the gate belongs to the
+category, on the item when it is the item's own — and never in a panel of its
+own:
+
+| Badge | Means |
+|---|---|
+| `+` on yellow | Time spent here earns time toward something else |
+| `25m` on deep teal | Banked and ready to spend |
+| `5/10` on putty | Have against need; not yet |
+| `8m` on putty | Cooling down |
+
+### Locked activities
+
+An activity the policy has switched off is **still drawn**, at 50% opacity, with
+its badge — because a child who cannot see Celeste cannot learn that ten minutes
+of Tux Math would open it. It can be selected but not launched; a press shakes
+its badge instead.
+
+That applies to obstacles the child can act on: a closed window, a spent quota,
+a cooldown, an unmet gate, a gamepad to plug in. Configuration and capability
+problems (a disabled entry, a kind this host cannot run, a protection that
+cannot be applied) are hidden instead, because nothing the child does changes
+them, and a permanently dead icon teaches them to ignore dimmed items.
+`is_shown_when_locked` in `src/item.rs` is the list, and a new `ReasonCode` has
+to be classified there.
+
+### Selection
+
+Exactly one item is selected whenever the field is showing. Left/right move
+between stacks and across compartments; up/down move within a stack and wrap.
+Running off either end of the row nudges the scroll rather than wrapping.
+Hovering with a pointer selects, so the pointer and the D-pad produce the same
+single state.
+
+The selected look is carried by a CSS class the field manages, not by `:focus`
+— see the note on `.lb-item--selected` in `src/theme.rs` for why.
+
+### Scaling
+
+The stylesheet is written for 1280x720 and every `px` literal in it is
+multiplied for the output the launcher actually lands on (`theme::stylesheet`).
+The layout is one row at every size; scaling keeps the ratios rather than
+reflowing. **A size that should scale has to be written in `px` in that
+stylesheet** — anything left to the GTK theme keeps its logical value and so
+shrinks on screen as everything around it grows.
 
 ### Launch Flow
 
@@ -194,17 +245,28 @@ If connection to service is lost:
 
 ## Styling
 
-The launcher uses a child-friendly design:
+Everything visual comes from `src/theme.rs`, which is the Rust half of
+`assets/branding/tokens.json`. Keep the two in step.
 
-- Large, colorful icons
-- Rounded corners
-- Clear enabled/disabled distinction
-- Smooth transitions
-- Dark background (for contrast)
+The display face is **Baloo 2** (SIL Open Font License), shipped in
+`assets/fonts` because no Ubuntu release packages it and the kiosk is offline by
+default. `lunchbox install` puts it under `/usr/share/fonts`; for a run out of
+`target/debug`, `lunchbox deps install dev` links it into this user's font
+directory. The launcher names it first in a fallback stack, so a device without
+it still comes up in an ordinary sans.
+
+If the lettering is ordinary when you expect Baloo 2, suspect a stale fontconfig
+cache before a missing file: run `fc-cache -f` and look again. That failure is
+silent and looks exactly like the font was never installed.
+
+Administrator mode's application picker (`src/grid.rs`) deliberately keeps a
+wrapping flow box rather than the field: it is a searchable list of every
+`.desktop` file on the system, for a caregiver rather than a child.
 
 ## Dependencies
 
 - `gtk4` - GTK4 bindings
+- `cairo-rs` - Drawing the coin glyph on a badge pill
 - `tokio` - Async runtime
 - `lunchbox-api` - Protocol types
 - `lunchbox-ipc` - Client implementation

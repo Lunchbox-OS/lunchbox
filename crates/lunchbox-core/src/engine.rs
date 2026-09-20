@@ -461,6 +461,16 @@ impl CoreEngine {
                         .tokens
                         .as_ref()
                         .map(|t| self.token_status_of(&group.subject(), t, today)),
+                    // Only meaningful while the category is inside a window:
+                    // `remaining_in_window` answers None both for a category
+                    // that is always open and for one that is shut, and neither
+                    // has a closing time to print (issue #207).
+                    window_closes_at: group
+                        .availability
+                        .remaining_in_window(&now)
+                        .and_then(|d| chrono::Duration::from_std(d).ok())
+                        .map(|d| now + d),
+                    earns_tokens: self.policy.earns_tokens(&group.subject()),
                 }
             })
             .collect()
@@ -708,6 +718,7 @@ impl CoreEngine {
                 .tokens
                 .as_ref()
                 .map(|t| self.token_status_of(&entry.subject(), t, today)),
+            earns_tokens: self.policy.earns_tokens(&entry.subject()),
             max_run_if_started_now,
         }
     }
@@ -828,6 +839,7 @@ impl CoreEngine {
                 .tokens
                 .as_ref()
                 .map(|t| self.token_status_of(&entry.subject(), t, today)),
+            earns_tokens: self.policy.earns_tokens(&entry.subject()),
             max_run_if_started_now: None,
         }
     }
@@ -1919,7 +1931,12 @@ impl CoreEngine {
             .map(|s| s.to_session_info(MonotonicInstant::now()));
 
         // Build entry views for the snapshot
-        let entries = self.list_entries(lunchbox_util::now());
+        let now = lunchbox_util::now();
+        let entries = self.list_entries(now);
+        // Evaluated at the same instant as the entries: the launcher draws the
+        // two together, so a category whose window closed between the two
+        // calls would contradict its own members (issue #207).
+        let groups = self.list_groups(now);
 
         ServiceStateSnapshot {
             api_version: API_VERSION,
@@ -1927,6 +1944,7 @@ impl CoreEngine {
             current_session,
             entry_count: self.policy.entries.len(),
             entries,
+            groups,
             internet_status: self.internet_status_views(),
             diagnostics: self.diagnostics.clone(),
             admin_mode: self.admin_mode,
