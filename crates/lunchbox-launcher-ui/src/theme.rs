@@ -58,6 +58,14 @@ pub const ICON_PX: i32 = 64;
 /// Radius of the ink keyline traced around an icon's silhouette.
 pub const KEYLINE: f64 = 2.5;
 
+/// Type size of an activity's name, unscaled.
+///
+/// Written here as well as in `.lb-item__name` below because the leading is a
+/// Pango attribute rather than a CSS rule — GTK4 CSS has no `line-height` —
+/// and computing an absolute leading needs the size in Rust. The test at the
+/// foot of this file fails if the two spellings drift apart.
+pub const ITEM_FONT_PX: i32 = 16;
+
 /// How much to scale the design for an output of `width` × `height` logical
 /// pixels. Both axes are considered so a short screen shrinks the row rather
 /// than clipping the bottom off it, and the result is clamped: below ~0.75 the
@@ -369,6 +377,22 @@ mod tests {
                  mentions that colour"
             );
         }
+    }
+
+    /// The item name's type size is written twice — once for the stylesheet,
+    /// once for the Pango leading that CSS cannot express. They must agree, or
+    /// the leading is computed for a size the text is not set at.
+    #[test]
+    fn the_item_type_size_matches_the_stylesheet() {
+        let css = stylesheet(1.0);
+        let rule = css
+            .split(".lb-item__name")
+            .nth(1)
+            .expect("the item name rule is in the stylesheet");
+        assert!(
+            rule.contains(&format!("font-size: {ITEM_FONT_PX}px")),
+            "ITEM_FONT_PX is {ITEM_FONT_PX}, but .lb-item__name says otherwise: {rule}"
+        );
     }
 
     #[test]

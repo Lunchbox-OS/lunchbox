@@ -18,7 +18,40 @@ use crate::theme;
 /// How long the press animation runs before the launch actually goes out.
 const PRESS_MS: u64 = 120;
 
-/// Height reserved for an item's name: two lines of 16/800 plus its leading.
+/// Leading on an activity's name, as a multiple of the type size.
+///
+/// Baloo 2 asks for about 1.55 of its own accord — it is a display face with
+/// room for tall Devanagari matras it is not being asked to set here — and two
+/// lines of a wrapped activity name at that spacing drift apart badly. The
+/// branding specifies 1.1 for item type (`tokens.json`, `type.item`), which is
+/// what this is.
+///
+/// GTK4 CSS has no `line-height`, so it has to be a Pango attribute on the
+/// label rather than a rule in the stylesheet.
+const NAME_LINE_HEIGHT: f64 = 1.1;
+
+/// The leading for an activity's name at `scale`, as a Pango attribute list.
+///
+/// Absolute rather than `AttrFloat::new_line_height`'s factor: the factor form
+/// had no effect here — two lines stayed ~1.8 apart, Baloo 2's own default —
+/// while the absolute form does what it says. Absolute means the value has to
+/// be computed from the scaled type size, which is why this takes `scale` and
+/// why `theme::ITEM_FONT_PX` exists.
+fn name_leading(scale: f64) -> gtk4::pango::AttrList {
+    let px = theme::ITEM_FONT_PX as f64 * scale * NAME_LINE_HEIGHT;
+    let attrs = gtk4::pango::AttrList::new();
+    attrs.insert(gtk4::pango::AttrInt::new_line_height_absolute(
+        (px * gtk4::pango::SCALE as f64).round() as i32,
+    ));
+    attrs
+}
+
+/// Where an activity's name wraps, in characters — the branding's 150 px at
+/// the item's 16 px type. See the call site for why this is not in pixels.
+const NAME_MAX_CHARS: i32 = 18;
+
+/// Height reserved for an item's name: two lines of 16/800 at
+/// `NAME_LINE_HEIGHT`, and a little for descenders.
 /// See `set_entry` for why it is reserved rather than measured.
 const NAME_TWO_LINES: i32 = 40;
 
@@ -153,6 +186,17 @@ mod imp {
             self.label.set_justify(gtk4::Justification::Center);
             self.label.set_lines(2);
             self.label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            // Where the name actually wraps. A width *request* cannot do this
+            // — GTK treats it as a floor, so a long name takes its natural
+            // width, widens the whole cell and never wraps at all. This is a
+            // ceiling on the natural width, which is what makes the branding's
+            // "wrap to 2 lines max at 150 px" true.
+            //
+            // In characters rather than pixels, and deliberately so: the count
+            // is relative to the font size, so one value holds at every UI
+            // scale, where a pixel cap would have to be rescaled with
+            // everything else.
+            self.label.set_max_width_chars(NAME_MAX_CHARS);
             self.label.set_halign(gtk4::Align::Center);
             self.label.add_css_class("lb-item__name");
             content.append(&self.label);
@@ -193,6 +237,7 @@ impl LauncherItem {
         let imp = self.imp();
 
         imp.label.set_text(&entry.label);
+        imp.label.set_attributes(Some(&name_leading(scale)));
         // A fixed two-line box, not "up to two lines". A name that wraps would
         // otherwise push its badge down and make the whole stack taller than
         // its neighbours, and the branding is explicit that height never grows
