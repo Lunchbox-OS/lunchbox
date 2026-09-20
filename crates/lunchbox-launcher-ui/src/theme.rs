@@ -311,10 +311,12 @@ window.lb-launcher {
    Driven by a class the field puts on, not by `:focus`. Two reasons, and the
    second is the one that decided it:
 
-   1. The brief asks that hovering *be* selecting, so there is exactly one
+   1. The brief asks that hovering *be* selecting, so there is at most one
       selected item whether the child is using a thumbstick, an arrow key or a
-      finger. One class expresses that; `:focus, :hover` is two states that can
-      both be true, on different items.
+      finger — and none at all until one of them has been used. One class
+      expresses that; `:focus, :hover` is two states that can both be true, on
+      different items, and neither of which can be switched off while the
+      launcher waits to be touched.
    2. `:focus` did not paint here. The item really does hold the focus --
       `grab_focus()` returns true and GTK agrees the widget is focused -- but
       the pseudo-class never matched under the headless compositor. Rather than

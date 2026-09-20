@@ -120,17 +120,32 @@ its badge instead.
 
 That applies to obstacles the child can act on: a closed window, a spent quota,
 a cooldown, an unmet gate, a gamepad to plug in. Configuration and capability
-problems (a disabled entry, a kind this host cannot run, a protection that
-cannot be applied) are hidden instead, because nothing the child does changes
-them, and a permanently dead icon teaches them to ignore dimmed items.
-`is_shown_when_locked` in `src/item.rs` is the list, and a new `ReasonCode` has
-to be classified there.
+problems — an entry the caregiver disabled, a kind this host cannot run, a
+protection that cannot be applied — are hidden instead, because nothing the
+child does changes them and a permanently dead icon teaches them to ignore
+dimmed items.
+
+**A permanent blocker wins.** Several reasons can block one activity at once,
+and an entry switched off in the configuration stays off however many clocks
+also happen to be against it. `is_shown_when_locked` in `src/item.rs` splits the
+two kinds, and a new `ReasonCode` has to be classified in both.
 
 ### Selection
 
-Exactly one item is selected whenever the field is showing. Left/right move
-between stacks and across compartments; up/down move within a stack and wrap.
-Running off either end of the row nudges the scroll rather than wrapping.
+**At most one item is selected, and not until something has selected it.** The
+launcher comes up with no selection at all and wakes on the first direction
+press, hover or tap; that first press *reveals* the selection where it already
+is rather than moving it, and a tap on empty space puts it away again. Pressing
+A/Enter with nothing selected reveals rather than launches — starting something
+the child cannot see is the worse failure.
+
+The branding asks for exactly one item focused at all times, which is right for
+a D-pad and wrong for a touchscreen: there is no cursor there to explain a
+standing highlight, and it claims a choice nobody has made.
+
+Left/right move between stacks and across compartments; up/down move within a
+stack and wrap. Running off either end of the row nudges the scroll rather than
+wrapping — by most of a screenful, since a chevron is a "next page" control.
 Hovering with a pointer selects, so the pointer and the D-pad produce the same
 single state.
 
@@ -149,14 +164,13 @@ shrinks on screen as everything around it grows.
 ### Launch Flow
 
 ```
-User taps tile
+User presses an activity
       │
       ▼
-Launcher sends Launch command
+Press animates (120ms), then Launch goes out
       │
       ▼
-Grid input disabled
-"Starting..." overlay shown
+Loading view replaces the field
       │
       ▼
 ┌─────┴─────┐
@@ -165,22 +179,37 @@ Grid input disabled
 Success     Failure
 │           │
 ▼           ▼
-Launcher    Error message
-hides       Grid restored
+Launcher    Error message,
+hides       field restored
 ```
+
+Nothing is desensitised while a launch is in flight: every launch path checks
+the state before it acts, so the field being behind another view is already
+enough to make it inert. A locked activity never launches at all — its badge
+shakes instead.
 
 ## State Management
 
-The launcher maintains a reactive state model:
+The launcher maintains a reactive state model — one enum, in `src/state.rs`,
+of which view is on screen:
 
 ```rust
-struct LauncherState {
-    entries: Vec<EntryView>,   // From service
-    current_session: Option<SessionInfo>,
-    connected: bool,
-    launching: Option<EntryId>,
+enum LauncherState {
+    Disconnected,
+    Connecting,
+    Idle { entries: Vec<EntryView>, groups: Vec<GroupView> },
+    Launching { entry_id: String },
+    Closing { entry_label: String },
+    SessionActive { .. },
+    AdminMode,
+    Error { message: String },
+    Suspending,
 }
 ```
+
+`Idle` carries the categories alongside the entries because the field draws one
+compartment per category: the two are one picture, and fetching them separately
+would let a compartment's badge disagree with the items sitting in it.
 
 ### Event Handling
 
@@ -270,9 +299,10 @@ If the lettering is ordinary when you expect Baloo 2, suspect a stale fontconfig
 cache before a missing file: run `fc-cache -f` and look again. That failure is
 silent and looks exactly like the font was never installed.
 
-Administrator mode's application picker (`src/grid.rs`) deliberately keeps a
-wrapping flow box rather than the field: it is a searchable list of every
-`.desktop` file on the system, for a caregiver rather than a child.
+Administrator mode's application picker is the *same* `LauncherField`, handed a
+single synthetic category holding everything installed. It had its own widget
+once; sharing one means the sunk wells, the selected cell, the scrolling and its
+fades cannot drift apart between the two surfaces.
 
 ## Dependencies
 

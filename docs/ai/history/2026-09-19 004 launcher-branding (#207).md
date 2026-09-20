@@ -88,6 +88,11 @@ administrator mode's application picker — a searchable list of every `.desktop
 file on the host, for a caregiver — and a row of compartments is the wrong shape
 for that.
 
+> Superseded later in this same note, under "One source, not two" and the
+> review rounds after it: the picker became the *same* field, handed one
+> synthetic category, and `grid.rs` was deleted. Read on before believing any
+> of the paragraph above.
+
 ### API additions
 
 Three, all driven by something the field has to draw and could not otherwise
@@ -497,6 +502,44 @@ reading the file will meet it.
 
 Worth naming the pattern: of the three, two were comments that had quietly
 stopped being true. Prose does not fail a build.
+
+## Review, fourth round: a disabled activity, and a sweep
+
+**An entry the caregiver switched off could come back.** `is_shown_when_locked`
+asked whether *any* reason was one the child could act on, which meant a config
+`disabled = true` was outvoted the moment the entry was also outside its window
+— two blockers, one of them a clock, and the clock won. A permanent blocker is
+now a veto checked before the vote: switched off is switched off, however many
+other reasons agree. The same goes for a kind this host cannot run and a
+protection it cannot apply, neither of which will ever clear.
+
+`ManuallyDisabled` deliberately stays on the shown side. "Not today" is a thing
+to wait out, and the badge saying so is worth drawing; "not at all" is not.
+
+### The sweep
+
+Asked to look for other comments that had gone stale, and there were several —
+all of them prose that had quietly stopped matching the code:
+
+| Where | Said |
+| --- | --- |
+| `README.md`, Selection | "Exactly one item is selected whenever the field is showing" |
+| `README.md`, Styling | the picker keeps its own flow box, in `src/grid.rs` |
+| `README.md`, Launch Flow | "Grid input disabled" — a thing that no longer happens |
+| `README.md`, State Management | a `LauncherState` struct with four fields, matching nothing |
+| `field.rs`, `restore_focus` | "the rule is that *something* is always focused" |
+| `theme.rs`, `--selected` | "there is exactly one selected item" |
+| `item.rs` ×3 | pointed at `tile.rs`, deleted three rounds ago |
+
+The `LauncherState` block predates this work; the rest are all mine, and every
+one of them was true when written. That is the whole difficulty: none of it
+fails a build, none of it fails a test, and the only thing that catches it is
+somebody reading carefully — which is what a reviewer is for, but not what they
+should have to spend their attention on.
+
+The history note also had a paragraph describing `grid.rs` as kept, written
+before the round that deleted it. It is a record rather than living
+documentation, so it keeps what it said and carries a pointer forward instead.
 
 ## Two places the implementation departs from the mockup
 

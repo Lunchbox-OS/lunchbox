@@ -638,11 +638,15 @@ impl LauncherField {
         self.focused_item().and_then(|i| i.entry_id())
     }
 
-    /// Put the focus somewhere sensible after a rebuild.
+    /// Put the *cursor* somewhere sensible after a rebuild.
     ///
-    /// In order of preference: where the child was, then what they last
-    /// launched, then the first item that is actually launchable, then simply
-    /// the first item — because the rule is that *something* is always focused.
+    /// The cursor, not the selection: a rebuild leaves the selection asleep, so
+    /// none of this is drawn until the child wakes it. What it decides is where
+    /// the selection will appear when they do.
+    ///
+    /// In order of preference: where they were, then what they last launched,
+    /// then the first item that is actually launchable, then simply the first
+    /// item — a cursor always has a position even when nothing is showing it.
     fn restore_focus(&self, previous: Option<EntryId>) {
         let imp = self.imp();
         let stacks = imp.stacks.borrow();

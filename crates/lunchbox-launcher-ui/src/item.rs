@@ -1,10 +1,10 @@
 //! One activity in a compartment: its icon under an ink keyline, its name, and
 //! the badge that says what it costs or still needs.
 //!
-//! Replaces the old `tile.rs`. The visible differences are the keyline, the
-//! badge and the press animation; the invisible one matters more — a locked
-//! activity is now *drawn* rather than skipped, because a child who cannot see
-//! Celeste cannot learn that ten minutes of Tux Math would open it.
+//! The thing that matters most here is not visible: a locked activity is
+//! *drawn* rather than skipped, because a child who cannot see Celeste cannot
+//! learn that ten minutes of Tux Math would open it. `is_shown_when_locked`
+//! below decides which locks are worth showing and which are not.
 
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -66,30 +66,67 @@ pub fn is_shown_when_locked(reasons: &[ReasonCode]) -> bool {
     if reasons.is_empty() {
         return true;
     }
-    reasons.iter().any(|r| match unwrap_group(r) {
+    // A veto is final. Several reasons can block one activity at once, and an
+    // activity that is switched off is switched off however many clocks also
+    // happen to be against it — this used to be a plain "any reason is
+    // actionable" vote, which let an entry a caregiver had explicitly disabled
+    // reappear on the strength of also being outside its window (#208 review).
+    if reasons.iter().any(|r| is_permanent(unwrap_group(r))) {
+        return false;
+    }
+    reasons.iter().any(|r| is_actionable(unwrap_group(r)))
+}
+
+/// Blockers that no amount of waiting, earning or plugging things in will
+/// clear, so the activity is not drawn at all.
+///
+/// The child is owed a badge that tells them what to do; when there is nothing
+/// they could do, a permanently dimmed icon in the tin only teaches them to
+/// ignore dimmed icons. The caregiver hears about these through diagnostics.
+fn is_permanent(reason: &ReasonCode) -> bool {
+    matches!(
+        reason,
+        // The caregiver said no, in the configuration.
+        ReasonCode::Disabled { .. }
+            // This host cannot run it, and will not start being able to.
+            | ReasonCode::UnsupportedKind { .. }
+            // Its protection cannot be applied here, so it does not launch.
+            | ReasonCode::ProtectionUnavailable
+    )
+}
+
+/// Blockers the child can do something about, or simply outlast. These keep
+/// the activity on screen at half strength, wearing the badge that says what
+/// would clear them.
+fn is_actionable(reason: &ReasonCode) -> bool {
+    match reason {
         // Time: wait, earn, or come back tomorrow.
         ReasonCode::OutsideTimeWindow { .. }
         | ReasonCode::QuotaExhausted { .. }
         | ReasonCode::CooldownActive { .. }
         | ReasonCode::TokensInsufficient { .. }
+        // Switched off for *today* only, which is a thing to wait out rather
+        // than a thing that has been taken away — unlike `Disabled` above.
         | ReasonCode::ManuallyDisabled { .. }
         | ReasonCode::SessionActive { .. } => true,
         // Something to go and fix in the room: plug the pad in, get the
-        // network back. Also child-actionable, also worth drawing.
+        // network back.
         ReasonCode::RequiredInputUnavailable { .. } | ReasonCode::InternetUnavailable { .. } => {
             true
         }
         // Warming up; it will be available in a moment on its own.
         ReasonCode::NotReady { .. } => true,
-        // Configuration and capability. Not the child's to solve, and the
-        // caregiver hears about these through diagnostics instead.
+        // Handled by `is_permanent`, and listed rather than caught by a
+        // wildcard so a new reason has to be classified in both places.
         ReasonCode::Disabled { .. }
         | ReasonCode::UnsupportedKind { .. }
-        | ReasonCode::ProtectionUnavailable
-        | ReasonCode::AdminMode => false,
-        // Unwrapped above; listed so a new reason has to be classified here.
+        | ReasonCode::ProtectionUnavailable => false,
+        // Administrator mode replaces the field with the picker, so this never
+        // decides what the child sees; it is every entry's reason or none's.
+        ReasonCode::AdminMode => false,
+        // Unwrapped by the callers above.
         ReasonCode::GroupRestricted { .. } => false,
-    })
+    }
 }
 
 /// See past `GroupRestricted` to the restriction it wraps.
@@ -102,9 +139,9 @@ fn unwrap_group(reason: &ReasonCode) -> &ReasonCode {
 
 /// A short, human-readable tooltip for why an activity is unavailable.
 ///
-/// Carried over from `tile.rs` unchanged in spirit: most reasons fall back to
-/// their `Debug` form, the input-dependency reason (issue #96) names the
-/// missing devices, and a group restriction says whose limit it is.
+/// Most reasons fall back to their `Debug` form; the input-dependency reason
+/// (issue #96) names the missing devices, and a group restriction says whose
+/// limit it is.
 pub fn reason_tooltip(reason: &ReasonCode) -> String {
     match reason {
         ReasonCode::RequiredInputUnavailable { devices } => {
@@ -333,7 +370,7 @@ impl Default for LauncherItem {
 }
 
 /// Work out what to draw for an entry: a file on disk, a theme icon, or the
-/// fallback for its kind. Carried over from `tile.rs`.
+/// fallback for its kind.
 fn resolve_icon(entry: &EntryView) -> Option<gtk4::gdk::Paintable> {
     let fallback = match entry.kind_tag {
         lunchbox_api::EntryKindTag::Vm => "computer",
@@ -632,14 +669,68 @@ mod tests {
 
     #[test]
     fn one_actionable_reason_is_enough_to_keep_it_on_screen() {
-        // Several things can block at once. If any of them is one the child
-        // can act on, the badge has something to say, so it is drawn.
+        // Several things can block at once. If they are all ones the child can
+        // act on, the badge has something to say, so it is drawn.
         let reasons = vec![
-            ReasonCode::ProtectionUnavailable,
             ReasonCode::CooldownActive {
                 available_at: lunchbox_util::now(),
             },
+            ReasonCode::OutsideTimeWindow {
+                next_window_start: None,
+            },
         ];
+        assert!(is_shown_when_locked(&reasons));
+    }
+
+    /// An activity the caregiver switched off in the configuration stays off,
+    /// however many clocks happen to agree with them.
+    #[test]
+    fn a_disabled_activity_is_not_shown_whatever_else_is_true() {
+        let reasons = vec![
+            ReasonCode::Disabled {
+                reason: Some("not for this child".into()),
+            },
+            ReasonCode::OutsideTimeWindow {
+                next_window_start: None,
+            },
+        ];
+        assert!(
+            !is_shown_when_locked(&reasons),
+            "a caregiver's explicit no must not be outvoted by a reason the \
+             child could otherwise wait out"
+        );
+    }
+
+    /// Same for the blockers nothing can clear.
+    #[test]
+    fn a_permanent_blocker_overrides_an_actionable_one() {
+        for permanent in [
+            ReasonCode::ProtectionUnavailable,
+            ReasonCode::UnsupportedKind {
+                kind: lunchbox_api::EntryKindTag::Steam,
+            },
+        ] {
+            let reasons = vec![
+                permanent.clone(),
+                ReasonCode::CooldownActive {
+                    available_at: lunchbox_util::now(),
+                },
+            ];
+            assert!(
+                !is_shown_when_locked(&reasons),
+                "{permanent:?} can never clear, so a cooldown badge beside it \
+                 would be promising something that will not happen"
+            );
+        }
+    }
+
+    /// "Not today" is not the same as "not at all": a daily override is a
+    /// thing to wait out, so it keeps its place.
+    #[test]
+    fn switched_off_for_the_day_still_shows() {
+        let reasons = vec![ReasonCode::ManuallyDisabled {
+            until: lunchbox_util::now().date_naive(),
+        }];
         assert!(is_shown_when_locked(&reasons));
     }
 

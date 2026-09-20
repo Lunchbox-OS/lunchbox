@@ -124,7 +124,9 @@ The launcher home screen is built to this (`crates/lunchbox-launcher-ui`).
 Still open:
 
 - **The HUD.** Untouched by #207 and still on its old palette; the bar above is
-  the design for it, not a description of it.
+  the design for it, not a description of it. Tracked as
+  <https://github.com/aarmea/lunchbox/issues/209>, which also lists where the
+  bar as built and the bar as drawn disagree.
 - **Bedtime** (compartments emptied and dimmed, one left open) is described, not
   drawn — and is blocked on the engine besides: a compartment floor cannot say
   "Opens 10:00 AM" until `ReasonCode::OutsideTimeWindow::next_window_start` is
@@ -132,3 +134,17 @@ Still open:
 - **Category icons** for the row headers, if the words are ever dropped.
 - **Book cover art**: the two `book` placeholders in the mockups use a generic
   glyph on a tinted plate.
+
+## Where the launcher departs from this
+
+Each was asked for after seeing it running, and each is argued in
+`docs/ai/history/2026-09-19 004 launcher-branding (#207).md`:
+
+- A category's badge sits at the **end of its header**, not against the name,
+  so badges line up down a row of compartments of different widths.
+- An activity's badge **rides its icon's corner** rather than taking a row under
+  the name — most activities have no badge, and the row had to be reserved for
+  all of them or none.
+- There is **no selection until the child makes one**. The rule here is exactly
+  one focused item at all times, which assumes a cursor; a touchscreen has
+  none, and a standing highlight there claims a choice nobody has made.
