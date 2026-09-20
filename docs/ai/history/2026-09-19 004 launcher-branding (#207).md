@@ -15,6 +15,32 @@ agent on what to build. The brief is reproduced at the end of this note, because
 it is the specification this work was measured against and it is not otherwise
 in the repository.
 
+## What it looks like
+
+Screenshots in `2026-09-19-004-launcher-branding/` beside this note, taken from
+`config.example.toml` on a development machine — which is why most activities
+wear the theme's generic fallback icon rather than their own: Steam, RetroArch,
+GCompris and the rest are not installed here.
+
+![The home screen at 1280x720](2026-09-19-004-launcher-branding/home.png)
+
+The design size, and what a device actually shows: three compartments fit, the
+row overflows, and the yellow chevron says so.
+
+![All five categories](2026-09-19-004-launcher-branding/categories.png)
+
+The whole row on a wider output. Every badge in the vocabulary is here — earn on
+Books and Learn, `25m` banked and `0/10` still owed on two activities in Play,
+`30m` on Watch's header because the gate is the category's, and nothing on
+Listen, which is ungated. Play carries the only schedule, so it has the only
+floor.
+
+![A locked and an unlocked activity, both selected](2026-09-19-004-launcher-branding/selection.png)
+
+The same activity selected, locked and unlocked. The selection is identical in
+both; only the icon and the name dim. See "What 'selected' looked like" below
+for why that matters.
+
 ## Scope, as agreed before building
 
 The brief is addressed to "an agent implementing the home screen and HUD in
