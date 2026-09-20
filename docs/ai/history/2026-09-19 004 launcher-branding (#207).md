@@ -355,6 +355,31 @@ Worth knowing for anything else written against this palette: the far stop is
 `rgba(39, 160, 147, 0)` and not `transparent`, because `transparent` is
 transparent *black* and a gradient interpolating to it dips grey on the way out.
 
+The first cut of it still had a visible seam, and the reason is worth keeping.
+The field's 40px side margins were padding on `.lb-field`, so the scroll
+viewport — and the fade with it — stopped 40px short of the screen edge. The
+fade painted a flat `#27A093`, the sheen's *edge* stop, at a place where the
+sheen had not reached it: about `(41, 166, 152)` against the fade's
+`(39, 160, 147)`. Five units, but uniform down the whole height, which the eye
+reads as a line.
+
+A fade painted in a single colour can only match a gradient at one point, so
+the fix was to make that point the one the fade ends on: the side margins moved
+off the field and onto the *row*, the viewport now reaches the screen edge, and
+the fade ends exactly where the sheen really is `#27A093`. Content scrolls off
+the edge of the screen rather than stopping short of it, which is what it should
+have done anyway.
+
+**An initial selection off the first screenful was never scrolled to.** Found
+while checking the mirrored left-hand fade: a config whose first available
+activity sits in a later compartment came up showing the start of the row with
+nothing selected on screen at all. `restore_focus` does scroll, but it runs
+before anything is allocated, so the viewport still measures zero and
+`scroll_to_cursor` returns early. The rebuild now sets a pending flag that the
+adjustment's `changed` handler acts on, which is the first moment the viewport
+knows its real size. The brief's "exactly one focused item at all times when the
+field is showing" was quietly false before this for any bedtime-shaped policy.
+
 **The chevron chip was white, not yellow** — and had been all along, in every
 screenshot taken before this. `.lb-more` set `background-color` but not
 `background-image`, and the GTK theme paints a button's own gradient straight

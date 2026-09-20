@@ -118,6 +118,9 @@ mod imp {
         /// back, which is what makes "play one more round" a single press.
         pub last_launched: RefCell<Option<EntryId>>,
         pub scale: Cell<f64>,
+        /// Set when the field is rebuilt, cleared once the selection has
+        /// actually been scrolled into view. See `wire_scroll_chips`.
+        pub pending_scroll: Cell<bool>,
         /// The snapshot the field is currently drawing, kept so a change of
         /// scale can redraw it without waiting for the daemon to say anything
         /// new. The launcher is fullscreen on an output whose size it learns
@@ -140,6 +143,7 @@ mod imp {
                 on_launch: Rc::new(RefCell::new(None)),
                 last_launched: RefCell::new(None),
                 scale: Cell::new(1.0),
+                pending_scroll: Cell::new(false),
                 last_state: RefCell::new((Vec::new(), Vec::new())),
             }
         }
@@ -290,6 +294,12 @@ impl LauncherField {
         *imp.stacks.borrow_mut() = stacks;
 
         self.restore_focus(previous);
+        // `restore_focus` scrolls, but nothing is allocated yet at this point:
+        // the viewport still measures zero, so the scroll is a no-op and an
+        // initial selection in a compartment beyond the first screenful would
+        // be left off-screen with nothing visibly selected at all. Ask again
+        // once the adjustment knows its real size.
+        imp.pending_scroll.set(true);
         self.update_scroll_chips();
     }
 
@@ -536,10 +546,18 @@ impl LauncherField {
             }
         });
         let field = self.downgrade();
-        adj.connect_changed(move |_| {
-            if let Some(field) = field.upgrade() {
-                field.update_scroll_chips();
+        adj.connect_changed(move |adj| {
+            let Some(field) = field.upgrade() else {
+                return;
+            };
+            // The adjustment learns its page size and extent during
+            // allocation, which is the first moment a scroll can mean
+            // anything. Take the one the rebuild could not do.
+            if field.imp().pending_scroll.get() && adj.page_size() > 0.0 {
+                field.imp().pending_scroll.set(false);
+                field.scroll_to_cursor();
             }
+            field.update_scroll_chips();
         });
 
         for (button, dx) in [

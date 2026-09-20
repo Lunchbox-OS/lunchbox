@@ -153,13 +153,20 @@ window.lb-launcher {
     font-family: "Baloo 2", "Comic Neue", sans-serif;
 }
 
+/* Vertical margins only. The side margins belong to the *row*, not the field,
+   so the scroll viewport reaches the screen edge — which is what lets the edge
+   fade end exactly where the enamel sheen reaches its own edge stop, and what
+   lets a scrolled compartment run off the screen rather than stopping 40px
+   short of it. */
 .lb-field {
-    padding: 24px 40px 28px 40px;
+    padding: 24px 0 28px 0;
 }
 
+/* The field's side margins, carried by the row so they scroll with it: the
+   first compartment starts 40px in, and the last one keeps 40px after it when
+   the row is scrolled to the end. */
 .lb-field__row {
-    /* Between compartments. */
-    margin: 0;
+    padding: 0 40px;
 }
 
 /* The edge the row runs out under, at whichever side it continues past.
@@ -188,6 +195,8 @@ window.lb-launcher {
 
 /* The yellow chevron chip at the edge the row continues past. */
 .lb-more {
+    /* Held off the screen edge by hand now that the overlay reaches it. */
+    margin: 0 20px;
     background-color: #FFD166;
     /* The GTK theme gives a button its own `background-image` gradient, which
        paints straight over a `background-color` and left this chip white. Any
