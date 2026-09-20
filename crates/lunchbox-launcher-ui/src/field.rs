@@ -1,18 +1,25 @@
 //! The field: the row of compartments the child actually looks at.
 //!
-//! Replaces the flat `FlowBox` grid on the home screen. (`grid.rs` keeps the
-//! flow box, because administrator mode's app picker is a searchable list of
-//! everything installed, which is a different problem and deliberately not
-//! branded as the child's tin.)
+//! Also what administrator mode's application picker is made of, handed a
+//! single synthetic category holding everything installed — so the sunk wells,
+//! the selected cell, the scrolling and its fades are the same code in both
+//! places rather than two things kept in step.
 //!
-//! Two rules from the branding drive the whole of this file:
+//! Two rules drive the whole of this file:
 //!
 //! 1. **Never scroll vertically.** Categories are columns; a category with more
 //!    than three members grows *wider*, and if the row overflows, the row
 //!    scrolls sideways.
-//! 2. **Exactly one item is focused whenever the field is showing**, and a
-//!    locked item can be focused but not pressed — being able to reach it is
-//!    how the child reads the badge that says what would unlock it.
+//! 2. **At most one item is selected, and not until something has selected
+//!    it.** The launcher comes up with no selection at all and wakes on the
+//!    first direction press, hover or tap (#208 review); a tap on empty space
+//!    puts it away again. A locked item can be selected but not pressed —
+//!    being able to reach it is how the child reads the badge that says what
+//!    would unlock it.
+//!
+//! The branding asks for exactly one item focused at all times, which is right
+//! for a D-pad and wrong for a touchscreen: there is no cursor there to explain
+//! a standing highlight, and it claims a choice nobody has made.
 
 use gtk4::glib;
 use gtk4::prelude::*;

@@ -468,6 +468,36 @@ category whose only launchable activity sits at the end. The chevron step was
 wrong too, and reported from the device: it moved one *item*, where a chevron
 means a screenful. It now moves a page less one item of overlap.
 
+## Review, third round
+
+Three small ones, and the smallest was the most interesting.
+
+**A clock face on the compartment floor.** The concept images set a little
+analog clock before "Until 6:00 PM" and it had simply been missed. Unicode
+gives twenty-four faces — twelve on the hour from U+1F550, twelve on the half
+hour from U+1F55C — so the glyph is drawn at the hour it is talking about
+rather than being one fixed picture. That is the whole reason it earns its
+place: a child who cannot yet read "6:00 PM" can still see where the hand
+points. Rounding is *down*, never to nearest, because a face showing half past
+with twenty-nine minutes still to go would say the time is later than it is.
+
+**The line height belonged in the tokens.** It was a constant in `item.rs`
+carrying the value 1.1 with a comment saying the design file specifies 1.1 —
+which is the same duplication the second round removed everywhere else, left
+behind because it reaches Pango rather than the stylesheet. `build.rs` now
+emits `type.*.lineHeight` too (kebab-cased on the way through, since the design
+file writes its fields the way JSON does and everything downstream writes them
+the way CSS does).
+
+**A module doc that had gone stale.** `field.rs` still described `grid.rs`,
+deleted two rounds earlier, and still stated the brief's "exactly one item is
+focused at all times" as the rule — which the round before had deliberately
+reversed. Both fixed, and the reversal is now written down where someone
+reading the file will meet it.
+
+Worth naming the pattern: of the three, two were comments that had quietly
+stopped being true. Prose does not fail a build.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here

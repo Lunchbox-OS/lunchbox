@@ -18,18 +18,6 @@ use crate::theme;
 /// How long the press animation runs before the launch actually goes out.
 const PRESS_MS: u64 = 120;
 
-/// Leading on an activity's name, as a multiple of the type size.
-///
-/// Baloo 2 asks for about 1.55 of its own accord — it is a display face with
-/// room for tall Devanagari matras it is not being asked to set here — and two
-/// lines of a wrapped activity name at that spacing drift apart badly. The
-/// branding specifies 1.1 for item type (`tokens.json`, `type.item`), which is
-/// what this is.
-///
-/// GTK4 CSS has no `line-height`, so it has to be a Pango attribute on the
-/// label rather than a rule in the stylesheet.
-const NAME_LINE_HEIGHT: f64 = 1.1;
-
 /// The leading for an activity's name at `scale`, as a Pango attribute list.
 ///
 /// Absolute rather than `AttrFloat::new_line_height`'s factor: the factor form
@@ -38,7 +26,14 @@ const NAME_LINE_HEIGHT: f64 = 1.1;
 /// be computed from the scaled type size, which is why this takes `scale` and
 /// why `theme::ITEM_FONT_PX` exists.
 fn name_leading(scale: f64) -> gtk4::pango::AttrList {
-    let px = theme::ITEM_FONT_PX as f64 * scale * NAME_LINE_HEIGHT;
+    // `type.item.lineHeight` from the design file. Baloo 2 asks for about
+    // 1.55 of its own accord — it is a display face with room for tall
+    // Devanagari matras it is not being asked to set here — and two lines of a
+    // wrapped name at that spacing drift apart badly.
+    //
+    // It reaches Pango rather than the stylesheet because GTK4 CSS has no
+    // `line-height`; it is the same token either way.
+    let px = theme::ITEM_FONT_PX as f64 * scale * theme::tokens::ITEM_LINE_HEIGHT;
     let attrs = gtk4::pango::AttrList::new();
     attrs.insert(gtk4::pango::AttrInt::new_line_height_absolute(
         (px * gtk4::pango::SCALE as f64).round() as i32,

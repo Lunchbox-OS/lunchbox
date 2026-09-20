@@ -74,9 +74,11 @@ fn main() {
         .and_then(|t| t.as_object())
         .expect("tokens.json has no `type` table");
     for (name, body) in type_table {
-        for field in ["size", "weight"] {
+        for field in ["size", "weight", "lineHeight"] {
             if let Some(n) = body.get(field).and_then(|v| v.as_f64()) {
-                css.insert(format!("type-{name}-{field}"), trim_float(n));
+                // `lineHeight` in the design file, `line-height` everywhere a
+                // stylesheet or a key is written.
+                css.insert(format!("type-{name}-{}", kebab(field)), trim_float(n));
             }
         }
     }
@@ -133,9 +135,17 @@ fn main() {
         writeln!(out, "    pub const {name}: i32 = {};", v as i64).unwrap();
     }
 
-    let keyline: f64 = css["stroke-keyline"].parse().unwrap();
-    writeln!(out, "    /// `stroke-keyline` from tokens.json.").unwrap();
-    writeln!(out, "    pub const KEYLINE: f64 = {keyline:?};").unwrap();
+    for (name, key) in [
+        ("KEYLINE", "stroke-keyline"),
+        ("ITEM_LINE_HEIGHT", "type-item-line-height"),
+        ("LOCKED_OPACITY", "opacity-locked"),
+    ] {
+        let v: f64 = css[key]
+            .parse()
+            .unwrap_or_else(|_| panic!("{key} is not a number"));
+        writeln!(out, "    /// `{key}` from tokens.json.").unwrap();
+        writeln!(out, "    pub const {name}: f64 = {v:?};").unwrap();
+    }
 
     // ---- the stylesheet's substitution table -----------------------------
     writeln!(
@@ -152,6 +162,22 @@ fn main() {
 
     let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("tokens.rs");
     std::fs::write(&dest, out).expect("cannot write the generated tokens");
+}
+
+/// `lineHeight` -> `line-height`: the design file writes its field names the
+/// way JSON usually does, and everything downstream writes them the way CSS
+/// does.
+fn kebab(field: &str) -> String {
+    let mut out = String::with_capacity(field.len() + 2);
+    for c in field.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('-');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `4.0` prints as `4`, so a size written as an integer stays one in the CSS.

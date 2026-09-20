@@ -193,7 +193,35 @@ fn item_badge(
 fn schedule_line(group: &GroupView) -> Option<String> {
     group
         .window_closes_at
-        .map(|closes| format!("Until {}", format_clock(closes)))
+        .map(|closes| format!("{} Until {}", clock_face(closes), format_clock(closes)))
+}
+
+/// The Unicode clock face nearest the given time, rounding *down*.
+///
+/// The concept images set a little analog clock before the floor's text, and
+/// the face is drawn at the hour it is talking about rather than being one
+/// fixed glyph — which is the whole reason it is worth having: a child who
+/// cannot yet read "6:00 PM" can still see where the hand points.
+///
+/// Unicode gives twenty-four of these: twelve on the hour from U+1F550, and
+/// twelve on the half hour from U+1F55C. Rounding down rather than to nearest
+/// keeps the picture honest — a face showing half past with twenty-nine
+/// minutes still to go would say the time is later than it is.
+fn clock_face(at: chrono::DateTime<chrono::Local>) -> char {
+    use chrono::Timelike;
+
+    // 0 becomes 12: the faces are labelled the way a clock is, not the way a
+    // 24-hour clock counts.
+    let hour = match at.hour() % 12 {
+        0 => 12,
+        h => h,
+    };
+    let base: u32 = if at.minute() < 30 {
+        0x1F550 // CLOCK FACE ONE OCLOCK
+    } else {
+        0x1F55C // CLOCK FACE ONE-THIRTY
+    };
+    char::from_u32(base + hour - 1).unwrap_or('\u{1F550}')
 }
 
 /// Break a category's members into stacks of `ROWS_PER_STACK`, in config
@@ -391,7 +419,50 @@ mod tests {
                 .with_ymd_and_hms(2026, 9, 19, 18, 0, 0)
                 .unwrap(),
         );
-        assert_eq!(schedule_line(&g), Some("Until 6:00 PM".to_string()));
+        assert_eq!(
+            schedule_line(&g),
+            Some("\u{1F555} Until 6:00 PM".to_string())
+        );
+    }
+
+    /// The face is drawn at the hour it is talking about, not one fixed glyph.
+    #[test]
+    fn the_clock_face_points_at_the_hour() {
+        let at = |h, m| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 9, 19, h, m, 0)
+                .unwrap()
+        };
+        // U+1F550 is one o'clock, so six o'clock is five along.
+        assert_eq!(clock_face(at(18, 0)), '\u{1F555}');
+        assert_eq!(clock_face(at(6, 0)), '\u{1F555}');
+        assert_eq!(clock_face(at(13, 0)), '\u{1F550}');
+    }
+
+    /// Rounding down, always.
+    #[test]
+    fn the_clock_face_rounds_down() {
+        let at = |h, m| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 9, 19, h, m, 0)
+                .unwrap()
+        };
+        assert_eq!(clock_face(at(18, 29)), '\u{1F555}', "still six o'clock");
+        assert_eq!(clock_face(at(18, 30)), '\u{1F561}', "half past six");
+        assert_eq!(clock_face(at(18, 59)), '\u{1F561}', "still half past six");
+    }
+
+    /// Midnight and noon are twelve, not zero.
+    #[test]
+    fn the_clock_face_knows_there_is_no_zero_oclock() {
+        let at = |h, m| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 9, 19, h, m, 0)
+                .unwrap()
+        };
+        assert_eq!(clock_face(at(0, 0)), '\u{1F55B}', "twelve o'clock");
+        assert_eq!(clock_face(at(12, 0)), '\u{1F55B}');
+        assert_eq!(clock_face(at(0, 30)), '\u{1F567}', "twelve-thirty");
     }
 
     #[test]
