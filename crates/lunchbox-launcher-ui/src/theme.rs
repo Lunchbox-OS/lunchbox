@@ -404,6 +404,18 @@ window.lb-launcher {
 
 .admin-picker { padding: 32px 48px; }
 
+/* The picker's items carry the selected look themselves (see `grid.rs`), so
+   the flow box must not also paint the theme's — one selection, drawn once,
+   in the branding's colours rather than the distribution's. */
+.admin-picker flowboxchild,
+.admin-picker flowboxchild:selected {
+    background: none;
+    background-color: transparent;
+    background-image: none;
+    border-radius: 18px;
+    outline: none;
+}
+
 .admin-search {
     font-size: 20px;
     padding: 10px 14px;

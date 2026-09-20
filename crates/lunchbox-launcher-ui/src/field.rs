@@ -32,8 +32,9 @@ use crate::theme;
 const UNGROUPED_LABEL: &str = "Everything else";
 
 /// The class that draws the selected cell. See theme.rs for why the launcher
-/// tracks this itself instead of leaning on `:focus`.
-const SELECTED_CLASS: &str = "lb-item--selected";
+/// tracks this itself instead of leaning on `:focus`. Shared with `grid.rs`,
+/// which puts it on whatever administrator mode's picker has selected.
+pub const SELECTED_CLASS: &str = "lb-item--selected";
 
 /// One navigable column of items, and the compartment it sits in.
 pub struct Stack {

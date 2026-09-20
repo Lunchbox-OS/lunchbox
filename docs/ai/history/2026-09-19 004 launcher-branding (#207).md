@@ -446,6 +446,30 @@ categories carry the earn pill and a compartment header is not selectable, but
 it is reachable from any config that names an entry rather than its group as a
 token source.
 
+## What this does to administrator mode
+
+The picker (#154) shares the item widget and the stylesheet with the child's
+field, so most of this reached it without being aimed at it: the enamel ground,
+the branded search bar, ink keylines on the `.desktop` icons, Baloo 2 names.
+Its flow box is deliberately kept — a searchable list of every application on
+the host is a different problem from a tin with sections.
+
+One thing it *lost*, and it took entering the mode to see. The selected look
+moved from `:focus`/`:hover` CSS onto a class the field applies as its cursor
+moves, and the picker has no cursor of its own — so it fell through to the
+**theme's** selection colour, which on Ubuntu is orange, on a cream-and-enamel
+palette. `grid.rs` now follows `GtkFlowBox`'s own selection and puts the same
+class on, and `.admin-picker flowboxchild` is neutralised so the theme does not
+paint underneath it. One selection, drawn once, in the branding's colours.
+
+One thing it gained. `setup_keyboard_input` used to capture the arrows, Return
+and space at the *window*, in the capture phase, and hand them to the child's
+grid whatever was on screen — so in administrator mode they reached neither the
+search box nor the picker, and simply did nothing. It now proceeds unless the
+state is `Idle`, so those keys go to whatever holds focus. That is a reading of
+the code, not a measurement: the harness would not deliver the keys to confirm
+it, the same way it would not deliver `Return` to confirm a launch.
+
 ### Driving the launcher when the harness will not
 
 Neither the pointer nor the keyboard is dependable here. The pointer never

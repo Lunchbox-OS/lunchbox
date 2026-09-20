@@ -66,6 +66,15 @@ mod imp {
             self.flow_box.set_valign(gtk4::Align::Start);
             self.flow_box.set_hexpand(true);
 
+            // Follow the flow box's own selection, however it changes —
+            // keyboard, click, or `select_first` after a search.
+            let obj_weak = obj.downgrade();
+            self.flow_box.connect_selected_children_changed(move |_| {
+                if let Some(obj) = obj_weak.upgrade() {
+                    obj.mark_selection();
+                }
+            });
+
             // Unlike the child's field, this one may scroll vertically: there
             // is no bound on how many applications are installed.
             let scrolled = gtk4::ScrolledWindow::new();
@@ -137,6 +146,32 @@ impl LauncherGrid {
         let imp = self.imp();
         if let Some(child) = imp.flow_box.child_at_index(0) {
             imp.flow_box.select_child(&child);
+        }
+        self.mark_selection();
+    }
+
+    /// Put the branding's selected look on whichever item the flow box has
+    /// selected.
+    ///
+    /// The field manages this class itself as the cursor moves; the picker has
+    /// no cursor of its own, so it follows `GtkFlowBox`'s selection instead.
+    /// Without it the picker falls back to the *theme's* selection colour,
+    /// which is whatever the distribution picked — orange, on Ubuntu — against
+    /// a cream-and-enamel palette.
+    fn mark_selection(&self) {
+        let imp = self.imp();
+        let selected: Vec<i32> = imp
+            .flow_box
+            .selected_children()
+            .iter()
+            .map(|c| c.index())
+            .collect();
+        for (i, item) in imp.items.borrow().iter().enumerate() {
+            if selected.contains(&(i as i32)) {
+                item.add_css_class(crate::field::SELECTED_CLASS);
+            } else {
+                item.remove_css_class(crate::field::SELECTED_CLASS);
+            }
         }
     }
 }
