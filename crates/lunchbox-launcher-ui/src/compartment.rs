@@ -43,6 +43,14 @@ pub fn build(
     // more than three members (§3 of the brief).
     well.set_valign(gtk4::Align::Fill);
     well.set_vexpand(true);
+    // Explicitly *not* horizontally expanding. GTK computes expansion from a
+    // widget's children unless the widget states its own, and the header's name
+    // label expands (to push the badge to the far end). Left to propagate, that
+    // reaches the row and every compartment stretches to fill the viewport —
+    // which would make a category's width depend on how much screen is spare
+    // rather than on how many stacks it holds. Setting it here stops the
+    // propagation without stopping the header from doing its job.
+    well.set_hexpand(false);
 
     // ------------------------------------------------------------- header
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(10, scale));
@@ -51,11 +59,22 @@ pub fn build(
     let name = gtk4::Label::new(Some(label));
     name.add_css_class("lb-compartment__name");
     name.set_xalign(0.0);
+    // The name takes the slack, which pushes the badge to the far end of the
+    // header instead of leaving it tucked against the name.
+    //
+    // A deliberate departure from the mockup, which sets the badge immediately
+    // after the category name. Across a row of compartments of different widths
+    // that puts every badge at a different offset; at the end they line up with
+    // each compartment's right edge, and the eye can run down them.
+    name.set_hexpand(true);
+    name.set_halign(gtk4::Align::Start);
     header.append(&name);
 
     let category = group.and_then(category_badge);
     if let Some(badge) = &category {
-        header.append(&badge.widget(scale));
+        let badge = badge.widget(scale);
+        badge.set_halign(gtk4::Align::End);
+        header.append(&badge);
     }
     well.append(&header);
 
