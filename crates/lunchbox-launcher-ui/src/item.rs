@@ -55,10 +55,6 @@ const NAME_MAX_CHARS: i32 = 18;
 /// See `set_entry` for why it is reserved rather than measured.
 const NAME_TWO_LINES: i32 = 40;
 
-/// Height reserved for an item's badge, whether or not it has one. Enough for
-/// the pill itself — 14px type inside a 3px outline — and no more.
-const BADGE_SLOT: i32 = 26;
-
 /// Whether an activity the policy has switched off should still be drawn.
 ///
 /// The branding's rule is that locked things stay visible at 50 % with their
@@ -179,7 +175,23 @@ mod imp {
             content.set_halign(gtk4::Align::Center);
             content.set_valign(gtk4::Align::Center);
 
-            content.append(&self.art);
+            // The badge rides the icon's top-right corner, the way a
+            // notification count does, instead of taking a row of its own
+            // under the name. Most activities have no badge at all, so a
+            // reserved row spent the height on nothing for all of them —
+            // and the reservation had to stay whether or not it was used, or
+            // a badged item pushed its neighbours out of line.
+            //
+            // Deliberately not clipped to the icon: a `10/30` pill is a little
+            // wider than the 78px art slot, and the item has 41px of slack
+            // each side plus a 16px column gap, so it has room to hang over
+            // without reaching the next item.
+            let art_overlay = gtk4::Overlay::new();
+            art_overlay.set_child(Some(&self.art));
+            self.badge_slot.set_halign(gtk4::Align::End);
+            self.badge_slot.set_valign(gtk4::Align::Start);
+            art_overlay.add_overlay(&self.badge_slot);
+            content.append(&art_overlay);
 
             self.label.set_wrap(true);
             self.label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
@@ -200,8 +212,6 @@ mod imp {
             self.label.set_halign(gtk4::Align::Center);
             self.label.add_css_class("lb-item__name");
             content.append(&self.label);
-
-            content.append(&self.badge_slot);
 
             obj.set_child(Some(&content));
             obj.add_css_class("lb-item");
@@ -273,12 +283,8 @@ impl LauncherItem {
             }
         }
 
-        // Reserved whether or not there is a badge, for the same reason the
-        // name is: a badge on one item must not push the item below it out of
-        // line with the stack beside it. Art + name + badge then comes to
-        // exactly `ITEM_H`.
-        imp.badge_slot
-            .set_size_request(-1, theme::px(BADGE_SLOT, scale));
+        // No reservation needed now that it floats over the icon: an item
+        // with a badge is exactly as tall as one without.
         imp.badge_slot.set_child(badge.map(|b| b.widget(scale)));
 
         *imp.entry.borrow_mut() = Some(entry);
@@ -581,10 +587,6 @@ mod shake_imp {
     }
 
     impl WidgetImpl for ShakeBox {
-        /// An empty slot still measures as whatever height was requested of
-        /// it: GTK only applies a size request as a *floor* on what the widget
-        /// asks for, so a childless slot reporting 0 would collapse and take
-        /// the alignment with it.
         fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             match self.child.borrow().as_ref() {
                 Some(child) => child.measure(orientation, for_size),

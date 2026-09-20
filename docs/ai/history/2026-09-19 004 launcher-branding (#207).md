@@ -306,6 +306,38 @@ With it, every badge in the vocabulary is on screen at once — earn on Books an
 Learn, a `25m` bank and a `0/10` need on two entries in Play, a `30m` bank on
 Watch's header, and nothing on Listen, which is ungated.
 
+## Two places the implementation departs from the mockup
+
+Both asked for after seeing it running, both deliberate, and recorded here
+because the reference images in the issue still show the older arrangement.
+
+**A category's badge sits at the end of its header**, not tucked against the
+name. Across a row of compartments of different widths, name-adjacent badges
+land at a different offset in each one; at the end they line up with each
+compartment's own right edge.
+
+The catch was in the layout, not the look: the name label takes the slack to
+push the badge over, and GTK computes a widget's expansion from its children
+unless the widget states its own — so that propagated out to the row and every
+compartment stretched to fill the viewport. A category's width would then have
+come from how much screen was spare rather than from how many stacks it holds,
+which is the one thing §3 of the brief fixes. It only showed on a wide output;
+at 1280 the row overflows and there is no slack to reveal it. The compartment
+now states `set_hexpand(false)` for itself.
+
+**An activity's badge rides the icon's top-right corner**, the way a
+notification count does, rather than taking a row under the name. The brief's
+layout gives every item a badge row whether or not it has a badge — and it has
+to, since a reservation that appears only on badged items would push their
+neighbours out of line. Most activities have no badge, so that row was height
+spent on nothing for nearly all of them. Overlaid, the reservation disappears
+and the cell drops from 150px to 132px.
+
+The badge is deliberately not clipped to the icon: a `10/30` pill is slightly
+wider than the 78px art slot, and the item has 41px of slack each side plus the
+16px column gap, so it has room to hang over the corner without reaching the
+next item.
+
 ### Talking to the daemon by hand
 
 Worth writing down, because the first attempt failed silently and looked like a

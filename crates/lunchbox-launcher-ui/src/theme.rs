@@ -50,8 +50,12 @@ pub const DESIGN_HEIGHT: f64 = 664.0;
 /// Items in a stack before the category spills into a second stack beside it.
 pub const ROWS_PER_STACK: usize = 3;
 /// Item cell, unscaled.
+///
+/// The height is the brief's 150 less the row the badge used to occupy under
+/// the name: the badge now rides the icon, so every item is the same height
+/// whether or not it has one, and the space goes back to the field.
 pub const ITEM_W: i32 = 160;
-pub const ITEM_H: i32 = 150;
+pub const ITEM_H: i32 = 132;
 /// The art slot inside an item, and the icon drawn in the middle of it.
 pub const ART_SLOT: i32 = 78;
 pub const ICON_PX: i32 = 64;
