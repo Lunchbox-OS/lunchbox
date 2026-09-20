@@ -252,8 +252,20 @@ window.lb-launcher {
 }
 
 /* Locked: still visible, still focusable, still wearing its badge — that badge
-   is the whole point, because it says what would unlock it. */
-.lb-item.lb-item--locked {
+   is the whole point, because it says what would unlock it.
+
+   The 50% is on the *activity* — its icon and its name — and deliberately not
+   on the cell. Dimming the whole item took the selection down with it: the
+   yellow fill washed out to pale butter, the ink outline went grey, and moving
+   the D-pad across a compartment of locked activities gave almost no "you are
+   here". Focus has to read the same whether or not the thing under it can be
+   launched.
+
+   The badge stays at full strength for the same reason it is drawn at all: it
+   is the one part of a locked item worth reading, and the branding's own wording
+   is that a locked item *keeps* its badge. */
+.lb-item.lb-item--locked .lb-item__art,
+.lb-item.lb-item--locked .lb-item__name {
     opacity: 0.50;
 }
 
@@ -277,6 +289,17 @@ window.lb-launcher {
 .lb-badge.lb-badge--earn {
     background-color: #FFD166;
     color: #1C1B18;
+}
+
+/* The one place two yellows meet. A selected cell is filled yellow, so an earn
+   pill on it keeps its ink outline and its coin but loses its body — it reads
+   as a hole punched in the selection rather than a badge sitting on it. On
+   paper the pill stays a pill.
+
+   Only the earn pill needs this: bank is deep teal and need is putty, both of
+   which stand off yellow by themselves. */
+.lb-item.lb-item--selected .lb-badge.lb-badge--earn {
+    background-color: #FAF9F5;
 }
 
 /* "This much is banked and ready to spend." */
@@ -389,9 +412,14 @@ mod tests {
     #[test]
     fn the_item_type_size_matches_the_stylesheet() {
         let css = stylesheet(1.0);
+        // The block opened by the bare selector on its own line, not any rule
+        // that merely mentions the class — the locked state has a compound
+        // selector ending in `.lb-item__name` and would otherwise be matched
+        // here instead.
         let rule = css
-            .split(".lb-item__name")
+            .split("\n.lb-item__name {")
             .nth(1)
+            .and_then(|rest| rest.split('}').next())
             .expect("the item name rule is in the stylesheet");
         assert!(
             rule.contains(&format!("font-size: {ITEM_FONT_PX}px")),

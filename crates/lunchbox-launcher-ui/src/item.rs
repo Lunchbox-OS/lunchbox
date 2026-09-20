@@ -187,6 +187,9 @@ mod imp {
             // each side plus a 16px column gap, so it has room to hang over
             // without reaching the next item.
             let art_overlay = gtk4::Overlay::new();
+            // Named so the locked state can dim the icon without dimming the
+            // badge that floats over it, or the selection behind it.
+            self.art.add_css_class("lb-item__art");
             art_overlay.set_child(Some(&self.art));
             self.badge_slot.set_halign(gtk4::Align::End);
             self.badge_slot.set_valign(gtk4::Align::Start);

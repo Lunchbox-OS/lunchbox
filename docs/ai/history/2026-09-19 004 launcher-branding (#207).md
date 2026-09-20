@@ -338,6 +338,49 @@ wider than the 78px art slot, and the item has 41px of slack each side plus the
 16px column gap, so it has room to hang over the corner without reaching the
 next item.
 
+## What "selected" looked like, and two things it turned up
+
+Looking at a *badged* item while selected — which nothing had done until it was
+asked for — found two contrast faults.
+
+**A locked item's selection was washed out.** `opacity: 0.5` sat on the whole
+cell, so it took the selection down with it: the yellow fill became pale butter,
+the 4px ink outline went mid-grey, and the badge faded with everything else.
+Moving the D-pad across a compartment of locked activities gave almost no "you
+are here" — and the brief's own checklist says focus is always visible.
+
+The 50% now applies to the *activity* — its icon and its name — and not to the
+cell. Focus reads identically whether or not the thing under it can be launched,
+and the badge stays at full strength, which is what the branding means by a
+locked item *keeping* its badge: it is the one part worth reading there.
+
+**A yellow badge on a yellow selection dissolved.** The earn pill and the
+selection fill are the same `#FFD166`, so a selected item wearing one kept its
+ink outline and its coin but lost its body: a hole punched in the selection
+rather than a badge on it. Selected, the earn pill's body is now cream.
+
+Only that pill needs it — bank is deep teal, need is putty, and both stand off
+yellow by themselves. The case is not reachable from the example config, where
+categories carry the earn pill and a compartment header is not selectable, but
+it is reachable from any config that names an entry rather than its group as a
+token source.
+
+### Driving the launcher when the harness will not
+
+Neither the pointer nor the keyboard is dependable here. The pointer never
+reaches the app at all — `headless.sh` documents that its synthetic pointer does
+not fire GTK `clicked`, and motion does not arrive either, so hover cannot
+select. The keyboard arrives intermittently: a poll that presses a key and
+diffs two screenshots finds a live window, but keys are still dropped inside it,
+and `Return` never arrives at all.
+
+What worked instead was making the state deterministic and taking the keyboard
+out of it: a scratch config where the item to be inspected *is* the launcher's
+initial selection. The focus rule is "previous, then last launched, then the
+first launchable item, then simply the first" — so a config in which nothing is
+launchable selects its first item, and one where exactly the intended item is
+launchable selects that. Two boots, no keypresses, both states captured.
+
 ### Talking to the daemon by hand
 
 Worth writing down, because the first attempt failed silently and looked like a
