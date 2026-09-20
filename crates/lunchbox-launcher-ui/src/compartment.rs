@@ -19,10 +19,12 @@ use crate::theme;
 pub struct Compartment {
     /// The well itself, to put in the row.
     pub widget: gtk4::Widget,
-    /// The name and badge, in the bin that slides them along so they stay on
-    /// screen while a wide compartment scrolls past (#208 review). The field
-    /// drives it; the compartment only has to hand it over.
-    pub header: crate::offset::OffsetBin,
+    /// The name, in the bin that slides it along so it stays on screen while a
+    /// wide compartment scrolls past (#208 review). The field drives it.
+    pub name: crate::offset::OffsetBin,
+    /// The category's badge, if it has one, in a bin of its own — it anchors
+    /// to the opposite edge from the name.
+    pub badge: Option<crate::offset::OffsetBin>,
     /// The items, grouped into the stacks they were laid out in. The field's
     /// D-pad model is built on exactly this shape: left/right move between
     /// stacks, up/down within one.
@@ -59,32 +61,35 @@ pub fn build(
     // ------------------------------------------------------------- header
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(10, scale));
     header.add_css_class("lb-compartment__header");
-    // Its own row, so sliding the header sideways cannot drag the stacks with
-    // it — and so the name keeps the compartment's left padding as its origin.
-    let header_bin = crate::offset::OffsetBin::around(&header);
-    header_bin.set_halign(gtk4::Align::Fill);
 
     let name = gtk4::Label::new(Some(label));
     name.add_css_class("lb-compartment__name");
     name.set_xalign(0.0);
-    // The name takes the slack, which pushes the badge to the far end of the
-    // header instead of leaving it tucked against the name.
+    // Each half of the header slides independently, because they anchor to
+    // opposite edges when the compartment is wider than the screen: the name
+    // holds the left of what is visible, the badge the right. One bin around
+    // the pair could only move them together, which would carry the badge off
+    // the compartment's far end.
+    let name_bin = crate::offset::OffsetBin::around(&name);
+    // The name's bin takes the slack, which pushes the badge to the far end of
+    // the header instead of leaving it tucked against the name.
     //
     // A deliberate departure from the mockup, which sets the badge immediately
     // after the category name. Across a row of compartments of different widths
     // that puts every badge at a different offset; at the end they line up with
     // each compartment's right edge, and the eye can run down them.
-    name.set_hexpand(true);
-    name.set_halign(gtk4::Align::Start);
-    header.append(&name);
+    name_bin.set_hexpand(true);
+    name_bin.set_halign(gtk4::Align::Fill);
+    header.append(&name_bin);
 
     let category = group.and_then(category_badge);
-    if let Some(badge) = &category {
-        let badge = badge.widget(scale);
-        badge.set_halign(gtk4::Align::End);
-        header.append(&badge);
-    }
-    well.append(&header_bin);
+    let badge_bin = category.as_ref().map(|badge| {
+        let bin = crate::offset::OffsetBin::around(&badge.widget(scale));
+        bin.set_halign(gtk4::Align::End);
+        header.append(&bin);
+        bin
+    });
+    well.append(&header);
 
     // -------------------------------------------------------------- items
     let stacks = split_into_stacks(entries);
@@ -128,7 +133,8 @@ pub fn build(
 
     Compartment {
         widget: well.upcast(),
-        header: header_bin,
+        name: name_bin,
+        badge: badge_bin,
         stacks: built,
     }
 }

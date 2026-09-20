@@ -37,6 +37,10 @@ const CHIP_SLIDE_MS: u32 = 160;
 /// How long the row takes to ease from one scroll position to the next.
 const SCROLL_MS: u64 = 220;
 
+/// A compartment's own border and padding: how close its header may sit to
+/// either of its ends.
+const COMPARTMENT_EDGE: i32 = 20;
+
 /// How far the selection is kept from either edge when scrolling to it.
 /// Matches the width of `.lb-field__fade`, so the selected item is never the
 /// thing the fade is dissolving.
@@ -59,7 +63,8 @@ pub struct Stack {
 /// A compartment and the header that has to stay on screen with it.
 pub struct Header {
     well: gtk4::Widget,
-    bin: crate::offset::OffsetBin,
+    name: crate::offset::OffsetBin,
+    badge: Option<crate::offset::OffsetBin>,
 }
 
 /// Decide the categories and their members, in the order they are drawn.
@@ -113,38 +118,47 @@ fn categorise<'a>(
     out
 }
 
-/// How far to slide a compartment's header so it stays on screen.
+/// How far a chevron press moves the row.
 ///
-/// Pure arithmetic, separated from the widgets because it is the part with the
-/// edge cases — and because the headless harness cannot scroll a row, so this
-/// is the half that can be checked at all.
+/// Most of a screenful, less one item kept as overlap so there is something in
+/// common between the view you left and the one you arrive at. An earlier cut
+/// moved a single item width, which on a touchscreen reads as the press not
+/// having worked: a chevron is a "next page" control, not a "next thing" one.
 ///
-/// * `view_left` — where the viewport starts, in row coordinates.
-/// * `inset` — how far clear of the edge the header should sit, so it is not
-///   dissolving under the fade.
-/// * `well_left` / `well_width` — the compartment, in the same coordinates.
-/// * `header_width` — how wide the thing being slid is.
-fn header_offset(
-    view_left: f64,
-    inset: f64,
-    well_left: f64,
-    well_width: f64,
-    header_width: f64,
-) -> f64 {
-    // How much of this compartment is off the left of the screen. Nothing
-    // to do until the edge actually cuts into it — and the inset must not
-    // apply before then, or a compartment sitting innocently near the left
-    // margin would have its title shoved sideways for no reason. (The inset
-    // exists to clear the left fade, and that fade only appears once the row
-    // is scrolled.)
-    let cut = view_left - well_left;
-    if cut <= 0.0 {
-        return 0.0;
+/// Falls back to half a screen on the degenerate viewport where one item is
+/// wider than the page.
+fn scroll_step(page: f64, scale: f64) -> f64 {
+    let overlap = theme::px(theme::ITEM_W, scale) as f64;
+    if page <= overlap {
+        return (page * 0.5).max(1.0);
     }
-    // Never past the compartment's own trailing edge: a title that outran its
-    // well would read as the next category's.
-    let room = (well_width - header_width - inset).max(0.0);
-    (cut + inset).min(room)
+    page - overlap
+}
+
+/// Slide something rightwards so it starts no further left than `min_x`.
+///
+/// Used for a category's name, which holds the left edge of whatever part of
+/// its compartment is on screen. It never moves left of where it was laid out,
+/// and never so far right that it would pass `max_right`.
+///
+/// All coordinates are the row's, which is also what the scroll adjustment
+/// speaks, so no conversion is needed anywhere.
+fn leading_offset(min_x: f64, natural_x: f64, width: f64, max_right: f64) -> f64 {
+    let wanted = min_x.max(natural_x);
+    let capped = wanted.min((max_right - width).max(natural_x));
+    capped - natural_x
+}
+
+/// Slide something leftwards so it ends no further right than `max_x`.
+///
+/// The mirror of `leading_offset`, for a category's badge: it sits at the far
+/// end of the header, so it holds the *right* edge of what is visible. Without
+/// this it would be off the screen for the whole time the compartment's tail
+/// was, which is exactly when its balance is worth reading.
+fn trailing_offset(max_x: f64, natural_x: f64, width: f64, min_left: f64) -> f64 {
+    let wanted = (max_x - width).min(natural_x);
+    let capped = wanted.max(min_left.min(natural_x));
+    capped - natural_x
 }
 
 mod imp {
@@ -410,7 +424,8 @@ impl LauncherField {
             imp.row.append(&built.widget);
             headers.push(Header {
                 well: built.widget.clone(),
-                bin: built.header,
+                name: built.name,
+                badge: built.badge,
             });
             for items in built.stacks {
                 stacks.push(Stack {
@@ -778,8 +793,9 @@ impl LauncherField {
     /// Push the row along when the child steers past either end.
     fn nudge(&self, dx: i32) {
         let adj = self.imp().scroller.hadjustment();
-        let step = theme::px(theme::ITEM_W, self.imp().scale.get()) as f64;
-        self.animate_scroll_to(adj.value() + step * dx as f64);
+        self.animate_scroll_to(
+            adj.value() + scroll_step(adj.page_size(), self.imp().scale.get()) * dx as f64,
+        );
     }
 
     /// Keep each compartment's name and badge on screen while the compartment
@@ -799,24 +815,56 @@ impl LauncherField {
     fn slide_headers(&self) {
         let imp = self.imp();
         let adj = imp.scroller.hadjustment();
-        let view_left = adj.value();
         let page = adj.page_size();
         if page <= 0.0 {
             return;
         }
-        // Clear of the fade, or the title dissolves into the edge it is
-        // trying to stay ahead of.
+        let view_left = adj.value();
+        let view_right = view_left + page;
+        // Clear of the fades, or a title would sit dissolving under the very
+        // edge it is trying to stay ahead of.
         let inset = theme::px(EDGE_MARGIN, imp.scale.get()) as f64;
+        // How close to its own compartment's ends the header may get: its
+        // border and padding, and nothing more. The fade inset is about the
+        // *screen* edge and has no business shrinking the room inside a
+        // compartment — using it here left a narrow category almost no travel
+        // at all, which looked exactly like the slide not working.
+        let edge = theme::px(COMPARTMENT_EDGE, imp.scale.get()) as f64;
 
         for header in imp.headers.borrow().iter() {
-            let alloc = header.well.allocation();
-            header.bin.set_offset(header_offset(
-                view_left,
-                inset,
-                alloc.x() as f64,
-                alloc.width() as f64,
-                header.bin.width() as f64,
-            ));
+            let well = header.well.allocation();
+            let well_left = well.x() as f64;
+            let well_right = well_left + well.width() as f64;
+
+            // Positions come from `translate_coordinates` rather than from the
+            // allocation, because an allocation is relative to the parent and
+            // these need to be in the row's coordinates — the same ones the
+            // adjustment counts in. Widths come from `measure`, not from the
+            // allocation either: the name's bin is stretched across the whole
+            // compartment to push the badge to the far end, so its *allocated*
+            // width is the compartment's, and clamping against that would hold
+            // every header still. (It did. That was the bug.)
+            if let Some((x, _)) = header.name.translate_coordinates(&imp.row, 0.0, 0.0) {
+                let (_, width, _, _) = header.name.measure(gtk4::Orientation::Horizontal, -1);
+                header.name.set_offset(leading_offset(
+                    view_left + inset,
+                    x,
+                    width as f64,
+                    well_right - edge,
+                ));
+            }
+
+            if let Some(badge) = &header.badge
+                && let Some((x, _)) = badge.translate_coordinates(&imp.row, 0.0, 0.0)
+            {
+                let (_, width, _, _) = badge.measure(gtk4::Orientation::Horizontal, -1);
+                badge.set_offset(trailing_offset(
+                    view_right - inset,
+                    x,
+                    width as f64,
+                    well_left + edge,
+                ));
+            }
         }
     }
 
@@ -935,37 +983,80 @@ mod tests {
             .collect()
     }
 
-    /// A compartment fully on screen keeps its header where it was drawn.
+    // The geometry these use is the real thing, measured off the running
+    // launcher: a compartment starts at 40 with 4px of border and 16px of
+    // padding, so its header content begins at 60. The first version of these
+    // tests invented a width instead, and passed while the headers stood
+    // perfectly still on a device — the formula was right and the numbers I
+    // fed it were not.
+    const INSET: f64 = 56.0;
+    const NAME_X: f64 = 60.0;
+    const NAME_W: f64 = 120.0;
+
+    /// A compartment fully on screen keeps its name where it was laid out.
     #[test]
-    fn a_visible_compartment_does_not_move_its_header() {
-        assert_eq!(header_offset(0.0, 56.0, 40.0, 400.0, 120.0), 0.0);
-        // Still nothing to do while the viewport has not reached it.
-        assert_eq!(header_offset(100.0, 56.0, 400.0, 400.0, 120.0), 0.0);
+    fn a_visible_compartment_does_not_move_its_name() {
+        assert_eq!(leading_offset(0.0 + INSET, NAME_X, NAME_W, 2984.0), 0.0);
+        // And still nothing once scrolled, while the compartment's own start
+        // is ahead of the viewport.
+        assert_eq!(leading_offset(20.0 + INSET, 400.0, NAME_W, 2984.0), 0.0);
     }
 
-    /// Once the viewport cuts into a compartment, the header follows the cut.
+    /// Once the viewport cuts into a compartment, the name follows the cut.
     #[test]
-    fn a_header_follows_the_viewport_into_its_compartment() {
-        // Viewport at 300, compartment starts at 40, inset 56: the header sits
-        // 316 into the well so it lands 56 past the screen edge.
-        assert_eq!(header_offset(300.0, 56.0, 40.0, 3000.0, 120.0), 316.0);
+    fn a_name_follows_the_viewport_into_its_compartment() {
+        // Scrolled to 500: the name sits 56 past the screen edge, which is
+        // 496 further right than where it was laid out.
+        assert_eq!(leading_offset(500.0 + INSET, NAME_X, NAME_W, 2984.0), 496.0);
     }
 
     /// And stops at its own compartment's end rather than running into the
     /// next category's.
     #[test]
-    fn a_header_stops_at_the_end_of_its_own_compartment() {
-        // A narrow well, scrolled far past: the offset is capped by the room
-        // left in it, not by how far the viewport has gone.
-        let room = 400.0 - 120.0 - 56.0;
-        assert_eq!(header_offset(5000.0, 56.0, 40.0, 400.0, 120.0), room);
+    fn a_name_stops_at_the_end_of_its_own_compartment() {
+        // A 400-wide well ending at 440, so the name may reach 384 - 120.
+        let stop = 384.0 - NAME_W;
+        assert_eq!(leading_offset(5000.0, NAME_X, NAME_W, 384.0), stop - NAME_X);
     }
 
-    /// A header as wide as its compartment has nowhere to go, and must not be
-    /// pushed backwards trying.
+    /// A name with nowhere to go must not be dragged backwards trying.
     #[test]
-    fn a_header_that_fills_its_compartment_stays_put() {
-        assert_eq!(header_offset(5000.0, 56.0, 40.0, 100.0, 120.0), 0.0);
+    fn a_name_wider_than_its_compartment_stays_put() {
+        assert_eq!(leading_offset(5000.0, NAME_X, 400.0, 384.0), 0.0);
+    }
+
+    /// The badge holds the *other* edge: it is at the far end of the header,
+    /// so it slides left to stay on screen while the compartment's tail is
+    /// still off it.
+    #[test]
+    fn a_badge_holds_the_right_of_what_is_visible() {
+        // A 3000-wide compartment, badge laid out at 2960, 1280 of viewport.
+        let offset = trailing_offset(1280.0 - INSET, 2960.0, 60.0, 96.0);
+        assert_eq!(2960.0 + offset, 1280.0 - INSET - 60.0);
+    }
+
+    /// A compartment that fits leaves its badge alone.
+    #[test]
+    fn a_visible_compartment_does_not_move_its_badge() {
+        assert_eq!(trailing_offset(1224.0, 360.0, 60.0, 96.0), 0.0);
+    }
+
+    /// And the badge never crosses its own compartment's start.
+    #[test]
+    fn a_badge_stops_at_the_start_of_its_own_compartment() {
+        let offset = trailing_offset(44.0, 360.0, 60.0, 96.0);
+        assert_eq!(360.0 + offset, 96.0);
+    }
+
+    /// A chevron press moves most of a screen, not one activity.
+    #[test]
+    fn a_chevron_moves_a_screenful() {
+        // 1280 of viewport at 1x keeps one 160px item as overlap.
+        assert_eq!(scroll_step(1280.0, 1.0), 1120.0);
+        // Scaled up, the overlap scales with everything else.
+        assert_eq!(scroll_step(1920.0, 1.5), 1920.0 - 240.0);
+        // A viewport narrower than one item still moves, and never backwards.
+        assert!(scroll_step(100.0, 1.0) > 0.0);
     }
 
     #[test]

@@ -421,18 +421,52 @@ reveals it instead of launching — launching something unseen is the worse
 failure — and nothing scrolls on boot any more, because there is no selection to
 scroll to, so the row simply starts at its beginning.
 
-### The part that could be checked
+### A test that passed while the feature did nothing
+
+The header slide shipped broken, and the tests were the reason it looked fine.
+
+The arithmetic moved out of the widget code into a pure function so it could be
+checked without a display — right instinct. But the test called it with a
+header width of 120 px, a plausible-looking number for a title, and the real
+value is nothing like that: the name's bin is stretched across the whole
+compartment so that the badge is pushed to the far end, so its *allocated* width
+is the compartment's. Feed that in and the clamp becomes
+`(well_width − (well_width − 40) − 56).max(0)`, which is zero at every scroll
+position on every compartment. The headers never moved at all, and four tests
+agreed they were fine.
+
+Two things came out of fixing it:
+
+- **Measure the content, not the box.** Widths now come from `measure`, not from
+  the allocation, and positions from `translate_coordinates` into the row's
+  coordinates — the same ones the scroll adjustment counts in — rather than from
+  an allocation that is relative to a parent.
+- **The two halves anchor to opposite edges.** The name holds the left of what
+  is visible and the badge the right, so they bracket the part of the category
+  you are looking at. One bin around the pair could only move them together,
+  which would carry a right-aligned badge off the compartment's far end. They
+  are separate bins with mirrored helpers, `leading_offset` and
+  `trailing_offset`.
+
+The tests now use geometry measured off the running launcher, and say so.
+
+There was a second clamp bug behind the first: the fade's inset was being used
+to limit travel *inside* a compartment as well as to hold the header off the
+screen edge. On a narrow category that left almost no room to move, which looks
+exactly like the slide not working. The inset is about the screen; a
+compartment's own border and padding govern the room inside it.
+
+### The rest, which could not be checked
 
 Keyboard input did not reach the launcher *at all* during this round — eight
 presses, zero handler calls, confirmed with a temporary log rather than assumed.
-So the input-driven halves are unverified here and want the device again.
+The animations and wake-on-input are unverified here and want the device.
 
-What could be done instead was to make the hard part checkable without a
-display: the header's slide is pure arithmetic over four numbers, so it moved
-out of the widget code into `header_offset` with tests. That paid immediately —
-the first version applied the fade's inset unconditionally and nudged every
-header 16 px right even when its compartment was fully visible and no fade was
-showing. The inset only belongs once the edge actually cuts in.
+The slide itself was eventually seen, by temporarily forcing the selection
+active so a rebuild would scroll, against a config holding one very wide
+category whose only launchable activity sits at the end. The chevron step was
+wrong too, and reported from the device: it moved one *item*, where a chevron
+means a screenful. It now moves a page less one item of overlap.
 
 ## Two places the implementation departs from the mockup
 
