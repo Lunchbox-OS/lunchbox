@@ -402,10 +402,18 @@ window.lb-launcher {
     color: #1C1B18;
 }
 
-.admin-picker { padding: 32px 48px; }
+/* Vertical only. The field inside spans the full width, for the same reason
+   the child's does: its edge fade has to end where the enamel sheen actually
+   reaches its edge stop, which is the screen edge and nowhere else. Inset the
+   picker and the fade paints the wrong teal against the window's, and the row
+   gets clipped short of the screen with a seam where it stops. */
+.admin-picker { padding: 32px 0 0 0; }
 
-
+/* Which leaves the search entry to hold itself off the edge — at 40px, so it
+   lines up with the first compartment rather than floating over its own
+   margin. */
 .admin-search {
+    margin: 0 40px;
     font-size: 20px;
     padding: 10px 14px;
     border-radius: 999px;

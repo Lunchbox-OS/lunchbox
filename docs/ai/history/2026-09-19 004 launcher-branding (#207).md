@@ -480,6 +480,13 @@ Two things that only showed up once the picker was a compartment:
   either way; sharing a box with the search entry it took only its natural
   height, so a one-result search sat in a well one item tall. It sets
   `vexpand` for itself now.
+- **Nor its width.** `.admin-picker` had 48px of side padding, which inset the
+  field and reproduced the seam exactly as the child's field had it: the fade
+  ended 48px short of the screen, painting the sheen's edge stop where the
+  sheen had not reached it. The padding is vertical now and the search entry
+  holds itself off the edge instead, at 40px so it lines up with the first
+  compartment. Same fix, same reason — a fade in one colour can only meet a
+  gradient where that colour actually is.
 
 The keyboard follows whichever field is on screen. Two carve-outs for the
 picker, which has a text entry the child's field does not: space is left alone,
