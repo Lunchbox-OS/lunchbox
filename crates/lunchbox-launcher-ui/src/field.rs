@@ -31,10 +31,14 @@ use crate::theme;
 /// activities into categories still gets a tin rather than an error.
 const UNGROUPED_LABEL: &str = "Everything else";
 
+/// How far the selection is kept from either edge when scrolling to it.
+/// Matches the width of `.lb-field__fade`, so the selected item is never the
+/// thing the fade is dissolving.
+const EDGE_MARGIN: i32 = 56;
+
 /// The class that draws the selected cell. See theme.rs for why the launcher
-/// tracks this itself instead of leaning on `:focus`. Shared with `grid.rs`,
-/// which puts it on whatever administrator mode's picker has selected.
-pub const SELECTED_CLASS: &str = "lb-item--selected";
+/// tracks this itself instead of leaning on `:focus`.
+const SELECTED_CLASS: &str = "lb-item--selected";
 
 /// One navigable column of items, and the compartment it sits in.
 pub struct Stack {
@@ -163,6 +167,14 @@ mod imp {
             let obj = self.obj();
             obj.set_layout_manager(Some(gtk4::BinLayout::new()));
             obj.add_css_class("lb-field");
+            // Claim the space wherever it is put. In the child's shell the
+            // field is a stack page and gets the window either way; in
+            // administrator mode's picker it shares a box with the search
+            // entry, and without this it takes only its natural height — which
+            // left a one-result search sitting in a compartment the height of
+            // one item rather than a well with room in it.
+            obj.set_hexpand(true);
+            obj.set_vexpand(true);
 
             self.row.set_valign(gtk4::Align::Fill);
             self.row.add_css_class("lb-field__row");
@@ -471,9 +483,26 @@ impl LauncherField {
         self.focus_cursor();
     }
 
-    /// Scroll so the selected item's whole compartment is on screen.
+    /// Scroll the selection into view.
+    ///
+    /// Two cases, and the second is not the child's:
+    ///
+    /// * A compartment that **fits** the viewport scrolls as a whole, aligned
+    ///   to the left margin. That is the brief's rule, and it is what keeps a
+    ///   category from being half on screen.
+    /// * A compartment **wider** than the viewport cannot be aligned to
+    ///   anything useful, so the *item* is what gets scrolled to, by the least
+    ///   amount that brings it fully into view. Administrator mode's picker is
+    ///   one compartment holding every application on the host, so this is the
+    ///   case it lives in permanently.
     fn scroll_to_cursor(&self) {
         let imp = self.imp();
+        let adj = imp.scroller.hadjustment();
+        let page = adj.page_size();
+        if page <= 0.0 {
+            return;
+        }
+
         let (s, _) = imp.cursor.get();
         let Some(well) = imp
             .stacks
@@ -485,27 +514,30 @@ impl LauncherField {
         };
 
         let alloc = well.allocation();
-        let left = alloc.x() as f64;
-        let right = left + alloc.width() as f64;
-
-        let adj = imp.scroller.hadjustment();
-        let page = adj.page_size();
-        if page <= 0.0 {
+        if (alloc.width() as f64) <= page {
+            let left = alloc.x() as f64;
+            let right = left + alloc.width() as f64;
+            if left < adj.value() || right > adj.value() + page {
+                adj.set_value(left);
+            }
             return;
         }
 
+        let Some(item) = self.focused_item() else {
+            return;
+        };
+        let Some((x, _)) = item.translate_coordinates(&imp.row, 0.0, 0.0) else {
+            return;
+        };
+        // Keep the selection clear of the fades, or the item the child is on
+        // would sit half-dissolved under one.
+        let margin = theme::px(EDGE_MARGIN, imp.scale.get()) as f64;
+        let left = x - margin;
+        let right = x + item.width() as f64 + margin;
         if left < adj.value() {
-            adj.set_value(left);
+            adj.set_value(left.max(0.0));
         } else if right > adj.value() + page {
-            // Align the left edge, per the brief — except for a compartment
-            // wider than the viewport, where doing that would push the item the
-            // child is actually on off the other side. Then show as much of the
-            // right-hand end as fits.
-            adj.set_value(if alloc.width() as f64 > page {
-                right - page
-            } else {
-                left
-            });
+            adj.set_value(right - page);
         }
     }
 

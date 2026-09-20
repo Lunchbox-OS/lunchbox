@@ -8,7 +8,6 @@ mod badge;
 mod client;
 mod compartment;
 mod field;
-mod grid;
 mod item;
 mod state;
 mod theme;

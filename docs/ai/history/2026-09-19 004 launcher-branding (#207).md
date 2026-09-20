@@ -454,13 +454,37 @@ the branded search bar, ink keylines on the `.desktop` icons, Baloo 2 names.
 Its flow box is deliberately kept — a searchable list of every application on
 the host is a different problem from a tin with sections.
 
-One thing it *lost*, and it took entering the mode to see. The selected look
-moved from `:focus`/`:hover` CSS onto a class the field applies as its cursor
-moves, and the picker has no cursor of its own — so it fell through to the
-**theme's** selection colour, which on Ubuntu is orange, on a cream-and-enamel
-palette. `grid.rs` now follows `GtkFlowBox`'s own selection and puts the same
-class on, and `.admin-picker flowboxchild` is neutralised so the theme does not
-paint underneath it. One selection, drawn once, in the branding's colours.
+One thing it *lost*, and it took entering the mode to see: the selected look
+moved onto a class the field applies as its cursor moves, and the picker had no
+cursor of its own, so it fell through to the **theme's** selection colour —
+orange, on Ubuntu, on a cream-and-enamel palette.
+
+The first fix taught the flow box to apply the same class. The better one was
+to stop having two of everything: the picker is now the *same* `LauncherField`
+the child gets, handed one synthetic category holding every installed
+application. `grid.rs` is deleted. Nothing about the colours is special-cased
+any more — the sunk well, the selected cell, the item treatment, the horizontal
+scroll and its fades all arrive because it is the same widget.
+
+Two things that only showed up once the picker was a compartment:
+
+- **`scroll_to_cursor` scrolled to the wrong end.** It aligned the selected
+  item's *compartment* to the left margin, and for a compartment wider than the
+  viewport it fell back to showing that compartment's right-hand end — so the
+  picker opened scrolled to the far right, past every application. The child's
+  field never hit it, because three stacks always fit. It now aligns the
+  compartment when the compartment fits, and otherwise scrolls the least amount
+  that brings the *item* into view, inset by the fade's width so the selection
+  is never the thing dissolving.
+- **The field did not claim its height.** As a stack page it got the window
+  either way; sharing a box with the search entry it took only its natural
+  height, so a one-result search sat in a well one item tall. It sets
+  `vexpand` for itself now.
+
+The keyboard follows whichever field is on screen. Two carve-outs for the
+picker, which has a text entry the child's field does not: space is left alone,
+because a search query can contain one, and WASD is left alone, because those
+are letters someone is typing.
 
 One thing it gained. `setup_keyboard_input` used to capture the arrows, Return
 and space at the *window*, in the capture phase, and hand them to the child's

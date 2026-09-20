@@ -15,7 +15,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::client::{CommandClient, ServiceClient};
 use crate::field::LauncherField;
-use crate::grid::LauncherGrid;
 use crate::state::{LauncherState, SharedState};
 use crate::theme;
 
@@ -88,7 +87,7 @@ impl LauncherApp {
         // sees, over the system's `.desktop` files, with a search bar. Its own
         // grid instance rather than the child's, so the two launch paths cannot
         // be confused for one another — this one starts arbitrary programs.
-        let admin_grid = LauncherGrid::new();
+        let admin_field = LauncherField::new();
         let admin_search = gtk4::SearchEntry::builder()
             .placeholder_text("Search applications")
             .hexpand(true)
@@ -97,7 +96,7 @@ impl LauncherApp {
         let admin_view = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
         admin_view.add_css_class("admin-picker");
         admin_view.append(&admin_search);
-        admin_view.append(&admin_grid);
+        admin_view.append(&admin_field);
         stack.add_named(&admin_view, Some("admin"));
 
         window.set_child(Some(&stack));
@@ -114,9 +113,9 @@ impl LauncherApp {
 
         // Create command client for sending commands
         let command_client = Arc::new(CommandClient::new(&socket_path));
-        Self::setup_keyboard_input(&window, &field, state.clone());
+        Self::setup_keyboard_input(&window, &field, &admin_field, state.clone());
         Self::setup_admin_picker(
-            &admin_grid,
+            &admin_field,
             &admin_search,
             command_client.clone(),
             runtime.clone(),
@@ -382,7 +381,7 @@ impl LauncherApp {
     /// tick picks it up, which is the same shape the rest of this file uses for
     /// crossing that boundary.
     fn setup_admin_picker(
-        grid: &LauncherGrid,
+        field: &LauncherField,
         search: &gtk4::SearchEntry,
         client: Arc<CommandClient>,
         runtime: Arc<Runtime>,
@@ -397,7 +396,7 @@ impl LauncherApp {
         let client_for_launch = client.clone();
         let runtime_for_launch = runtime.clone();
         let state_for_launch = state.clone();
-        grid.connect_launch(move |entry_id| {
+        field.connect_launch(move |entry_id| {
             // This grid's "entry id" is a desktop file ID, which is what
             // `launch_desktop_app` takes. Guarded on the state as well as the
             // daemon's own gate, so a stale click cannot start something after
@@ -415,9 +414,12 @@ impl LauncherApp {
             });
         });
 
-        let grid_for_search = grid.clone();
+        let field_for_search = field.downgrade();
         let apps_for_search = apps.clone();
         search.connect_search_changed(move |entry| {
+            let Some(field) = field_for_search.upgrade() else {
+                return;
+            };
             let needle = entry.text().to_lowercase();
             let filtered: Vec<_> = apps_for_search
                 .borrow()
@@ -431,19 +433,19 @@ impl LauncherApp {
                 })
                 .map(Self::desktop_app_as_entry)
                 .collect();
-            let scale = theme::scale_for(grid_for_search.width(), grid_for_search.height());
-            grid_for_search.set_entries(filtered, scale);
-            grid_for_search.select_first();
+            field.set_state(filtered, Self::picker_category());
         });
 
-        let grid_for_tick = grid.clone();
+        let field_for_tick = field.downgrade();
         let search_for_tick = search.clone();
         let mut was_admin = false;
         glib::timeout_add_local(Duration::from_millis(300), move || {
             let is_admin = matches!(state.get(), LauncherState::AdminMode);
             if is_admin && !was_admin {
                 search_for_tick.set_text("");
-                grid_for_tick.set_entries(Vec::new(), 1.0);
+                if let Some(field) = field_for_tick.upgrade() {
+                    field.set_state(Vec::new(), Self::picker_category());
+                }
                 let client = client.clone();
                 let slot = fetched.clone();
                 runtime.spawn(async move {
@@ -459,9 +461,9 @@ impl LauncherApp {
             if let Some(list) = fetched.lock().unwrap().take() {
                 let views: Vec<_> = list.iter().map(Self::desktop_app_as_entry).collect();
                 *apps.borrow_mut() = list;
-                let scale = theme::scale_for(grid_for_tick.width(), grid_for_tick.height());
-                grid_for_tick.set_entries(views, scale);
-                grid_for_tick.select_first();
+                if let Some(field) = field_for_tick.upgrade() {
+                    field.set_state(views, Self::picker_category());
+                }
                 search_for_tick.grab_focus();
             }
             glib::ControlFlow::Continue
@@ -474,6 +476,34 @@ impl LauncherApp {
     /// launch path takes. Everything policy-shaped is inert: these are not
     /// activities, have no limits, and are always launchable while the mode is
     /// on — the mode is the gate.
+    /// The one category the picker puts everything in.
+    ///
+    /// Administrator mode has no categories of its own — a `.desktop` file
+    /// belongs to no group and carries no policy — so the picker borrows the
+    /// child's field by handing it a single synthetic one. Everything the
+    /// branding does then applies without being asked for: the sunk cream
+    /// well, the selected cell, the item treatment, the scrolling and its
+    /// fades. It is also the whole reason there is no second grid widget to
+    /// keep in step with the first.
+    fn picker_category() -> Vec<lunchbox_api::GroupView> {
+        vec![lunchbox_api::GroupView {
+            group_id: lunchbox_util::GroupId::new(Self::PICKER_GROUP),
+            label: "Applications".to_string(),
+            member_ids: Vec::new(),
+            enabled: true,
+            reasons: Vec::new(),
+            used_today: Duration::ZERO,
+            daily_quota: None,
+            max_run_if_started_now: None,
+            tokens: None,
+            window_closes_at: None,
+            earns_tokens: false,
+        }]
+    }
+
+    /// The group id the picker's entries and its synthetic category share.
+    const PICKER_GROUP: &'static str = "lunchbox:installed-applications";
+
     fn desktop_app_as_entry(app: &lunchbox_api::DesktopApp) -> lunchbox_api::EntryView {
         lunchbox_api::EntryView {
             entry_id: EntryId::new(&app.id),
@@ -481,7 +511,7 @@ impl LauncherApp {
             icon_ref: app.icon.clone(),
             kind_tag: lunchbox_api::EntryKindTag::Process,
             enabled: true,
-            group: None,
+            group: Some(lunchbox_util::GroupId::new(Self::PICKER_GROUP)),
             reasons: Vec::new(),
             tokens: None,
             // Not an activity, so nothing about it can earn or be earned.
@@ -493,39 +523,67 @@ impl LauncherApp {
     fn setup_keyboard_input(
         window: &gtk4::ApplicationWindow,
         field: &LauncherField,
+        admin_field: &LauncherField,
         state: SharedState,
     ) {
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let field_weak = field.downgrade();
+        let admin_weak = admin_field.downgrade();
         key_controller.connect_key_pressed(move |_, key, _, _| {
-            let Some(field) = field_weak.upgrade() else {
+            // Capture-phase, so this sees every key before anything else does.
+            // Which field it steers depends on which one is on screen; in any
+            // other state it steers nothing and lets the key through.
+            let (field, in_picker) = match state.get() {
+                LauncherState::Idle { .. } => (field_weak.upgrade(), false),
+                LauncherState::AdminMode => (admin_weak.upgrade(), true),
+                _ => return glib::Propagation::Proceed,
+            };
+            let Some(field) = field else {
                 return glib::Propagation::Proceed;
             };
 
-            // Capture-phase, so this sees every key before anything else does
-            // — which is right while the field is what the child is looking at
-            // and wrong the rest of the time. Administrator mode's picker has
-            // its own arrow-key navigation and a search box to type into, and
-            // both were being swallowed by a field nobody could see.
-            if !matches!(state.get(), LauncherState::Idle { .. }) {
+            // The picker has a search box, and a search box has to be able to
+            // contain a space. The child's field has no text entry anywhere,
+            // so space stays a second "launch this" there.
+            if in_picker && key == gtk4::gdk::Key::space {
                 return glib::Propagation::Proceed;
             }
 
+            // WASD is a second D-pad for the child's field, where every key is
+            // a button. In the picker those are letters someone is typing into
+            // the search box, so only the arrows steer there.
+            let wasd = !in_picker;
             let handled = match key {
-                gtk4::gdk::Key::Up | gtk4::gdk::Key::w | gtk4::gdk::Key::W => {
+                gtk4::gdk::Key::Up => {
                     field.move_selection(0, -1);
                     true
                 }
-                gtk4::gdk::Key::Down | gtk4::gdk::Key::s | gtk4::gdk::Key::S => {
+                gtk4::gdk::Key::Down => {
                     field.move_selection(0, 1);
                     true
                 }
-                gtk4::gdk::Key::Left | gtk4::gdk::Key::a | gtk4::gdk::Key::A => {
+                gtk4::gdk::Key::Left => {
                     field.move_selection(-1, 0);
                     true
                 }
-                gtk4::gdk::Key::Right | gtk4::gdk::Key::d | gtk4::gdk::Key::D => {
+                gtk4::gdk::Key::Right => {
+                    field.move_selection(1, 0);
+                    true
+                }
+                gtk4::gdk::Key::w | gtk4::gdk::Key::W if wasd => {
+                    field.move_selection(0, -1);
+                    true
+                }
+                gtk4::gdk::Key::s | gtk4::gdk::Key::S if wasd => {
+                    field.move_selection(0, 1);
+                    true
+                }
+                gtk4::gdk::Key::a | gtk4::gdk::Key::A if wasd => {
+                    field.move_selection(-1, 0);
+                    true
+                }
+                gtk4::gdk::Key::d | gtk4::gdk::Key::D if wasd => {
                     field.move_selection(1, 0);
                     true
                 }
