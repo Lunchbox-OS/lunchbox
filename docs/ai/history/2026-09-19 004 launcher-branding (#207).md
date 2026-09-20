@@ -282,6 +282,30 @@ example:
 | 300s | `5/10` on putty, item at 50% |
 | 1500s | `25m` on deep teal, item live |
 
+### And one on a category
+
+An entry's gate and a category's are the same feature aimed at different things,
+and the launcher draws them in deliberately different places — so the example
+now carries one of each. "Watch" is gated on `group:books`: reading earns screen
+time.
+
+That one line does three things a per-entry gate cannot show:
+
+- the pill lands on the **compartment header**, not on any member, which is the
+  branding's "a category's gate shows on the compartment, an entry's under its
+  own name";
+- all three members dim and undim **together**, which is what "earning unlocks
+  every member at once" actually looks like;
+- **Books** picks up an earn pill, because naming `group:books` as the source
+  makes the category one. It was the only compartment without a badge.
+
+Both halves verified through `adjust_tokens` on `group:watch`: `0/20` on the
+header with all three members at 50%, then `30m` with all three live.
+
+With it, every badge in the vocabulary is on screen at once — earn on Books and
+Learn, a `25m` bank and a `0/10` need on two entries in Play, a `30m` bank on
+Watch's header, and nothing on Listen, which is ungated.
+
 ### Talking to the daemon by hand
 
 Worth writing down, because the first attempt failed silently and looked like a

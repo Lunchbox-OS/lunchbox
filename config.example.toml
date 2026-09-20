@@ -385,15 +385,9 @@ cooldown_seconds = 600
 # (defaults to service.cooldown_min_session_seconds).
 # cooldown_min_session_seconds = 120
 
-# A group can also be token-gated (issue #8): earning unlocks every member at
-# once. Uncomment to require educational time before any of these appear —
-# note that this gates the *whole* category, where the `[entries.tokens]` on
-# Celeste below gates only that one activity. The launcher shows a category's
-# gate on the compartment header and an entry's own under its name.
-# [groups.tokens]
-# from = ["group:learn"]
-# earn_ratio = 0.5
-# minimum_seconds = 600
+# A group can also be token-gated (issue #8), which gates the *whole* category:
+# earning unlocks every member at once, and running out relocks every member at
+# once. "Watch" below is the worked example.
 
 # A caregiver can override a whole category for the day through the management
 # API by passing `group:play` as the override id — one call enables or disables
@@ -402,6 +396,28 @@ cooldown_seconds = 600
 [[groups]]
 id = "watch"
 label = "Watch"
+
+# Screen time has to be read for. This is the same feature as the
+# `[entries.tokens]` on Celeste and Pokemon FireRed further down, aimed at a
+# category instead of one activity, and the difference is worth seeing:
+#
+#   * an *entry's* gate belongs to that activity, and the launcher draws it
+#     under that activity's name;
+#   * a *category's* gate is shared by every member, so the launcher draws it
+#     once on the compartment header and not on any of the members. When it is
+#     shut, all three of these dim together.
+#
+# Naming a group as the source works the same way it does on an entry, so every
+# book counts and a book added later counts without editing this.
+[groups.tokens]
+from = ["group:books"]
+# A minute read earns a minute watched. Celeste's gate uses 0.5 to make its
+# trade deliberately less generous; both are ordinary choices.
+earn_ratio = 1.0
+# Twenty minutes of reading before the television opens at all.
+minimum_seconds = 1200
+# An afternoon with a book does not bank a whole evening of television.
+max_balance_seconds = 3600
 
 [[groups]]
 id = "listen"
