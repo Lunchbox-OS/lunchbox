@@ -106,6 +106,10 @@ mod imp {
         pub row: gtk4::Box,
         pub more_left: gtk4::Button,
         pub more_right: gtk4::Button,
+        /// The soft edge the row disappears under, one per side. Shown with
+        /// the chip above it, and on the same condition.
+        pub fade_left: gtk4::Box,
+        pub fade_right: gtk4::Box,
         pub stacks: RefCell<Vec<Stack>>,
         /// (stack, row within it). Meaningless when `stacks` is empty.
         pub cursor: Cell<(usize, usize)>,
@@ -129,6 +133,8 @@ mod imp {
                 row: gtk4::Box::new(gtk4::Orientation::Horizontal, 0),
                 more_left: gtk4::Button::new(),
                 more_right: gtk4::Button::new(),
+                fade_left: gtk4::Box::new(gtk4::Orientation::Vertical, 0),
+                fade_right: gtk4::Box::new(gtk4::Orientation::Vertical, 0),
                 stacks: RefCell::new(Vec::new()),
                 cursor: Cell::new((0, 0)),
                 on_launch: Rc::new(RefCell::new(None)),
@@ -165,6 +171,25 @@ mod imp {
             self.scroller.set_hexpand(true);
             self.scroller.set_vexpand(true);
 
+            // The fade goes on before the chips, so the chips sit above it.
+            // A compartment clipped by the viewport edge would otherwise end
+            // on a hard vertical cut; under the fade it runs out of the tin
+            // instead, which is what says "there is more this way" before the
+            // chip is even read.
+            for (fade, modifier, align) in [
+                (&self.fade_left, "lb-field__fade--left", gtk4::Align::Start),
+                (&self.fade_right, "lb-field__fade--right", gtk4::Align::End),
+            ] {
+                fade.add_css_class("lb-field__fade");
+                fade.add_css_class(modifier);
+                fade.set_halign(align);
+                fade.set_valign(gtk4::Align::Fill);
+                fade.set_visible(false);
+                // Decoration only: it must never eat a click meant for the
+                // compartment underneath it.
+                fade.set_can_target(false);
+            }
+
             for (button, icon, align) in [
                 (&self.more_left, "pan-start-symbolic", gtk4::Align::Start),
                 (&self.more_right, "pan-end-symbolic", gtk4::Align::End),
@@ -181,6 +206,8 @@ mod imp {
 
             let overlay = gtk4::Overlay::new();
             overlay.set_child(Some(&self.scroller));
+            overlay.add_overlay(&self.fade_left);
+            overlay.add_overlay(&self.fade_right);
             overlay.add_overlay(&self.more_left);
             overlay.add_overlay(&self.more_right);
             overlay.set_parent(obj.upcast_ref::<gtk4::Widget>());
@@ -489,9 +516,13 @@ impl LauncherField {
         // A pixel of slack: floating-point adjustment values land a hair off
         // their bounds, and a chip that never quite goes away is worse than one
         // that disappears a pixel early.
-        imp.more_left.set_visible(adj.value() > 1.0);
-        imp.more_right
-            .set_visible(adj.value() + adj.page_size() < adj.upper() - 1.0);
+        let more_left = adj.value() > 1.0;
+        let more_right = adj.value() + adj.page_size() < adj.upper() - 1.0;
+        imp.more_left.set_visible(more_left);
+        imp.more_right.set_visible(more_right);
+        // The fade and its chip say the same thing, so they appear together.
+        imp.fade_left.set_visible(more_left);
+        imp.fade_right.set_visible(more_right);
     }
 
     /// Follow the adjustment, so the chips are right after a pointer or touch

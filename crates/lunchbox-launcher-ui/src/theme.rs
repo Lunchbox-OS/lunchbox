@@ -162,9 +162,38 @@ window.lb-launcher {
     margin: 0;
 }
 
+/* The edge the row runs out under, at whichever side it continues past.
+
+   Enamel at the outer edge fading to nothing inwards, so a compartment clipped
+   by the viewport dissolves into the field rather than ending on a hard
+   vertical cut. The colour is the *edge* stop of the field's own sheen
+   (#27A093), because that is the enamel this sits on top of.
+
+   `rgba(39, 160, 147, 0)` rather than `transparent`: GTK interpolates a
+   gradient through its stop colours, and `transparent` is transparent *black*,
+   so the fade would dip grey on its way out. */
+.lb-field__fade {
+    min-width: 56px;
+}
+
+.lb-field__fade--right {
+    background-image: linear-gradient(to right,
+        rgba(39, 160, 147, 0), rgba(39, 160, 147, 1));
+}
+
+.lb-field__fade--left {
+    background-image: linear-gradient(to left,
+        rgba(39, 160, 147, 0), rgba(39, 160, 147, 1));
+}
+
 /* The yellow chevron chip at the edge the row continues past. */
 .lb-more {
     background-color: #FFD166;
+    /* The GTK theme gives a button its own `background-image` gradient, which
+       paints straight over a `background-color` and left this chip white. Any
+       control the branding recolours has to clear the image as well as set the
+       colour — `.lb-item` and `.lb-button` already do. */
+    background-image: none;
     border: 4px solid #1C1B18;
     border-radius: 999px;
     min-width: 48px;

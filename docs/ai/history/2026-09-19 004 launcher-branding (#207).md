@@ -17,10 +17,11 @@ in the repository.
 
 ## What it looks like
 
-Screenshots in `2026-09-19-004-launcher-branding/` beside this note, taken from
-`config.example.toml` on a development machine — which is why most activities
-wear the theme's generic fallback icon rather than their own: Steam, RetroArch,
-GCompris and the rest are not installed here.
+Screenshots in `2026-09-19-004-launcher-branding/` beside this note. The first
+two are `config.example.toml` on a development machine — which is why most
+activities wear the theme's generic fallback icon rather than their own: Steam,
+RetroArch, GCompris and the rest are not installed here. The third is a
+synthetic fixture, and says so.
 
 ![The home screen at 1280x720](2026-09-19-004-launcher-branding/home.png)
 
@@ -37,9 +38,17 @@ floor.
 
 ![A locked and an unlocked activity, both selected](2026-09-19-004-launcher-branding/selection.png)
 
-The same activity selected, locked and unlocked. The selection is identical in
-both; only the icon and the name dim. See "What 'selected' looked like" below
-for why that matters.
+The same activity selected, locked (left) and unlocked (right). The selection is
+identical in both; only the icon and the name dim. See "What 'selected' looked
+like" below for why that matters.
+
+This one is **not** from `config.example.toml`: it is a throwaway config holding
+one `/bin/true` process called "Example Activity", built so that the item to be
+inspected is the launcher's own initial selection — see "Driving the launcher
+when the harness will not". The controller is the icon theme's generic
+`applications-games`, named by that fixture. An earlier cut of this screenshot
+labelled the fixture "Celeste", which was worse than useless: it put a real
+activity's name on a fake entry wearing an icon Celeste does not have.
 
 ## Scope, as agreed before building
 
@@ -331,6 +340,27 @@ header with all three members at 50%, then `30m` with all three live.
 With it, every badge in the vocabulary is on screen at once — earn on Books and
 Learn, a `25m` bank and a `0/10` need on two entries in Play, a `30m` bank on
 Watch's header, and nothing on Listen, which is ungated.
+
+## Two things a reviewer's eye caught that mine had not
+
+**The row's edges did not fade.** Layout rule 5 and §7 both call for the
+overflowing edge to fade under the chevron chip; only the chip was built, and
+the acceptance line "fade + chip appear only on overflow" was ticked off on the
+strength of half of it. A compartment clipped by the viewport ended on a hard
+vertical cut. `.lb-field__fade` is now a pair of gradient overlays, enamel at
+the outer edge to nothing inwards, shown on exactly the condition the chips are
+and sitting under them.
+
+Worth knowing for anything else written against this palette: the far stop is
+`rgba(39, 160, 147, 0)` and not `transparent`, because `transparent` is
+transparent *black* and a gradient interpolating to it dips grey on the way out.
+
+**The chevron chip was white, not yellow** — and had been all along, in every
+screenshot taken before this. `.lb-more` set `background-color` but not
+`background-image`, and the GTK theme paints a button's own gradient straight
+over the colour. `.lb-item` and `.lb-button` had already been given
+`background-image: none` for exactly this reason; the chip was missed. Any
+control the branding recolours needs both.
 
 ## Two places the implementation departs from the mockup
 
