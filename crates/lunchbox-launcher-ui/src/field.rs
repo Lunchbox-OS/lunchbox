@@ -224,6 +224,12 @@ mod imp {
         pub selection_active: Cell<bool>,
         /// Bumped whenever a scroll animation starts, so an older one stops.
         pub scroll_generation: Cell<u64>,
+        /// The size the current layout was worked out for. The field's shape
+        /// depends on how much room it has — how tall a stack may be, how many
+        /// categories share a column, whether the cells have to squish — so a
+        /// size it has not seen means the layout on screen is for some other
+        /// screen. See `size_allocate`.
+        pub laid_out: Cell<(i32, i32)>,
         /// The snapshot the field is currently drawing, kept so a change of
         /// scale can redraw it without waiting for the daemon to say anything
         /// new. The launcher is fullscreen on an output whose size it learns
@@ -252,6 +258,7 @@ mod imp {
                 pending_scroll: Cell::new(false),
                 selection_active: Cell::new(false),
                 scroll_generation: Cell::new(0),
+                laid_out: Cell::new((0, 0)),
                 last_state: RefCell::new((Vec::new(), Vec::new())),
             }
         }
@@ -377,7 +384,42 @@ mod imp {
         }
     }
 
-    impl WidgetImpl for LauncherField {}
+    impl WidgetImpl for LauncherField {
+        /// Lay the field out again whenever the room it has changes.
+        ///
+        /// It used to be enough to watch the *scale* (`App::track_scale`),
+        /// because the layout was a straight scaling of one design: one row,
+        /// every compartment the full height. It is not enough now. How tall a
+        /// stack may be, how many categories share a column and whether the
+        /// cells have to squish are all answers to "how much room is there",
+        /// and two different sizes can share a scale — so a window that grew
+        /// without crossing a scale boundary kept a layout meant for the size
+        /// before it, permanently.
+        ///
+        /// It is also what the first frame needs. The launcher is fullscreen
+        /// on an output whose size it learns only after it is mapped, so the
+        /// state that arrives first is laid out against a field of no height
+        /// at all: every category in a column of its own, each the full height
+        /// of a screen nobody has measured yet. Reported from the device as
+        /// compartments that "start out as full height, then after a few
+        /// seconds the compacted layout appears" — the seconds were not the
+        /// layout being slow, they were the daemon's first snapshot arriving
+        /// before the compositor's first configure.
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            if self.laid_out.replace((width, height)) == (width, height) {
+                return;
+            }
+            // Not from inside an allocation: rebuilding here would be changing
+            // the widget tree GTK is in the middle of placing.
+            let field = self.obj().downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(field) = field.upgrade() {
+                    field.relayout();
+                }
+            });
+        }
+    }
 }
 
 glib::wrapper! {
