@@ -86,7 +86,7 @@ mark live in `assets/branding`; `src/theme.rs` is their Rust half.
 ### Compartments
 
 Each compartment shows its category's name, at most one badge, its members in
-stacks of three that spill *rightwards*, and — when the category is on a
+stacks that spill *rightwards*, and — when the category is on a
 schedule — its closing time today on the floor, behind a little clock face
 whose hands point at that hour (`ClockFace`, from `lunchbox-widgets`, shared
 with the HUD's vertical bar). A child who cannot yet read "6:00 PM" can still
@@ -95,6 +95,16 @@ see where the hand is going to be.
 Height never grows: a category with more members gets wider, and if the row
 overflows the screen the row scrolls **horizontally**. The field never scrolls
 vertically.
+
+How tall a stack may be is **measured, not fixed**
+(`compartment::rows_that_fit`). The design hands down three (`space.rows`),
+which is what a 1280×720 screen has room for, but `scale_for` scales by the
+narrower axis so the row never reflows — so a screen taller than 16:9 has
+height under the compartments that a fixed three would waste, and a shorter one
+clips. The field measures a probe compartment against its own height once per
+layout and hands every compartment the same answer, so they all agree on where
+their items start. The design's three is what that returns before the window
+knows its size.
 
 ### Items
 

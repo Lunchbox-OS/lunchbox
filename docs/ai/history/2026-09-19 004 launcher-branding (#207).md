@@ -623,6 +623,51 @@ radius, at 1.1 and 0.7 of the ring's weight.
 The HUD's own appearance changed slightly with the move. That is sanctioned:
 the bar is being restyled in #209 anyway, and the reviewer said "roughly".
 
+## How tall is a stack, really
+
+Asked where the limit of three activities per column comes from. It came from
+`space.rows` in `tokens.json` and nowhere else — the design hands down a three,
+`build.rs` turns it into a constant, and `split_into_stacks` chunks by it.
+Nothing derived it and nothing checked it.
+
+Three is right for the screen the design was drawn for. It is not right for the
+screen the launcher is on, and the reason is a rule from two rounds earlier:
+`scale_for` takes the *narrower* of the two axes so the layout never reflows.
+On anything taller than 16:9 that leaves height under every compartment which a
+fixed three simply wastes; on anything shorter it clips, and there is no
+vertical scroll to catch it. Nothing asserted the budget either — raising
+`space.rows` to four would have built, passed every test, and clipped.
+
+So the field works it out per layout, and **measures rather than calculates**.
+A compartment's vertical budget is the field's padding, the compartment's
+border and padding, a header, a floor, and *n* item cells with gaps between
+them — every one of those numbers lives in the stylesheet, and the arithmetic
+that reproduced them is precisely what drifted before: the earlier round of
+this work found the item cell at 178px against the 150px the geometry assumed,
+which is what made a compartment clip at 720p in the first place. So
+`rows_that_fit` builds a throwaway `.lb-field` → `.lb-field__row` →
+`.lb-compartment`, measures it empty, appends one item, measures again, and
+divides. The only thing left to test is the division, which is pure.
+
+Three details worth keeping:
+
+- **The probe is the worst case** — a header wearing a badge, and a floor,
+  which not every category has. One number then fits every compartment in the
+  row, and their items all start on the same line. The old "fixed by
+  construction" invariant, kept, but now it is construction that checks it.
+- **Never zero rows.** A screen with no room for even one item is one this
+  design cannot serve; showing a clipped activity says so, and an empty tin
+  lies — it reads as "this category is gone".
+- **The token is now the fallback**, used before the window knows its size (the
+  first layout after startup is always a re-layout) and if a measurement comes
+  back nonsense. It is still the design's number and still the right one at
+  1280×720.
+
+Checked on three screens: 1280×720 gives three, unchanged; 1280×1024 gives five
+and pulls the whole five-category row onto one screen; 1280×420 — where the
+0.75 scale floor means the design no longer fits at all — gives two, where the
+fixed three clipped.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here

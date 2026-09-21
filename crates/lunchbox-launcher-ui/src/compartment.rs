@@ -5,8 +5,11 @@
 //! CSS in `theme.rs` does the drawing; this file decides what goes in it.
 //!
 //! Its contents, top to bottom: the category's name and (at most) one badge,
-//! then the items in stacks of three that spill to the right, then — only when
-//! the category actually shuts today — a hairline floor and the closing time.
+//! then the items in stacks that spill to the right, then — only when the
+//! category actually shuts today — a hairline floor and the closing time.
+//!
+//! How tall a stack may be is [`rows_that_fit`], and it is *measured* rather
+//! than decided here. See that function for why.
 
 use gtk4::prelude::*;
 use lunchbox_api::{EntryView, GroupView};
@@ -21,6 +24,16 @@ use crate::theme;
 /// a picture rather than as one more glyph in the line. Derived from the
 /// footer's own size rather than written down, so the two move together.
 const FLOOR_CLOCK_PX: i32 = theme::tokens::FOOTER_FONT_PX + 2;
+
+/// Vertical gap between items in a stack, unscaled.
+///
+/// Named because two things need it and they must not disagree: the column
+/// that lays the items out, and the arithmetic in [`rows_that_fit`] that works
+/// out how many of them there is room for.
+const ROW_GAP: i32 = 8;
+
+/// Horizontal gap between the stacks inside one compartment, unscaled.
+const STACK_GAP: i32 = 16;
 
 /// A category on screen, and the items it holds in the order they are drawn.
 pub struct Compartment {
@@ -43,17 +56,69 @@ pub struct Compartment {
 /// `group` is `None` for the implicit trailing category that collects entries
 /// belonging to no group; it has a name but no schedule and no shared gate, so
 /// it never carries a badge or a floor.
+///
+/// `rows` is how tall a stack may be before the category spills into another
+/// one beside it. The field measures it once per layout ([`rows_that_fit`])
+/// and hands every compartment the same number, so a row of them stays a tin
+/// with sections rather than a skyline.
 pub fn build(
     label: &str,
     group: Option<&GroupView>,
     entries: Vec<EntryView>,
     scale: f64,
+    rows: usize,
 ) -> Compartment {
+    let well = new_well();
+
+    let category = group.and_then(category_badge);
+    let (header, name_bin, badge_bin) = build_header(label, category.as_ref(), scale);
+    well.append(&header);
+
+    // -------------------------------------------------------------- items
+    let stacks = split_into_stacks(entries, rows);
+    let columns = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(STACK_GAP, scale));
+    columns.set_vexpand(true);
+    columns.set_valign(gtk4::Align::Start);
+
+    let mut built: Vec<Vec<LauncherItem>> = Vec::new();
+    let now = lunchbox_util::now();
+    for stack in stacks {
+        let column = new_column(scale);
+        let mut items = Vec::new();
+        for entry in stack {
+            let item = LauncherItem::new();
+            let badge = item_badge(&entry, category.as_ref(), now);
+            item.set_entry(entry, scale, badge);
+            column.append(&item);
+            items.push(item);
+        }
+        columns.append(&column);
+        built.push(items);
+    }
+    well.append(&columns);
+
+    // -------------------------------------------------------------- floor
+    // Only a category on a schedule has anything to say down here; an
+    // always-available one gets no floor at all rather than an empty rule.
+    if let Some(closes) = group.and_then(|g| g.window_closes_at) {
+        well.append(&build_floor(closes, scale));
+    }
+
+    Compartment {
+        widget: well.upcast(),
+        name: name_bin,
+        badge: badge_bin,
+        stacks: built,
+    }
+}
+
+/// The sunk well itself, empty.
+fn new_well() -> gtk4::Box {
     let well = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     well.add_css_class("lb-compartment");
     // Every compartment is the full height of the field, so the row reads as
-    // one tin rather than a skyline. Width is what grows when a category has
-    // more than three members (§3 of the brief).
+    // one tin rather than a skyline. Width is what grows when a category holds
+    // more than one stack's worth of members (§3 of the brief).
     well.set_valign(gtk4::Align::Fill);
     well.set_vexpand(true);
     // Explicitly *not* horizontally expanding. GTK computes expansion from a
@@ -64,8 +129,27 @@ pub fn build(
     // rather than on how many stacks it holds. Setting it here stops the
     // propagation without stopping the header from doing its job.
     well.set_hexpand(false);
+    well
+}
 
-    // ------------------------------------------------------------- header
+/// One stack, empty.
+fn new_column(scale: f64) -> gtk4::Box {
+    let column = gtk4::Box::new(gtk4::Orientation::Vertical, theme::px(ROW_GAP, scale));
+    column.set_valign(gtk4::Align::Start);
+    column
+}
+
+/// The compartment's top line: the category's name, and at most one badge
+/// pushed to the far end of it.
+fn build_header(
+    label: &str,
+    badge: Option<&Badge>,
+    scale: f64,
+) -> (
+    gtk4::Box,
+    crate::offset::OffsetBin,
+    Option<crate::offset::OffsetBin>,
+) {
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(10, scale));
     header.add_css_class("lb-compartment__header");
 
@@ -89,70 +173,38 @@ pub fn build(
     name_bin.set_halign(gtk4::Align::Fill);
     header.append(&name_bin);
 
-    let category = group.and_then(category_badge);
-    let badge_bin = category.as_ref().map(|badge| {
+    let badge_bin = badge.map(|badge| {
         let bin = crate::offset::OffsetBin::around(&badge.widget(scale));
         bin.set_halign(gtk4::Align::End);
         header.append(&bin);
         bin
     });
-    well.append(&header);
 
-    // -------------------------------------------------------------- items
-    let stacks = split_into_stacks(entries);
-    let columns = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(16, scale));
-    columns.set_vexpand(true);
-    columns.set_valign(gtk4::Align::Start);
+    (header, name_bin, badge_bin)
+}
 
-    let mut built: Vec<Vec<LauncherItem>> = Vec::new();
-    let now = lunchbox_util::now();
-    for stack in stacks {
-        let column = gtk4::Box::new(gtk4::Orientation::Vertical, theme::px(8, scale));
-        column.set_valign(gtk4::Align::Start);
-        let mut items = Vec::new();
-        for entry in stack {
-            let item = LauncherItem::new();
-            let badge = item_badge(&entry, category.as_ref(), now);
-            item.set_entry(entry, scale, badge);
-            column.append(&item);
-            items.push(item);
-        }
-        columns.append(&column);
-        built.push(items);
-    }
-    well.append(&columns);
+/// The compartment's bottom line: a hairline, a clock face pointing at the
+/// hour the category shuts, and that hour in words.
+fn build_floor(closes: chrono::DateTime<chrono::Local>, scale: f64) -> gtk4::Box {
+    let floor = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(6, scale));
+    floor.add_css_class("lb-compartment__floor");
+    floor.set_valign(gtk4::Align::End);
+    floor.set_vexpand(true);
 
-    // -------------------------------------------------------------- floor
-    // Only a category on a schedule has anything to say down here; an
-    // always-available one gets no floor at all rather than an empty rule.
-    if let Some(closes) = group.and_then(|g| g.window_closes_at) {
-        let floor = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(6, scale));
-        floor.add_css_class("lb-compartment__floor");
-        floor.set_valign(gtk4::Align::End);
-        floor.set_vexpand(true);
+    // The face points at the hour the category shuts, not at the time it is.
+    // That is the whole reason it is worth drawing rather than writing out: a
+    // child who cannot yet read "6:00 PM" can still see where the hand is
+    // going to be.
+    let face = lunchbox_widgets::ClockFace::at(closes, theme::px(FLOOR_CLOCK_PX, scale));
+    face.add_css_class("lb-compartment__clock");
+    face.set_valign(gtk4::Align::Center);
+    floor.append(&face);
 
-        // The face points at the hour the category shuts, not at the time it
-        // is. That is the whole reason it is worth drawing rather than writing
-        // out: a child who cannot yet read "6:00 PM" can still see where the
-        // hand is going to be.
-        let face = lunchbox_widgets::ClockFace::at(closes, theme::px(FLOOR_CLOCK_PX, scale));
-        face.add_css_class("lb-compartment__clock");
-        face.set_valign(gtk4::Align::Center);
-        floor.append(&face);
-
-        let schedule = gtk4::Label::new(Some(&schedule_line(closes)));
-        schedule.add_css_class("lb-compartment__schedule");
-        schedule.set_xalign(0.0);
-        floor.append(&schedule);
-        well.append(&floor);
-    }
-
-    Compartment {
-        widget: well.upcast(),
-        name: name_bin,
-        badge: badge_bin,
-        stacks: built,
-    }
+    let schedule = gtk4::Label::new(Some(&schedule_line(closes)));
+    schedule.add_css_class("lb-compartment__schedule");
+    schedule.set_xalign(0.0);
+    floor.append(&schedule);
+    floor
 }
 
 /// The one badge a category may wear.
@@ -211,16 +263,111 @@ fn schedule_line(closes: chrono::DateTime<chrono::Local>) -> String {
     format!("Until {}", format_clock(closes))
 }
 
-/// Break a category's members into stacks of `ROWS_PER_STACK`, in config
-/// order. Width grows; height never does.
-fn split_into_stacks(entries: Vec<EntryView>) -> Vec<Vec<EntryView>> {
+/// Break a category's members into stacks `rows` tall, in config order.
+/// Width grows; height never does.
+fn split_into_stacks(entries: Vec<EntryView>, rows: usize) -> Vec<Vec<EntryView>> {
     if entries.is_empty() {
         return Vec::new();
     }
     entries
-        .chunks(theme::ROWS_PER_STACK)
+        .chunks(rows.max(1))
         .map(<[EntryView]>::to_vec)
         .collect()
+}
+
+/// How many items one stack can hold on a field `field_height` px tall.
+///
+/// The design hands down a fixed three (`space.rows` in `tokens.json`), and
+/// three is what a 1280×720 screen has room for. But the launcher runs on
+/// whatever the device has, and `scale_for` deliberately scales by the
+/// *narrower* axis so the row never reflows — which means a screen taller than
+/// 16:9 ends up with spare height under the compartments that nothing uses,
+/// and a shorter one clips. So the number is worked out per layout instead,
+/// and the token becomes the value used before the field has been measured.
+///
+/// **Measured, not calculated.** A compartment's vertical budget is the
+/// field's own padding, the compartment's border and padding, a header, a
+/// floor, and *n* item cells with gaps between them — and every one of those
+/// numbers lives in the stylesheet. Asking GTK what they add up to is the only
+/// answer that cannot drift from the CSS, and drift is exactly what went wrong
+/// when this was three by construction: the item cell grew to 178px against
+/// the 150px the geometry assumed, and the compartment clipped at 720p with
+/// nothing to catch it.
+///
+/// The probe is the worst case on purpose — a header wearing a badge and a
+/// floor, which not every category has — so one number fits every compartment
+/// in the row and they all agree on where their items start.
+pub fn rows_that_fit(field_height: i32, scale: f64) -> usize {
+    // Before the window knows its size there is nothing to measure against.
+    // The first layout after startup is always a re-layout (see the field's
+    // `last_state`), so this is the value for one frame at most.
+    if field_height <= 0 {
+        return theme::ROWS_PER_STACK;
+    }
+
+    // `.lb-field` carries the margins above and below the row, so the probe
+    // starts there rather than at the compartment: the padding is in the
+    // stylesheet and this way it never has to be named twice.
+    let field = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    field.add_css_class("lb-field");
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    row.add_css_class("lb-field__row");
+    field.append(&row);
+
+    let well = new_well();
+    let (header, ..) = build_header("Category", Some(&Badge::Earn), scale);
+    well.append(&header);
+    let columns = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(STACK_GAP, scale));
+    let column = new_column(scale);
+    columns.append(&column);
+    well.append(&columns);
+    well.append(&build_floor(lunchbox_util::now(), scale));
+    row.append(&well);
+
+    let chrome = field.measure(gtk4::Orientation::Vertical, -1).1;
+
+    // One cell, measured the same way. Every item is the same height whatever
+    // its name — `item.rs` reserves two lines and caps the label at two — so
+    // one probe stands for all of them.
+    let probe = LauncherItem::new();
+    probe.set_entry(probe_entry(), scale, Some(Badge::Earn));
+    column.append(&probe);
+    let cell = field.measure(gtk4::Orientation::Vertical, -1).1 - chrome;
+
+    rows_in(field_height - chrome, cell, theme::px(ROW_GAP, scale))
+}
+
+/// How many `cell`-tall rows fit in `room` px with `gap` between them.
+///
+/// Split out of [`rows_that_fit`] because it is the only part of that function
+/// a test can reach: the rest needs a display connection.
+fn rows_in(room: i32, cell: i32, gap: i32) -> usize {
+    if cell <= 0 {
+        return theme::ROWS_PER_STACK;
+    }
+    // n cells and n-1 gaps fit in `room`, so lend the sum one more gap and the
+    // division comes out whole.
+    let n = (room + gap) / (cell + gap);
+    // Never zero: a compartment with no room for even one item is a screen
+    // this design cannot serve, and showing one clipped item says that far
+    // better than showing an empty tin.
+    n.max(1) as usize
+}
+
+/// A stand-in activity, for measuring a cell that is never shown.
+fn probe_entry() -> EntryView {
+    EntryView {
+        entry_id: lunchbox_util::EntryId::new("__probe__"),
+        label: "Probe".into(),
+        icon_ref: None,
+        kind_tag: lunchbox_api::EntryKindTag::Process,
+        enabled: true,
+        group: None,
+        reasons: vec![],
+        tokens: None,
+        earns_tokens: false,
+        max_run_if_started_now: None,
+    }
 }
 
 /// A wall-clock time the way the compartment floor says it: "6:00 PM".
@@ -267,33 +414,59 @@ mod tests {
         }
     }
 
+    /// The stack height the design hands down, and what the tests below use
+    /// unless they are about some other screen.
+    const THREE: usize = 3;
+
     #[test]
-    fn three_members_are_one_stack() {
-        let stacks = split_into_stacks(vec![entry("a"), entry("b"), entry("c")]);
+    fn a_full_stack_is_one_stack() {
+        let stacks = split_into_stacks(vec![entry("a"), entry("b"), entry("c")], THREE);
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].len(), 3);
     }
 
     #[test]
-    fn a_fourth_member_spills_into_a_second_stack_beside_it() {
+    fn one_member_too_many_spills_into_a_second_stack_beside_it() {
         // The acceptance checklist: 4-6 members render double-wide, 7-9 triple.
-        let four = split_into_stacks((0..4).map(|i| entry(&i.to_string())).collect());
+        let four = split_into_stacks((0..4).map(|i| entry(&i.to_string())).collect(), THREE);
         assert_eq!(four.len(), 2, "4 members are double-wide");
         assert_eq!(four[0].len(), 3);
         assert_eq!(four[1].len(), 1);
 
-        let seven = split_into_stacks((0..7).map(|i| entry(&i.to_string())).collect());
+        let seven = split_into_stacks((0..7).map(|i| entry(&i.to_string())).collect(), THREE);
         assert_eq!(seven.len(), 3, "7 members are triple-wide");
+    }
+
+    /// The same members, on a screen with room for a taller stack: fewer,
+    /// fuller columns rather than the same columns further apart.
+    #[test]
+    fn a_taller_screen_spills_later() {
+        let six: Vec<_> = (0..6).map(|i| entry(&i.to_string())).collect();
+        assert_eq!(split_into_stacks(six.clone(), 3).len(), 2);
+        assert_eq!(split_into_stacks(six.clone(), 4).len(), 2);
+        assert_eq!(split_into_stacks(six.clone(), 5).len(), 2);
+        assert_eq!(split_into_stacks(six, 6).len(), 1, "all six in one column");
+    }
+
+    /// `rows_that_fit` never answers zero, but the split must survive one
+    /// anyway rather than dividing by it.
+    #[test]
+    fn a_stack_always_holds_something() {
+        let stacks = split_into_stacks(vec![entry("a"), entry("b")], 0);
+        assert_eq!(stacks.len(), 2, "one item each, not a panic");
     }
 
     #[test]
     fn config_order_survives_the_split() {
-        let stacks = split_into_stacks(vec![
-            entry("first"),
-            entry("second"),
-            entry("third"),
-            entry("fourth"),
-        ]);
+        let stacks = split_into_stacks(
+            vec![
+                entry("first"),
+                entry("second"),
+                entry("third"),
+                entry("fourth"),
+            ],
+            THREE,
+        );
         let flat: Vec<_> = stacks
             .iter()
             .flatten()
@@ -304,7 +477,34 @@ mod tests {
 
     #[test]
     fn an_empty_category_has_no_stacks() {
-        assert!(split_into_stacks(vec![]).is_empty());
+        assert!(split_into_stacks(vec![], THREE).is_empty());
+    }
+
+    /// The arithmetic behind `rows_that_fit`: n cells and n-1 gaps.
+    #[test]
+    fn rows_fill_the_room_they_are_given() {
+        // Three 132px cells with 8px between them need 412px, and a fourth
+        // needs 552 — so anything from 412 to 551 is a three-row screen.
+        assert_eq!(rows_in(412, 132, 8), 3);
+        assert_eq!(rows_in(551, 132, 8), 3);
+        assert_eq!(rows_in(552, 132, 8), 4, "exactly enough is enough");
+        assert_eq!(rows_in(411, 132, 8), 2, "one pixel short is two rows");
+    }
+
+    /// A screen with no room for even one item still shows one. Better a
+    /// clipped activity than an empty tin: the empty tin says the category is
+    /// gone, which is a lie.
+    #[test]
+    fn there_is_always_at_least_one_row() {
+        assert_eq!(rows_in(0, 132, 8), 1);
+        assert_eq!(rows_in(-500, 132, 8), 1);
+    }
+
+    /// A measurement that came back nonsense falls back to the design's own
+    /// number rather than to whatever the division would have produced.
+    #[test]
+    fn an_unmeasurable_cell_falls_back_to_the_design() {
+        assert_eq!(rows_in(600, 0, 8), theme::ROWS_PER_STACK);
     }
 
     #[test]

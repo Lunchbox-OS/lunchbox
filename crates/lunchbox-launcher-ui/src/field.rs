@@ -423,11 +423,17 @@ impl LauncherField {
         imp.stacks.borrow_mut().clear();
         imp.row.set_spacing(theme::px(28, scale));
 
+        // How tall a stack may be, measured against the screen this actually
+        // is rather than the one the design was drawn for. One number for the
+        // whole row, so every compartment's items start on the same line.
+        let rows = compartment::rows_that_fit(self.height(), scale);
+        tracing::debug!(height = self.height(), scale, rows, "laying the field out");
+
         let categories = categorise(&entries, &groups);
         let mut stacks: Vec<Stack> = Vec::new();
         let mut headers: Vec<Header> = Vec::new();
         for (label, group, members) in categories {
-            let built = compartment::build(&label, group, members, scale);
+            let built = compartment::build(&label, group, members, scale, rows);
             imp.row.append(&built.widget);
             headers.push(Header {
                 well: built.widget.clone(),

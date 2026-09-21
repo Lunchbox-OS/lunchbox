@@ -39,7 +39,16 @@ pub const DESIGN_WIDTH: f64 = 1280.0;
 /// less the HUD bar that sits above this window rather than inside it.
 pub const DESIGN_HEIGHT: f64 = 720.0 - tokens::HUD_H as f64;
 
-/// Items in a stack before the category spills into a second stack beside it.
+/// Items in a stack before the category spills into a second stack beside it,
+/// *as the design hands it down*.
+///
+/// No longer the number the launcher lays out with. A stack's height is
+/// measured against the screen the launcher is actually on
+/// (`compartment::rows_that_fit`), because `scale_for` scales by the narrower
+/// axis and a screen taller than 16:9 therefore has room the design never
+/// budgeted for. This is what that function answers before the window knows
+/// its size, and what its arithmetic falls back to if a measurement comes back
+/// nonsense — the design's own number, and the right one at 1280×720.
 pub const ROWS_PER_STACK: usize = tokens::ROWS_PER_STACK as usize;
 /// Item cell, unscaled.
 pub const ITEM_W: i32 = tokens::ITEM_W;
