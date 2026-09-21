@@ -163,6 +163,25 @@ pub trait Store: Send + Sync {
     fn get_all_usage_for_date(&self, date: NaiveDate) -> StoreResult<Vec<(EntryId, Duration)>>;
 }
 
+/// The checkpoint format this build writes and understands (issue #201).
+///
+/// **Bump this whenever [`StateSnapshot`] or [`SessionSnapshot`] changes shape
+/// *or meaning*.** A checkpoint is written by one build and read by the next
+/// one to start, which across an upgrade is a different build — and the reader
+/// has no other way to tell that the `billable` it is about to charge a child
+/// for was measured by rules it no longer uses.
+///
+/// Meaning matters as much as shape here, and is the easier one to miss: a
+/// field added with `#[serde(default)]` deserializes happily out of an older
+/// row and bills whatever the default happens to be.
+///
+/// A mismatch is **dropped, not migrated** — see
+/// `CoreEngine::recover_interrupted_session`. That costs at most one
+/// interrupted session's time, once, on the boot after an upgrade, and buys
+/// never having to keep migration code for a row whose whole lifetime is
+/// measured in seconds.
+pub const SNAPSHOT_FORMAT: u32 = 1;
+
 /// State snapshot for crash recovery (issue #201).
 ///
 /// Written while a session runs and cleared when it settles, so the presence of
@@ -170,6 +189,14 @@ pub trait Store: Send + Sync {
 /// got to settle one — a power cut, a crash, or a kill.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateSnapshot {
+    /// The [`SNAPSHOT_FORMAT`] the writer was built with.
+    ///
+    /// `#[serde(default)]` so a row from before this field existed reads as 0,
+    /// which matches no format and is therefore dropped — which is the wanted
+    /// behaviour, not a special case.
+    #[serde(default)]
+    pub version: u32,
+
     /// When this snapshot was taken. For a recovered session this is the last
     /// moment the daemon is known to have been alive, and so the end of what
     /// can honestly be charged.
@@ -177,6 +204,21 @@ pub struct StateSnapshot {
 
     /// Active session info (if any)
     pub active_session: Option<SessionSnapshot>,
+}
+
+impl StateSnapshot {
+    /// Stamp a snapshot with the format this build writes.
+    ///
+    /// The only way a writer should build one: a struct literal would let a
+    /// caller spell `version` themselves, and the one thing that field must
+    /// never be is whatever someone typed.
+    pub fn new(timestamp: DateTime<Local>, active_session: Option<SessionSnapshot>) -> Self {
+        Self {
+            version: SNAPSHOT_FORMAT,
+            timestamp,
+            active_session,
+        }
+    }
 }
 
 /// Snapshot of an active session

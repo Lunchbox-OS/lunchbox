@@ -251,6 +251,12 @@ is a straight trade: it bounds how much a power cycle can win, and costs an
 fsync that often. Thirty seconds is set against what the bypass costs to
 perform, since a reboot is tens of seconds before the child can play again.
 
+The checkpoint is versioned, and a version this build does not recognise — or a
+row it cannot parse — is **dropped unbilled** rather than migrated. `billable`
+means what one version's billing rules made it mean, and an upgrade is exactly
+the moment a reader would otherwise charge a child for a number it no longer
+understands.
+
 **Startup settles whatever the last run did not.**
 `recover_interrupted_session` runs before the socket exists, so nothing can
 launch ahead of it. It charges the last checkpoint's `billable` to the session's

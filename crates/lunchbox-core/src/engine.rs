@@ -9,7 +9,7 @@ use lunchbox_api::{
 use lunchbox_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use lunchbox_host_api::{HostCapabilities, HostSessionHandle};
 use lunchbox_store::{
-    AuditEvent, AuditEventType, SessionSnapshot, StateSnapshot, Store, TokenState,
+    AuditEvent, AuditEventType, SNAPSHOT_FORMAT, SessionSnapshot, StateSnapshot, Store, TokenState,
 };
 use lunchbox_util::{EntryId, LimitSubject, MonotonicInstant, SessionId};
 use std::collections::{HashMap, HashSet};
@@ -1525,9 +1525,9 @@ impl CoreEngine {
             return;
         }
 
-        let snapshot = StateSnapshot {
-            timestamp: now,
-            active_session: Some(SessionSnapshot {
+        let snapshot = StateSnapshot::new(
+            now,
+            Some(SessionSnapshot {
                 session_id: session.plan.session_id.clone(),
                 entry_id: session.plan.entry_id.clone(),
                 started_at: session.started_at,
@@ -1535,7 +1535,7 @@ impl CoreEngine {
                 warnings_issued: session.warnings_issued.clone(),
                 billable: session.billable_duration(now_mono),
             }),
-        };
+        );
 
         if let Err(e) = self.store.save_snapshot(&snapshot) {
             warn!(error = %e, "Failed to checkpoint the running session");
@@ -1552,10 +1552,7 @@ impl CoreEngine {
     /// `active_session`, not a row.
     fn clear_session_snapshot(&mut self, now: DateTime<Local>) {
         self.last_snapshot_at = None;
-        let cleared = StateSnapshot {
-            timestamp: now,
-            active_session: None,
-        };
+        let cleared = StateSnapshot::new(now, None);
         if let Err(e) = self.store.save_snapshot(&cleared) {
             // Left behind, the stale checkpoint would be recovered at the next
             // startup and its time charged a second time. Loud, because the
@@ -1597,12 +1594,39 @@ impl CoreEngine {
         now: DateTime<Local>,
     ) -> Option<RecoveredSession> {
         let snapshot = match self.store.load_snapshot() {
-            Ok(snapshot) => snapshot?,
+            Ok(None) => return None,
+            Ok(Some(snapshot)) => snapshot,
             Err(e) => {
-                warn!(error = %e, "Could not read the session checkpoint; an interrupted session may go unbilled");
+                // A row this build cannot parse at all: a checkpoint from a
+                // future format, or a corrupt one. Same answer as a version
+                // mismatch, and it has to be *dropped* rather than left —
+                // otherwise it is re-read and re-warned at every startup from
+                // now on, and never settles into anything.
+                warn!(error = %e, "Session checkpoint could not be read; dropping it unbilled");
+                self.clear_session_snapshot(now);
                 return None;
             }
         };
+
+        // A checkpoint written by a different build of Lunchbox is not
+        // something to guess at. `billable` is a number produced by this
+        // version's billing rules, and charging a child for one produced by
+        // rules we no longer run is worse than charging nothing: it is wrong in
+        // an invisible way. Dropped rather than migrated, deliberately — the
+        // cost is one interrupted session's time on the boot after an upgrade,
+        // and the alternative is carrying migration code for a row that
+        // normally exists for thirty seconds.
+        if snapshot.version != SNAPSHOT_FORMAT {
+            warn!(
+                found = snapshot.version,
+                understood = SNAPSHOT_FORMAT,
+                "Session checkpoint was written by a different version of Lunchbox; dropping it \
+                 unbilled"
+            );
+            self.clear_session_snapshot(now);
+            return None;
+        }
+
         let session = snapshot.active_session?;
 
         // The day the session started, exactly as a normal end would bill it
@@ -5808,6 +5832,84 @@ mod tests {
                 .active_session
                 .is_none(),
             "and leaves no checkpoint for the next start to bill again"
+        );
+    }
+
+    /// A checkpoint written by a different build is dropped, not guessed at.
+    ///
+    /// `billable` is a number produced by one version's billing rules. Charging
+    /// a child for one produced by rules this build no longer runs would be
+    /// wrong in a way nothing could see, so the row goes unbilled — and it has
+    /// to actually *go*, or every future startup re-reads it.
+    #[test]
+    fn a_checkpoint_from_another_version_is_dropped_unbilled() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+
+        // A checkpoint that is perfectly readable and simply is not ours.
+        let mut stale = StateSnapshot::new(
+            start + chrono::Duration::minutes(5),
+            Some(SessionSnapshot {
+                session_id: SessionId::new(),
+                entry_id: EntryId::new("test-game"),
+                started_at: start,
+                deadline: None,
+                warnings_issued: vec![],
+                billable: Duration::from_secs(5 * 60),
+            }),
+        );
+        stale.version = SNAPSHOT_FORMAT + 1;
+        store.save_snapshot(&stale).unwrap();
+
+        let mut next_boot = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+        assert!(
+            next_boot
+                .recover_interrupted_session(on_day(27, 16, 10))
+                .is_none(),
+            "a format this build does not understand is not settled"
+        );
+        assert_eq!(
+            store
+                .get_usage(&EntryId::new("test-game"), start.date_naive())
+                .unwrap(),
+            Duration::ZERO,
+            "and nothing it claimed is charged"
+        );
+        assert!(
+            store
+                .load_snapshot()
+                .unwrap()
+                .unwrap()
+                .active_session
+                .is_none(),
+            "and it is dropped, so the next startup does not read it again"
+        );
+    }
+
+    /// The version this build writes is the one it reads back, so an ordinary
+    /// recovery is never mistaken for a foreign format.
+    #[test]
+    fn a_checkpoint_this_build_wrote_is_accepted() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+        let mut next_boot = power_cut_after(
+            store,
+            make_test_policy(),
+            "test-game",
+            start,
+            SNAPSHOT_INTERVAL,
+        );
+
+        let written = next_boot.store.load_snapshot().unwrap().unwrap();
+        assert_eq!(written.version, SNAPSHOT_FORMAT);
+        assert!(
+            next_boot
+                .recover_interrupted_session(on_day(27, 16, 5))
+                .is_some()
         );
     }
 

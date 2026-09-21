@@ -169,6 +169,13 @@ and, once those were built:
 > Make any crash like this one visible as a diagnostic, then commit as
 > reviewable chunks and push the PR
 
+and, on review of the PR:
+
+> Looks like `StateSnapshot` is missing a version in case an update is
+> installed that changes the checkpoint format. If they don't match on settle,
+> it's probably fine to just drop the snapshot entirely rather than having to
+> maintain migration logic here.
+
 ## What was implemented
 
 Three pieces, in the order they matter to a child's ledger. The investigation
@@ -296,6 +303,33 @@ Four decisions:
 No web UI change: `DiagnosticsPage.tsx` renders `message` and `remedy` directly
 and has no per-code table to keep in step.
 
+### 5. The checkpoint is versioned (from review)
+
+A checkpoint is written by one build and read by **the next build to start**,
+which across an upgrade is a different one. Two ways that bit before the review
+caught it:
+
+- A shape-compatible change reads straight through. `billable` is a number
+  produced by one version's billing rules; the reader has nothing that tells it
+  those rules changed, so it charges a child for a figure it no longer
+  understands, wrongly and invisibly. A field added later with
+  `#[serde(default)]` is the easy version of this mistake — it deserializes
+  happily out of an older row and bills the default.
+- A shape-*incompatible* change made `load_snapshot` return `Err`, which the
+  first draft merely logged. The row then stayed, so every future startup
+  re-read it, re-warned, and never settled it into anything.
+
+`StateSnapshot::version` carries `SNAPSHOT_FORMAT` (currently 1), stamped by
+`StateSnapshot::new` so a writer cannot spell it themselves. A mismatch — and an
+unparseable row, which takes the same arm — is **dropped unbilled and cleared**.
+`#[serde(default)]` on the field means a row from before it existed reads as 0,
+matching no build, so the legacy case needs no special handling.
+
+Dropping rather than migrating is the reviewer's call and the right one: the
+cost is at most one interrupted session's time, once, on the boot after an
+upgrade, against permanently carrying migration code for a row whose normal
+lifetime is thirty seconds.
+
 ### Not changed
 
 - **No config surface.** `SNAPSHOT_INTERVAL` is a constant with its rationale
@@ -315,7 +349,8 @@ and has no per-code table to keep in step.
 
 ## Tests
 
-Thirteen: nine in `engine.rs` and four in `lunchboxd/src/main.rs`.
+Seventeen: eleven in `engine.rs`, four in `lunchboxd/src/main.rs`, and two more
+in `sqlite.rs`.
 
 Eight of the engine nine use a `power_cut_after` helper that runs a session
 through real 1 Hz ticks and then drops the engine with no end at all — no
@@ -333,6 +368,13 @@ hands back a fresh engine on the same store, as the next boot would see it.
 | `a_recovered_session_is_written_to_the_audit_log` | `Interrupted`, stamped at last-seen |
 | `checkpoints_are_written_on_the_interval_not_every_tick` | it is a bound on loss, not a clock |
 | `a_shutdown_settles_the_session_it_stops` | piece 1 at the engine level |
+
+Two on versioning: `a_checkpoint_from_another_version_is_dropped_unbilled`
+(which fails with the version check disabled) and
+`a_checkpoint_this_build_wrote_is_accepted`, so the guard cannot start refusing
+everything unnoticed. Two more at the store level pin what the engine's arms
+depend on: a pre-versioning row reads as format 0, and an unparseable row is an
+`Err` rather than a silent `None`.
 
 And four on the diagnostic (`interrupted_session_diagnostic_tests`):
 `it_names_the_activity_and_what_was_recovered`,
@@ -415,6 +457,20 @@ remedy  : A power cut or crash does this. If it keeps happening while an activit
 `since` predating the daemon's own start is the timestamp rule working. On the
 next clean boot the set is back to `['firewall_unenforceable']`, so it clears
 itself.
+
+**6. An upgrade drops a checkpoint it does not understand.** Crashed mid-session
+to get a real checkpoint (`version: 1`, `billable: 60s`), then rewrote the row
+in place as `version: 2` claiming `999s` — an upgrade, from the reader's point
+of view — and booted:
+
+```
+WARN lunchbox_core::engine: Session checkpoint was written by a different
+     version of Lunchbox; dropping it unbilled found=2 understood=1
+```
+
+`usage` stayed empty (the 999s was not billed), no audit event was written, and
+the row came back cleared at `version: 1`. Booting once more logged nothing,
+which is the half the first draft got wrong.
 
 
 ## The "disk corruption" aside

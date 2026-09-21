@@ -801,7 +801,7 @@ fn row_to_audio_output(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioOutputR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AuditEventType;
+    use crate::{AuditEventType, SNAPSHOT_FORMAT};
 
     #[test]
     fn test_in_memory_store() {
@@ -1173,15 +1173,59 @@ mod tests {
         assert!(store.load_snapshot().unwrap().is_none());
 
         // Save snapshot
-        let snapshot = StateSnapshot {
-            timestamp: lunchbox_util::now(),
-            active_session: None,
-        };
+        let snapshot = StateSnapshot::new(lunchbox_util::now(), None);
         store.save_snapshot(&snapshot).unwrap();
 
         // Load it back
         let loaded = store.load_snapshot().unwrap().unwrap();
         assert!(loaded.active_session.is_none());
+        assert_eq!(
+            loaded.version, SNAPSHOT_FORMAT,
+            "what is written is stamped with the format that wrote it"
+        );
+    }
+
+    /// A row from before `version` existed reads as format 0, which matches no
+    /// build and so is dropped by the engine rather than billed (issue #201).
+    /// Nothing in production ever wrote one — `save_snapshot` had no caller —
+    /// but the field's `serde(default)` is what makes that a non-event, and
+    /// that is worth pinning.
+    #[test]
+    fn a_snapshot_written_before_versioning_reads_as_format_zero() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO snapshot (id, snapshot_json) VALUES (1, ?)",
+                [format!(
+                    r#"{{"timestamp":"{}","active_session":null}}"#,
+                    lunchbox_util::now().to_rfc3339()
+                )],
+            )
+            .unwrap();
+
+        assert_eq!(store.load_snapshot().unwrap().unwrap().version, 0);
+    }
+
+    /// A row this build cannot parse at all is an error rather than a panic or
+    /// a silently empty result — the engine turns that into the same "drop it
+    /// unbilled" as a version mismatch, and it can only do so if it is told.
+    #[test]
+    fn an_unparseable_snapshot_is_an_error_not_a_silent_none() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO snapshot (id, snapshot_json) VALUES (1, ?)",
+                ["{\"this\": \"is not a snapshot\"}"],
+            )
+            .unwrap();
+
+        assert!(store.load_snapshot().is_err());
     }
 }
 

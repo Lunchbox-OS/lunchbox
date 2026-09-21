@@ -199,6 +199,22 @@ Clearing is a **write**, not a delete: the snapshot is a single row that is
 overwritten with `active_session: None` once the session settles. What recovery
 looks for is the session, not the row.
 
+### The checkpoint is versioned
+
+`StateSnapshot::version` carries `SNAPSHOT_FORMAT`, and a reader that does not
+recognise it **drops the row unbilled** rather than migrating it. A checkpoint
+is written by one build and read by the next one to start, which across an
+upgrade is a different build — and `billable` is a number produced by a
+particular version's billing rules. Charging a child for one produced by rules
+the reader no longer runs would be wrong in a way nothing can see.
+
+Dropping costs at most one interrupted session's time, once, on the boot after
+an upgrade. It buys never keeping migration code for a row whose normal lifetime
+is thirty seconds. Build one with `StateSnapshot::new`, which stamps the version
+for you; **bump `SNAPSHOT_FORMAT` whenever either struct changes shape or
+meaning** — a field added with `#[serde(default)]` deserializes happily out of
+an older row and bills whatever the default is.
+
 ## Database Schema
 
 The SQLite store uses this schema:
