@@ -136,8 +136,14 @@ mod imp {
                 cr.line_to(cx + sin * radius * length, cy - cos * radius * length);
                 let _ = cr.stroke();
             };
-            hand(hour_angle, 0.50, rim);
-            hand(minute_angle, 0.78, rim * 0.8);
+            // The hour hand is deliberately much shorter and a little heavier
+            // than the minute hand, rather than the two being near-twins. At
+            // six o'clock — the closing time in half the examples in this
+            // repository — they are exactly opposite, and two similar hands
+            // there draw one straight line across the face, which reads as a
+            // crossed-out circle rather than as a clock.
+            hand(hour_angle, 0.45, rim * 1.1);
+            hand(minute_angle, 0.80, rim * 0.7);
         }
     }
 }

@@ -613,6 +613,13 @@ from `type.footer.size` rather than written down, so it reads as a picture
 rather than as one more glyph in the line — which is, in the end, exactly what
 the emoji had been.
 
+One thing only a screenshot found: the hour hand has to be *much* shorter than
+the minute hand, and a little heavier. Six o'clock is the closing time in half
+the examples in this repository, and at six o'clock the hands are exactly
+opposite — two near-twins there draw one straight line across the face, which
+reads as a crossed-out circle rather than as a clock. 0.45 and 0.80 of the
+radius, at 1.1 and 0.7 of the ring's weight.
+
 The HUD's own appearance changed slightly with the move. That is sanctioned:
 the bar is being restyled in #209 anyway, and the reviewer said "roughly".
 
