@@ -5244,4 +5244,42 @@ mod tests {
             "a session the caregiver granted is not billed to the gate"
         );
     }
+
+    /// What lunchboxd's shutdown path now does with a live session (issue
+    /// #201). It used to stop the activity and walk away, leaving the time
+    /// unbilled — and since `Mod4+Shift+Escape` is `pkill -TERM lunchboxd` and
+    /// sway's exit SIGHUPs the daemon into the same arm, that was reachable
+    /// without touching the power button at all.
+    #[test]
+    fn a_shutdown_settles_the_session_it_stops() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+
+        let start = on_day(27, 16, 0);
+        let started = launch_at(&mut engine, "test-game", start);
+
+        assert!(matches!(
+            engine.begin_stop(SessionEndReason::ServiceShutdown),
+            BeginStopDecision::Stopping { .. }
+        ));
+        let settled = engine
+            .finish_stop(
+                started + Duration::from_secs(90),
+                start + chrono::Duration::seconds(90),
+            )
+            .expect("the shutdown settles the session");
+
+        assert!(matches!(settled.reason, SessionEndReason::ServiceShutdown));
+        assert_eq!(
+            store
+                .get_usage(&EntryId::new("test-game"), start.date_naive())
+                .unwrap(),
+            Duration::from_secs(90),
+            "a clean shutdown bills the time the child actually played"
+        );
+    }
 }

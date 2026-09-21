@@ -13,11 +13,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use lunchbox_api::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticSink, DiagnosticSubject, EntryKind,
-    EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response,
+    EntryKindTag, ErrorCode, ErrorInfo, Event, EventPayload, Response, SessionEndReason,
 };
 use lunchbox_ble::{BleServer, BleServerConfig};
 use lunchbox_config::load_config;
-use lunchbox_core::{CoreEngine, CoreEvent};
+use lunchbox_core::{BeginStopDecision, CoreEngine, CoreEvent};
 use lunchbox_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
     HudLayoutController, LightSensor, NetworkInfoProvider, NoOpDisplayController,
@@ -2225,12 +2225,32 @@ impl Service {
         // Graceful shutdown
         info!("Shutting down lunchboxd");
 
-        // Stop all running sessions
+        // Stop all running sessions, and *settle* them.
+        //
+        // Settling is the point, not a tidy-up (issue #201). Usage is only
+        // written when a session ends, and every ordinary end runs through the
+        // select loop above — which this path has already broken out of. So the
+        // `Exited` event that `host.stop` is about to produce has nothing left
+        // to receive it, and without the `finish_stop` below a clean SIGTERM
+        // dropped the whole session's time, tokens and cooldown on the floor.
+        // That is not only the power button: `Mod4+Shift+Escape` is
+        // `pkill -TERM lunchboxd`, and sway exiting SIGHUPs us into the same
+        // arm, so a normal logout or reboot lost the time too.
+        //
+        // Two-phase like every other stop, so the engine settles the session
+        // itself and the numbers agree with the ones a HUD-driven stop writes.
         {
-            let engine = engine.lock().await;
-            if let Some(session) = engine.current_session() {
-                info!(session_id = %session.plan.session_id, "Stopping active session");
-                if let Some(handle) = &session.host_handle
+            let mut engine = engine.lock().await;
+            // Read the clock *before* the teardown wait below, exactly as
+            // `stop_current` does: the child is not charged for "Closing…".
+            let now_mono = MonotonicInstant::now();
+            let now = lunchbox_util::now();
+
+            if let BeginStopDecision::Stopping { handle, .. } =
+                engine.begin_stop(SessionEndReason::ServiceShutdown)
+            {
+                info!("Stopping active session");
+                if let Some(handle) = &handle
                     && let Err(e) = host
                         .stop(
                             handle,
@@ -2241,6 +2261,18 @@ impl Service {
                         .await
                 {
                     warn!(error = %e, "Failed to stop session gracefully");
+                }
+
+                // Settles usage, tokens and cooldowns, and clears the
+                // checkpoint so the next startup does not recover a session
+                // that ended properly here.
+                if let Some(settled) = engine.finish_stop(now_mono, now) {
+                    info!(
+                        session_id = %settled.session_id,
+                        entry_id = %settled.entry_id,
+                        duration_secs = settled.duration.as_secs(),
+                        "Settled the active session on shutdown"
+                    );
                 }
             }
         }
@@ -3382,3 +3414,4 @@ mod harden_diagnostic_tests {
         );
     }
 }
+

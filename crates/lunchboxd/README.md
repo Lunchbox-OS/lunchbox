@@ -266,13 +266,29 @@ State is persisted to SQLite:
     └── sessions/      # Session stdout/stderr
 ```
 
+A running session is checkpointed into that database every 30 seconds, and
+settled from the checkpoint at the next startup if this process did not get to
+settle it itself (issue #201). Startup therefore does that reconciliation
+**before** the management socket exists, so nothing can launch ahead of it; a
+recovered session is logged at `WARN` and recorded in the audit log as
+`SessionEnded { reason: Interrupted }`.
+
 ## Signals
 
 | Signal | Action |
 |--------|--------|
-| `SIGHUP` | Reload configuration |
 | `SIGTERM` | Graceful shutdown |
 | `SIGINT` | Graceful shutdown |
+| `SIGHUP` | Graceful shutdown (this is how sway's exit reaches us) |
+
+All three are the same path, and configuration reload is not among them — the
+config file is *watched*, so an edit takes effect without a signal.
+
+Graceful shutdown stops the running activity **and settles it**: usage, tokens
+and cooldowns are written before the process exits. That has to happen here
+rather than through the ordinary exit path, because the event loop that handles
+activity exits has already been left by the time shutdown runs. Getting this
+wrong meant a plain logout refunded the child's time — see issue #201.
 
 ## Dependencies
 
