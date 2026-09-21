@@ -105,15 +105,24 @@ replace the chip, and the relevant jar sits on the right.
 
 ## Layout rules
 
-1. Categories are columns, in config order, left to right.
-2. A column holds three items; more spill into a second stack to the right under
-   the same header. Width grows; height never does.
+These are the rules as built. Where one of them now reads differently from the
+draft it was handed down as, the departures at the end say what changed and
+why.
+
+1. The field is a row of columns, in config order, read down and then right. A
+   column is usually one category; two short ones share it when both fit.
+2. A category's members fill its columns in reading order — across the top row,
+   then the row under it — as many rows deep as the screen has room for. Width
+   grows; height never does.
 3. Time lives where it applies: a category that earns or has a group jar carries
    the badge next to its name; an item with its own gate carries it under its
    own name.
-4. Schedules go on the compartment floor.
-5. Never scroll vertically. If the row overflows, the whole row scrolls
-   horizontally; the right edge fades under a yellow chevron chip.
+4. Schedules go on the compartment floor: "Until 6:00 PM" while the category is
+   open, "Opens 4:00 PM" while it is shut, each behind a little clock face
+   pointing at that hour.
+5. Never scroll vertically. If the row overflows by more than half a cell, the
+   whole row scrolls horizontally and the edge fades under a yellow chevron
+   chip; by less than that, the cells squish and it does not scroll at all.
 6. Locked things stay visible at 50 % with their have/need badge.
 7. No plates on app icons. The only plates are book placeholders until covers
    exist.
@@ -127,10 +136,10 @@ Still open:
   the design for it, not a description of it. Tracked as
   <https://github.com/aarmea/lunchbox/issues/209>, which also lists where the
   bar as built and the bar as drawn disagree.
-- **Bedtime** (compartments emptied and dimmed, one left open) is described, not
-  drawn — and is blocked on the engine besides: a compartment floor cannot say
-  "Opens 10:00 AM" until `ReasonCode::OutsideTimeWindow::next_window_start` is
-  actually computed.
+- **Bedtime** — compartments emptied and dimmed, one left open — is described,
+  not drawn. Its floor is built now (a shut category says when it opens), but
+  what the *screen* does when everything is shut at once is still a question
+  for the design canvas.
 - **Category icons** for the row headers, if the words are ever dropped.
 - **Book cover art**: the two `book` placeholders in the mockups use a generic
   glyph on a tinted plate.
@@ -171,3 +180,6 @@ Each was asked for after seeing it running, and each is argued in
   scales by its narrower axis so as never to reflow, and on a screen taller
   than 16:9 that leaves height under the compartments that a fixed three
   wastes — and on a shorter one it clips. The launcher measures instead.
+- A shut category's floor reads **"Opens 4:00 PM"**. The draft left the bedtime
+  screen to be designed (§9 below) and the engine could not have drawn it
+  anyway: the next opening time was a field nothing filled in. Both are done.
