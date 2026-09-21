@@ -148,6 +148,11 @@ Each was asked for after seeing it running, and each is argued in
 - There is **no selection until the child makes one**. The rule here is exactly
   one focused item at all times, which assumes a cursor; a touchscreen has
   none, and a standing highlight there claims a choice nobody has made.
+- Two short categories **share a column** of the field, one above the other,
+  rather than each taking a compartment the full height of the screen. Rule 1
+  below makes a category a column; this makes a column hold more than one when
+  they both fit, which is the difference between five categories on one screen
+  and five categories on two.
 - Members are **dealt across** the columns in reading order rather than filling
   one column before starting the next, so a part-full category leaves its gap
   along the bottom instead of standing an empty column in the tin. Rule 2 below

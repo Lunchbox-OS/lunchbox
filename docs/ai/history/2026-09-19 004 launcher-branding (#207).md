@@ -713,6 +713,55 @@ with room for three rows, `[3, 2, 2]` for seven — and one of them reads the
 members back in screen order to check that config order really is reading
 order.
 
+## Two compartments to a column
+
+The last of the three: a category only needs the height its own items take, so
+two short ones can stand one above the other where the brief gives each a
+compartment the full height of the screen. With the example configuration at
+1280×720 that is the difference between five categories across five columns —
+two of them mostly empty, the last one off the edge — and five categories in
+three, all of them on screen.
+
+The rule is *iff both fit*: heights are measured off the built compartments
+(`widget.measure`), not guessed, because a category without a schedule has no
+floor and guessing the worst case would cost it the pairing it can actually
+have. The packing is greedy and strictly in configuration order, so reading a
+column downwards and then moving right reads the categories in the order the
+file lists them. A cleverer fit exists — with the example config, Books would
+pair with Listen where it does not pair with Learn — but it buys that by moving
+categories around, and a home screen whose sections rearrange themselves when
+one of them gains an activity is worse than one with a gap in it. A compartment
+too tall for the field at all still gets a column to itself: that is
+administrator mode's picker, which holds every application on the host.
+
+### What it cost elsewhere
+
+Three things, and two of them were the sort that only show up on screen.
+
+**The D-pad stopped being about compartments.** `Stack` was "one column of
+items, and the compartment it sits in"; it is now "one column of items, and the
+*field column* it sits in", and its items are every item at that x — which, in
+a column holding two compartments, runs from the end of the upper one straight
+into the start of the lower one. That is what makes Down carry on downwards
+across the join rather than stopping at it, and it needed no change to
+`move_selection` at all: the model was already a flat list of columns, and the
+only thing that changed is which items are in one.
+
+**Two places were reading x out of an allocation.** An allocation is relative
+to the parent, and compartments are children of their column now rather than of
+the row, so `allocation().x()` stopped meaning what `scroll_to_cursor` and
+`slide_headers` thought it meant — the latter would have put every header in
+the field at the same place. Scrolling now measures the column, which *is* a
+child of the row; the headers use `translate_coordinates` like the name and
+badge beside them already did. Verified with a scratch configuration of six
+categories whose only launchable activity is the last one, so the row lands
+scrolled to its end: the third category, clipped by the left edge of the
+screen, still shows the tail of its name.
+
+**The compartments in a column share a width.** Whatever the widest of them
+needs, the others take, or a column of the tin reads as two tins that happen to
+be above each other.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here

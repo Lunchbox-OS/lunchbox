@@ -57,13 +57,20 @@ const EDGE_MARGIN: i32 = 56;
 /// tracks this itself instead of leaning on `:focus`.
 const SELECTED_CLASS: &str = "lb-item--selected";
 
-/// One navigable column of items, and the compartment it sits in.
+/// One navigable column of items, and the column of the field it sits in.
 pub struct Stack {
-    /// The well this column belongs to, held so scrolling can bring the whole
-    /// category into view rather than just the item — which is what the brief
-    /// asks for, and what stops a wide category creeping past the left margin
-    /// one stack at a time.
-    compartment: gtk4::Widget,
+    /// The field column this stack belongs to, held so scrolling can bring the
+    /// whole thing into view rather than just the item — which is what the
+    /// brief asks for, and what stops a wide category creeping past the left
+    /// margin one stack at a time.
+    ///
+    /// The *slot* rather than the compartment, because a slot may hold more
+    /// than one compartment (see `rebuild`), and they share its x extent.
+    slot: gtk4::Widget,
+    /// Every item at this x, top to bottom — which, in a slot holding two
+    /// compartments, runs from the end of the upper one straight into the
+    /// start of the lower one. That is what makes Down carry on downwards
+    /// across the join instead of stopping at it.
     items: Vec<LauncherItem>,
 }
 
@@ -423,26 +430,85 @@ impl LauncherField {
         imp.stacks.borrow_mut().clear();
         imp.row.set_spacing(theme::px(28, scale));
 
-        // How tall a stack may be, measured against the screen this actually
-        // is rather than the one the design was drawn for. One number for the
-        // whole row, so every compartment's items start on the same line.
-        let rows = compartment::rows_that_fit(self.height(), scale);
-        tracing::debug!(height = self.height(), scale, rows, "laying the field out");
+        // What this screen has room for, measured against the screen it
+        // actually is rather than the one the design was drawn for. One row
+        // count for the whole field, so every compartment's items start on the
+        // same line.
+        let budget = compartment::budget(self.height(), scale);
+        let gap = theme::px(28, scale);
 
         let categories = categorise(&entries, &groups);
+        let built: Vec<compartment::Compartment> = categories
+            .into_iter()
+            .map(|(label, group, members)| {
+                compartment::build(&label, group, members, scale, budget.rows)
+            })
+            .collect();
+
+        // A category only claims the height its own items need, so two short
+        // ones can stand one above the other in a single column of the field
+        // instead of each wasting most of a screen. Heights come from the
+        // compartments themselves, now that they exist: a category without a
+        // schedule has no floor, and guessing at that would cost it the pairing
+        // it can actually have.
+        let heights: Vec<i32> = built
+            .iter()
+            .map(|c| c.widget.measure(gtk4::Orientation::Vertical, -1).1)
+            .collect();
+        let slots = compartment::pack_into_slots(&heights, budget.height, gap);
+        tracing::debug!(
+            height = self.height(),
+            scale,
+            rows = budget.rows,
+            room = budget.height,
+            ?heights,
+            slots = slots.len(),
+            "laying the field out"
+        );
+
         let mut stacks: Vec<Stack> = Vec::new();
         let mut headers: Vec<Header> = Vec::new();
-        for (label, group, members) in categories {
-            let built = compartment::build(&label, group, members, scale, rows);
-            imp.row.append(&built.widget);
-            headers.push(Header {
-                well: built.widget.clone(),
-                name: built.name,
-                badge: built.badge,
-            });
-            for items in built.stacks {
+        for range in slots {
+            let slot = gtk4::Box::new(gtk4::Orientation::Vertical, gap);
+            slot.set_valign(gtk4::Align::Fill);
+            slot.set_vexpand(true);
+            // As with the compartment itself: the children state their own
+            // expansion, and left to propagate it would stretch the field's
+            // columns to fill the viewport.
+            slot.set_hexpand(false);
+            imp.row.append(&slot);
+
+            for c in &built[range.clone()] {
+                // Everything in a slot is as wide as the widest of them, so a
+                // column of the field reads as one column rather than as two
+                // tins that happen to be above each other.
+                c.widget.set_halign(gtk4::Align::Fill);
+                slot.append(&c.widget);
+                headers.push(Header {
+                    well: c.widget.clone(),
+                    name: c.name.clone(),
+                    badge: c.badge.clone(),
+                });
+            }
+
+            // One navigable stack per *x position* in the slot, carrying the
+            // items of every compartment at that x. The compartments in a slot
+            // share a left edge and a padding, so their nth columns line up.
+            let widest = built[range.clone()]
+                .iter()
+                .map(|c| c.stacks.len())
+                .max()
+                .unwrap_or(0);
+            let slot_widget: gtk4::Widget = slot.clone().upcast();
+            for column in 0..widest {
+                let items: Vec<LauncherItem> = built[range.clone()]
+                    .iter()
+                    .filter_map(|c| c.stacks.get(column))
+                    .flatten()
+                    .cloned()
+                    .collect();
                 stacks.push(Stack {
-                    compartment: built.widget.clone(),
+                    slot: slot_widget.clone(),
                     items,
                 });
             }
@@ -695,10 +761,10 @@ impl LauncherField {
     ///
     /// Two cases, and the second is not the child's:
     ///
-    /// * A compartment that **fits** the viewport scrolls as a whole, aligned
+    /// * A field column that **fits** the viewport scrolls as a whole, aligned
     ///   to the left margin. That is the brief's rule, and it is what keeps a
     ///   category from being half on screen.
-    /// * A compartment **wider** than the viewport cannot be aligned to
+    /// * A column **wider** than the viewport cannot be aligned to
     ///   anything useful, so the *item* is what gets scrolled to, by the least
     ///   amount that brings it fully into view. Administrator mode's picker is
     ///   one compartment holding every application on the host, so this is the
@@ -716,16 +782,13 @@ impl LauncherField {
         }
 
         let (s, _) = imp.cursor.get();
-        let Some(well) = imp
-            .stacks
-            .borrow()
-            .get(s)
-            .map(|stack| stack.compartment.clone())
-        else {
+        let Some(slot) = imp.stacks.borrow().get(s).map(|stack| stack.slot.clone()) else {
             return;
         };
 
-        let alloc = well.allocation();
+        // A slot is a direct child of the row, so its allocation is already in
+        // the coordinates the adjustment counts in.
+        let alloc = slot.allocation();
         if (alloc.width() as f64) <= page {
             let left = alloc.x() as f64;
             let right = left + alloc.width() as f64;
@@ -849,9 +912,14 @@ impl LauncherField {
         let edge = theme::px(COMPARTMENT_EDGE, imp.scale.get()) as f64;
 
         for header in imp.headers.borrow().iter() {
-            let well = header.well.allocation();
-            let well_left = well.x() as f64;
-            let well_right = well_left + well.width() as f64;
+            // In the row's coordinates, not the allocation's: a compartment is
+            // a child of its slot rather than of the row, so `allocation().x()`
+            // is measured from the slot's left edge and would put every header
+            // in the field at the same place.
+            let Some((well_left, _)) = header.well.translate_coordinates(&imp.row, 0.0, 0.0) else {
+                continue;
+            };
+            let well_right = well_left + f64::from(header.well.width());
 
             // Positions come from `translate_coordinates` rather than from the
             // allocation, because an allocation is relative to the parent and

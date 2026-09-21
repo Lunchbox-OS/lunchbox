@@ -324,10 +324,21 @@ fn split_into_stacks(entries: Vec<EntryView>, rows: usize) -> Vec<Vec<EntryView>
     stacks
 }
 
-/// How many items one stack can hold on a field `field_height` px tall.
+/// What the field's height means for the compartments in it.
+pub struct Budget {
+    /// The height a column of the field actually gets, once the field's own
+    /// margins above and below the row are out of it. What
+    /// [`pack_into_slots`] measures against.
+    pub height: i32,
+    /// Items one column of a compartment can hold.
+    pub rows: usize,
+}
+
+/// Work out, for a field `field_height` px tall, how much room a column of it
+/// has and how many items fit in one column of a compartment.
 ///
-/// The design hands down a fixed three (`space.rows` in `tokens.json`), and
-/// three is what a 1280×720 screen has room for. But the launcher runs on
+/// The design hands down a fixed three rows (`space.rows` in `tokens.json`),
+/// and three is what a 1280×720 screen has room for. But the launcher runs on
 /// whatever the device has, and `scale_for` deliberately scales by the
 /// *narrower* axis so the row never reflows — which means a screen taller than
 /// 16:9 ends up with spare height under the compartments that nothing uses,
@@ -344,14 +355,17 @@ fn split_into_stacks(entries: Vec<EntryView>, rows: usize) -> Vec<Vec<EntryView>
 /// nothing to catch it.
 ///
 /// The probe is the worst case on purpose — a header wearing a badge and a
-/// floor, which not every category has — so one number fits every compartment
-/// in the row and they all agree on where their items start.
-pub fn rows_that_fit(field_height: i32, scale: f64) -> usize {
+/// floor, which not every category has — so one row count fits every
+/// compartment in the field and they all agree on where their items start.
+pub fn budget(field_height: i32, scale: f64) -> Budget {
     // Before the window knows its size there is nothing to measure against.
     // The first layout after startup is always a re-layout (see the field's
     // `last_state`), so this is the value for one frame at most.
     if field_height <= 0 {
-        return theme::ROWS_PER_STACK;
+        return Budget {
+            height: 0,
+            rows: theme::ROWS_PER_STACK,
+        };
     }
 
     // `.lb-field` carries the margins above and below the row, so the probe
@@ -362,6 +376,11 @@ pub fn rows_that_fit(field_height: i32, scale: f64) -> usize {
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     row.add_css_class("lb-field__row");
     field.append(&row);
+    let measure = || field.measure(gtk4::Orientation::Vertical, -1).1;
+
+    // Three measurements of the same probe, each adding one part: the field's
+    // margins, then a compartment with nothing in it, then one item.
+    let margins = measure();
 
     let well = new_well();
     let (header, ..) = build_header("Category", Some(&Badge::Earn), scale);
@@ -373,17 +392,62 @@ pub fn rows_that_fit(field_height: i32, scale: f64) -> usize {
     well.append(&build_floor(lunchbox_util::now(), scale));
     row.append(&well);
 
-    let chrome = field.measure(gtk4::Orientation::Vertical, -1).1;
+    let chrome = measure() - margins;
 
-    // One cell, measured the same way. Every item is the same height whatever
-    // its name — `item.rs` reserves two lines and caps the label at two — so
-    // one probe stands for all of them.
+    // Every item is the same height whatever its name — `item.rs` reserves two
+    // lines and caps the label at two — so one probe stands for all of them.
     let probe = LauncherItem::new();
     probe.set_entry(probe_entry(), scale, Some(Badge::Earn));
     column.append(&probe);
-    let cell = field.measure(gtk4::Orientation::Vertical, -1).1 - chrome;
+    let cell = measure() - margins - chrome;
 
-    rows_in(field_height - chrome, cell, theme::px(ROW_GAP, scale))
+    let height = field_height - margins;
+    Budget {
+        height,
+        rows: rows_in(height - chrome, cell, theme::px(ROW_GAP, scale)),
+    }
+}
+
+/// Group the compartments into the field's columns, in config order.
+///
+/// Returns one range of compartment indices per column of the field. A column
+/// takes as many compartments as will stand in it — a category only claims the
+/// height its own items need, and two short ones in a tall field would
+/// otherwise each waste most of a screen.
+///
+/// Greedy, and strictly in order, so that reading a column downwards and then
+/// moving right reads the categories in the order the configuration lists
+/// them. A cleverer packing could fit more in (Books and Listen might pair
+/// where Books and Learn do not), but it would do it by shuffling the
+/// categories, and a home screen whose sections move around when one of them
+/// gains an activity is worse than one with a gap in it.
+///
+/// A compartment too tall for the field at all still gets a column of its own
+/// rather than being dropped: that is administrator mode's picker, which is
+/// one compartment holding every application on the host.
+pub fn pack_into_slots(heights: &[i32], available: i32, gap: i32) -> Vec<std::ops::Range<usize>> {
+    let mut slots: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut start = 0;
+    let mut used = 0;
+
+    for (i, &height) in heights.iter().enumerate() {
+        if i == start {
+            used = height;
+            continue;
+        }
+        let stacked = used + gap + height;
+        if stacked > available {
+            slots.push(start..i);
+            start = i;
+            used = height;
+        } else {
+            used = stacked;
+        }
+    }
+    if start < heights.len() {
+        slots.push(start..heights.len());
+    }
+    slots
 }
 
 /// How many `cell`-tall rows fit in `room` px with `gap` between them.
@@ -477,6 +541,16 @@ mod tests {
             .collect()
     }
 
+    /// The field's columns, as (first category, one past the last) — tuples
+    /// rather than the ranges themselves only so that a one-column answer can
+    /// be written down without tripping `single_range_in_vec_init`.
+    fn packed(heights: &[i32], available: i32, gap: i32) -> Vec<(usize, usize)> {
+        pack_into_slots(heights, available, gap)
+            .into_iter()
+            .map(|r| (r.start, r.end))
+            .collect()
+    }
+
     /// The members in the order they are read off the screen: across the top
     /// row, then the row under it.
     fn reading_order(stacks: &[Vec<EntryView>]) -> Vec<String> {
@@ -551,6 +625,69 @@ mod tests {
     #[test]
     fn a_stack_always_holds_something() {
         assert_eq!(shape(2, 0), [1, 1], "one item each, not a panic");
+    }
+
+    /// Two short categories share a column of the field; a third that would
+    /// not fit starts the next one.
+    #[test]
+    fn short_compartments_stand_one_above_another() {
+        // 300 high each, 20 of gap, in a field with 700 to give.
+        assert_eq!(packed(&[300, 300, 300], 700, 20), [(0, 2), (2, 3)]);
+        assert_eq!(packed(&[300, 300], 700, 20), [(0, 2)]);
+        assert_eq!(packed(&[300, 300, 300], 1000, 20), [(0, 3)]);
+    }
+
+    /// Exactly enough is enough, and one pixel over is not.
+    #[test]
+    fn the_fit_is_the_whole_test() {
+        assert_eq!(packed(&[340, 340], 700, 20), [(0, 2)]);
+        assert_eq!(packed(&[340, 341], 700, 20), [(0, 1), (1, 2)]);
+    }
+
+    /// A tall category takes a column to itself, and does not stop the ones
+    /// after it from pairing up.
+    #[test]
+    fn a_tall_compartment_keeps_its_own_column() {
+        assert_eq!(
+            packed(&[700, 200, 200], 700, 20),
+            [(0, 1), (1, 3)],
+            "the tall one fills its column; the two short ones share the next"
+        );
+    }
+
+    /// Administrator mode's picker is one compartment holding every
+    /// application on the host, and it is taller than any field. It still gets
+    /// drawn.
+    #[test]
+    fn a_compartment_too_tall_for_the_field_is_still_placed() {
+        assert_eq!(packed(&[2000], 700, 20), [(0, 1)]);
+        assert_eq!(packed(&[2000, 100], 700, 20), [(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn nothing_to_pack_is_no_columns() {
+        assert!(pack_into_slots(&[], 700, 20).is_empty());
+    }
+
+    /// Config order is never rearranged to make a better fit. A home screen
+    /// whose sections move about when one of them gains an activity is worse
+    /// than one with a gap in it.
+    #[test]
+    fn packing_never_reorders_the_categories() {
+        // The two short ones would pair happily if the tall one between them
+        // could be moved out of the way. It cannot, so all three take a column
+        // and the field carries the gap.
+        assert_eq!(packed(&[200, 500, 200], 700, 20), [(0, 1), (1, 2), (2, 3)]);
+
+        // The invariant behind that: the columns are contiguous runs covering
+        // the categories in order, so reading down a column and then moving
+        // right reads the configuration from the top.
+        let slots = pack_into_slots(&[300, 300, 700, 100, 100, 100], 700, 20);
+        assert_eq!(slots.first().map(|r| r.start), Some(0));
+        assert_eq!(slots.last().map(|r| r.end), Some(6));
+        for pair in slots.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "no category is skipped");
+        }
     }
 
     /// The width floor is two item columns and the gap between them — the

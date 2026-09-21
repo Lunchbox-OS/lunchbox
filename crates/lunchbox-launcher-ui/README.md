@@ -96,6 +96,22 @@ Height never grows: a category with more members gets wider, and if the row
 overflows the screen the row scrolls **horizontally**. The field never scrolls
 vertically.
 
+A category only claims the height its own items need, so the field is a row of
+**columns** rather than of compartments: two short categories stand one above
+the other in a single column instead of each wasting most of a screen
+(`compartment::pack_into_slots`). The packing is greedy and strictly in config
+order, so reading a column downwards and then moving right reads the categories
+in the order the configuration lists them; a cleverer fit would have to shuffle
+them, and a home screen whose sections move about when one of them gains an
+activity is worse than one with a gap in it. Everything in a column is as wide
+as the widest of them, and the column fills the field's height, so the row
+still reads as one tin.
+
+The D-pad model follows the *columns*, not the compartments: one navigable
+stack per x position, carrying the items of every compartment at that x, so
+Down runs off the end of the upper category straight into the start of the
+lower one.
+
 A compartment is never narrower than **two item columns**, whatever it holds.
 The header carries the category's name and a badge pushed to the far end of
 the same line; at one column wide there is not room for both, and since the
