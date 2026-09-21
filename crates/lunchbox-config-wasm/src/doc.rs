@@ -28,7 +28,8 @@ pub enum Patch {
         index: Option<usize>,
         value: Json,
     },
-    /// Reorder within the array at `path`.
+    /// Reorder within the array at `path`. `to` is where the element lands
+    /// once it has been lifted out, so the last slot is `len - 1`, not `len`.
     Move {
         path: String,
         from: usize,
@@ -641,27 +642,7 @@ fn move_within(slot: Slot<'_>, from: usize, to: usize) -> DocResult<bool> {
             if from >= aot.len() || to >= aot.len() {
                 return err("move index out of range");
             }
-            // Reordering the vector is not enough. Every table remembers the
-            // position it was parsed at, and that is what decides render order
-            // — so a rebuilt array whose tables kept their old positions comes
-            // back out in the old order, and the edit silently does nothing.
-            // Reassigning the same set of positions in the new sequence is a
-            // permutation, so it cannot collide with anything else in the
-            // document.
-            let positions: Vec<Option<usize>> = aot.iter().map(|t| t.position()).collect();
-            let mut tables: Vec<Table> = aot.iter().cloned().collect();
-            let t = tables.remove(from);
-            tables.insert(to, t);
-
-            let mut rebuilt = ArrayOfTables::new();
-            for (mut table, position) in tables.into_iter().zip(positions) {
-                if let Some(position) = position {
-                    table.set_position(position);
-                }
-                rebuilt.push(table);
-            }
-            *aot = rebuilt;
-            Ok(true)
+            reorder_tables(aot, from, to)
         }
         Slot::Item(Item::Value(Value::Array(a))) | Slot::Value(Value::Array(a)) => {
             if from >= a.len() || to >= a.len() {
@@ -672,6 +653,136 @@ fn move_within(slot: Slot<'_>, from: usize, to: usize) -> DocResult<bool> {
             Ok(true)
         }
         _ => err("cannot reorder a non-array"),
+    }
+}
+
+/// Reorder an array of tables — `[[entries]]`, `[[groups]]` — and carry across
+/// the two things `toml_edit` will not carry on its own. Both are silent when
+/// they go wrong, which is why each is spelled out here.
+///
+/// **Where a table renders.** Every table remembers the position it was parsed
+/// at, and that, not the vector, is what decides the order it comes back out
+/// in — so a rebuilt array whose tables kept their old positions comes back in
+/// the old order and the edit appears to do nothing. The sub-tables are the
+/// dangerous half: an entry is `[[entries]]` *plus* `[entries.kind]`,
+/// `[entries.availability]` and so on, and moving only the header leaves those
+/// behind to be re-read as fields of whatever entry now sits above them. The
+/// file still parses, so nothing complains; it is simply a different config.
+/// Giving every table in one entry's sub-tree the same position keeps the
+/// sub-tree together, because the encoder sorts by position *stably* and so
+/// falls back to structural order within a tie.
+///
+/// **Which comments belong to the entry.** See [`split_prefix`].
+///
+/// The positions an array occupies are consecutive — the parser numbers tables
+/// as it meets them — so a gap in them means some other table is written in
+/// among these, and there is no honest answer to where it should end up. That
+/// is refused rather than guessed at.
+fn reorder_tables(aot: &mut ArrayOfTables, from: usize, to: usize) -> DocResult<bool> {
+    // Split by slot before anything moves: the anchor stays where it is and
+    // the carried part travels with its table.
+    let split: Vec<Option<(String, String)>> = aot
+        .iter()
+        .map(|t| {
+            t.decor().prefix().and_then(|p| p.as_str()).map(|p| {
+                let (anchor, carried) = split_prefix(p);
+                (anchor.to_string(), carried.to_string())
+            })
+        })
+        .collect();
+    let anchors: Vec<Option<String>> = split
+        .iter()
+        .map(|s| s.as_ref().map(|(a, _)| a.clone()))
+        .collect();
+    let mut carried: Vec<Option<String>> = split.into_iter().map(|s| s.map(|(_, c)| c)).collect();
+
+    let blocks: Vec<Vec<usize>> = aot.iter().map(subtree_positions).collect();
+    let mut sizes: Vec<usize> = blocks.iter().map(Vec::len).collect();
+    let mut occupied: Vec<usize> = blocks.into_iter().flatten().collect();
+    occupied.sort_unstable();
+    if occupied.windows(2).any(|w| w[1] != w[0] + 1) {
+        return err("cannot reorder these: other tables are written in among them");
+    }
+    let mut next = occupied.first().copied();
+
+    // The anchors stay put; everything that describes the table itself moves
+    // with it.
+    let mut tables: Vec<Table> = aot.iter().cloned().collect();
+    let moved = tables.remove(from);
+    tables.insert(to, moved);
+    let moved = carried.remove(from);
+    carried.insert(to, moved);
+    let moved = sizes.remove(from);
+    sizes.insert(to, moved);
+
+    let mut rebuilt = ArrayOfTables::new();
+    for (i, (mut table, size)) in tables.into_iter().zip(sizes).enumerate() {
+        if let Some(position) = next {
+            set_subtree_position(&mut table, position);
+            next = Some(position + size);
+        }
+        if anchors[i].is_some() || carried[i].is_some() {
+            let anchor = anchors[i].as_deref().unwrap_or_default();
+            let carried = carried[i].as_deref().unwrap_or_default();
+            table.decor_mut().set_prefix(format!("{anchor}{carried}"));
+        }
+        rebuilt.push(table);
+    }
+    *aot = rebuilt;
+    Ok(true)
+}
+
+/// Split the text above a table header into the part that belongs to the
+/// position and the part that belongs to the table.
+///
+/// `toml_edit` hands a table everything written between the previous item and
+/// its own header — section banners included. Moving the first entry would
+/// otherwise drag `# --- Entries ---` down the file with it, and leave the
+/// entry that took its place looking like the start of some other section.
+///
+/// The rule is the one people already write by: a comment block touching the
+/// header describes that table, and anything cut off from it by a blank line
+/// describes what follows. So the trailing run of comment lines travels and
+/// the rest stays behind.
+fn split_prefix(prefix: &str) -> (&str, &str) {
+    let mut cut = prefix.len();
+    for line in prefix.split_inclusive('\n').rev() {
+        if !line.trim_start().starts_with('#') {
+            break;
+        }
+        cut -= line.len();
+    }
+    prefix.split_at(cut)
+}
+
+/// Every render position inside one table, its sub-tables included.
+fn subtree_positions(table: &Table) -> Vec<usize> {
+    let mut out = Vec::new();
+    collect_positions(table, &mut out);
+    out
+}
+
+fn collect_positions(table: &Table, out: &mut Vec<usize>) {
+    out.extend(table.position());
+    for (_, item) in table.iter() {
+        match item {
+            Item::Table(t) => collect_positions(t, out),
+            Item::ArrayOfTables(aot) => aot.iter().for_each(|t| collect_positions(t, out)),
+            _ => {}
+        }
+    }
+}
+
+fn set_subtree_position(table: &mut Table, position: usize) {
+    table.set_position(position);
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(t) => set_subtree_position(t, position),
+            Item::ArrayOfTables(aot) => aot
+                .iter_mut()
+                .for_each(|t| set_subtree_position(t, position)),
+            _ => {}
+        }
     }
 }
 

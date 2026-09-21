@@ -339,6 +339,10 @@ message = "10 seconds remaining!"
 # that declares no groups at all still works — it simply gets one wide
 # compartment instead of a tin with sections.
 #
+# Both orders can be rearranged by dragging in the config editor (issue #210),
+# which moves the blocks in this file — comments and all — rather than adding
+# an ordering field to keep in step with them.
+#
 # A group needs nothing but an `id` and a `label`. The four below that carry no
 # limits are there purely to sort the home screen; only "Play" actually
 # restricts anything.

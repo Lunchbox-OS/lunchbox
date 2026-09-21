@@ -4,8 +4,23 @@
  * The combined quota is the point — once a category's budget is spent, every
  * member disappears at once — so the member list sits beside the limits rather
  * than on another page.
+ *
+ * The list is also the home screen's running order: the launcher draws one
+ * compartment per category in the order they are declared (issue #210), so
+ * dragging one up this list moves its compartment up the screen.
  */
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useDraggable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
@@ -21,12 +36,18 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/DeleteOutlined";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
 import { insert, unset } from "../doc/patches";
 import type { RawConfig, RawGroup } from "../model/config.generated";
 import { issuesForGroup } from "../model/report";
+import { groupDropPatch } from "../model/reorder";
 import { SubjectDetail } from "../components/SubjectDetail";
+import { DropGap, droppedGap, gapCollision, useDropColumn } from "../components/DropGap";
 import type { FocusRequest } from "../navigation";
+
+/** The one column this page's drag happens in. */
+const CATEGORIES = "categories";
 
 export function GroupsPage({
   config,
@@ -46,11 +67,37 @@ export function GroupsPage({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<RawGroup | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const groups = config.groups ?? [];
   const selected = groups.find((g) => g.id === selectedId) ?? groups[0] ?? null;
 
   const membersOf = (id: string) => (config.entries ?? []).filter((e) => e.group === id);
+
+  const sensors = useSensors(
+    // A small threshold so a click still selects the category it lands on.
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor),
+  );
+
+  const onDragStart = (event: DragStartEvent) => setDraggingId(String(event.active.id));
+
+  const onDragEnd = (event: DragEndEvent) => {
+    setDraggingId(null);
+    const gap = droppedGap(event.over);
+    if (!gap) return;
+    const patch = groupDropPatch(groups, String(event.active.id), gap.slot);
+    if (patch) apply(patch);
+  };
+
+  const nameOf = (id: string | number) =>
+    groups.find((g) => g.id === String(id))?.label ?? String(id);
+  const describe = (over: { data: { current?: unknown } } | null) => {
+    const gap = droppedGap(over);
+    if (!gap) return "nowhere";
+    const below = groups[gap.slot];
+    return below ? `above ${below.label}` : "at the end";
+  };
 
   // Consumed on apply — see navigation.ts for why an unspent request re-fires.
   useEffect(() => {
@@ -81,51 +128,64 @@ export function GroupsPage({
         </Card>
       ) : (
         <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
-          <Stack spacing={1} sx={{ minWidth: 220 }}>
-            {groups.map((g) => {
-              const issues = issuesForGroup(report, g.id).length;
-              return (
-                <Card
-                  key={g.id}
-                  variant="outlined"
-                  onClick={() => setSelectedId(g.id)}
-                  sx={{
-                    cursor: "pointer",
-                    borderColor:
-                      selected?.id === g.id
-                        ? "primary.main"
-                        : issues > 0
-                          ? "error.main"
-                          : "divider",
-                    borderWidth: selected?.id === g.id ? 2 : 1,
-                  }}
-                >
+          <DndContext
+            sensors={sensors}
+            collisionDetection={gapCollision}
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+            onDragCancel={() => setDraggingId(null)}
+            accessibility={{
+              screenReaderInstructions: {
+                draggable:
+                  "Press space to pick up a category, then use the up and down arrow " +
+                  "keys to move it. Press space again to drop it, or escape to cancel. " +
+                  "The order here is the order the home screen shows them in.",
+              },
+              announcements: {
+                onDragStart: ({ active }) => `Picked up ${nameOf(active.id)}.`,
+                onDragOver: ({ active, over }) =>
+                  `${nameOf(active.id)} would go ${describe(over)}.`,
+                onDragEnd: ({ active, over }) =>
+                  over
+                    ? `${nameOf(active.id)} dropped ${describe(over)}.`
+                    : `${nameOf(active.id)} left where it was.`,
+                onDragCancel: ({ active }) => `${nameOf(active.id)} left where it was.`,
+              },
+            }}
+          >
+            <CategoryList>
+              {groups.map((g, i) => (
+                <Fragment key={g.id}>
+                  <DropGap column={CATEGORIES} slot={i} />
+                  <CategoryCard
+                    group={g}
+                    memberCount={membersOf(g.id).length}
+                    issueCount={issuesForGroup(report, g.id).length}
+                    selected={selected?.id === g.id}
+                    onSelect={() => setSelectedId(g.id)}
+                    onDelete={() => setConfirmDelete(g)}
+                  />
+                </Fragment>
+              ))}
+              <DropGap column={CATEGORIES} slot={groups.length} grow />
+            </CategoryList>
+
+            {/* Follows the pointer, at full opacity, above everything. */}
+            <DragOverlay>
+              {draggingId && (
+                <Card variant="outlined" sx={{ cursor: "grabbing", boxShadow: 6 }}>
                   <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
                     <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
-                          {g.label}
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {membersOf(g.id).length} activities
-                        </Typography>
-                      </Box>
-                      <IconButton
-                        size="small"
-                        aria-label={`Delete ${g.label}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConfirmDelete(g);
-                        }}
-                      >
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
+                      <DragIndicatorIcon fontSize="small" color="disabled" />
+                      <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+                        {nameOf(draggingId)}
+                      </Typography>
                     </Stack>
                   </CardContent>
                 </Card>
-              );
-            })}
-          </Stack>
+              )}
+            </DragOverlay>
+          </DndContext>
 
           <Box sx={{ flex: 1, minWidth: 0 }}>
             {selected && (
@@ -184,6 +244,90 @@ export function GroupsPage({
         </DialogActions>
       </Dialog>
     </Box>
+  );
+}
+
+/**
+ * The column the category cards are dragged in. Registered as a drop column so
+ * `gapCollision` has a rect to scope to, and given a minimum height so the
+ * trailing gap is reachable even when there is only one category.
+ */
+function CategoryList({ children }: { children: React.ReactNode }) {
+  const { setNodeRef } = useDropColumn(CATEGORIES);
+  return (
+    <Box
+      ref={setNodeRef}
+      sx={{
+        minWidth: 220,
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 120,
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+function CategoryCard({
+  group,
+  memberCount,
+  issueCount,
+  selected,
+  onSelect,
+  onDelete,
+}: {
+  group: RawGroup;
+  memberCount: number;
+  issueCount: number;
+  selected: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: group.id });
+
+  // Stays in its slot as a hole in the list while a copy follows the pointer
+  // in the `DragOverlay`.
+  return (
+    <Card
+      ref={setNodeRef}
+      variant="outlined"
+      onClick={onSelect}
+      sx={{
+        cursor: "grab",
+        opacity: isDragging ? 0.3 : 1,
+        borderColor: selected ? "primary.main" : issueCount > 0 ? "error.main" : "divider",
+        borderWidth: selected ? 2 : 1,
+      }}
+      {...attributes}
+      {...listeners}
+    >
+      <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+          {/* Decoration: the whole card is the handle, so this is never a
+              second tab stop. */}
+          <DragIndicatorIcon fontSize="small" color="disabled" />
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+              {group.label}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {memberCount} activities
+            </Typography>
+          </Box>
+          <IconButton
+            size="small"
+            aria-label={`Delete ${group.label}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            <DeleteIcon fontSize="small" />
+          </IconButton>
+        </Stack>
+      </CardContent>
+    </Card>
   );
 }
 
