@@ -275,7 +275,8 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
-            obj.set_layout_manager(Some(gtk4::BinLayout::new()));
+            // No layout manager: the field lays its own children out. See
+            // `WidgetImpl::measure` for why it has to, and what it costs.
             obj.add_css_class("lb-field");
             // Claim the space wherever it is put. In the child's shell the
             // field is a stack page and gets the window either way; in
@@ -385,6 +386,50 @@ mod imp {
     }
 
     impl WidgetImpl for LauncherField {
+        /// Measure as a `GtkBinLayout` would: the largest of the children.
+        ///
+        /// The field used to *be* a `GtkBinLayout` and does this by hand now,
+        /// for one reason. A widget that has a layout manager never has its
+        /// `size_allocate` called — `gtk_widget_allocate` hands the allocation
+        /// to the manager *instead of* the vfunc — so the override below,
+        /// which is the only place the field can learn how much room it has,
+        /// was dead code from the day it was written. It was reported fixed
+        /// and the compartments went on coming up full height, because
+        /// nothing had ever run.
+        ///
+        /// Nothing else can stand in for it. GTK4 has no `size-allocate`
+        /// signal, and a widget has no `width`/`height` property to watch; the
+        /// allocation is delivered to the layout manager or to this vfunc, and
+        /// to nowhere else. Fifteen lines of bin layout is the price of being
+        /// told.
+        fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let mut minimum = 0;
+            let mut natural = 0;
+            // Carried through the way the bin layout carries them, even though
+            // nothing in the field is baseline-aligned today: a measure that
+            // quietly answers "no baseline" is the kind of difference that
+            // turns up later as a widget sitting a pixel out of line.
+            let mut minimum_baseline = -1;
+            let mut natural_baseline = -1;
+            let mut child = self.obj().first_child();
+            while let Some(widget) = child {
+                if widget.should_layout() {
+                    let (min, nat, min_baseline, nat_baseline) =
+                        widget.measure(orientation, for_size);
+                    minimum = minimum.max(min);
+                    natural = natural.max(nat);
+                    if min_baseline > -1 {
+                        minimum_baseline = minimum_baseline.max(min_baseline);
+                    }
+                    if nat_baseline > -1 {
+                        natural_baseline = natural_baseline.max(nat_baseline);
+                    }
+                }
+                child = widget.next_sibling();
+            }
+            (minimum, natural, minimum_baseline, natural_baseline)
+        }
+
         /// Lay the field out again whenever the room it has changes.
         ///
         /// It used to be enough to watch the *scale* (`App::track_scale`),
@@ -405,8 +450,22 @@ mod imp {
         /// seconds the compacted layout appears" — the seconds were not the
         /// layout being slow, they were the daemon's first snapshot arriving
         /// before the compositor's first configure.
+        ///
+        /// This shipped once already and did nothing at all, because the field
+        /// had a `GtkBinLayout` — see `measure`.
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            self.parent_size_allocate(width, height, baseline);
+            // What the `GtkBinLayout` did: every child gets the whole
+            // allocation, and `allocate` applies its own alignment and margins
+            // within it. The children here are overlaid by design — the row's
+            // viewport, the two fades, the two chevron chips.
+            let mut child = self.obj().first_child();
+            while let Some(widget) = child {
+                if widget.should_layout() {
+                    widget.allocate(width, height, baseline, None);
+                }
+                child = widget.next_sibling();
+            }
+
             if self.laid_out.replace((width, height)) == (width, height) {
                 return;
             }
