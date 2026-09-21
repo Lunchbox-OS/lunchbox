@@ -13,7 +13,7 @@
 //! than decided here. See that function for why.
 
 use gtk4::prelude::*;
-use lunchbox_api::{EntryView, GroupView};
+use lunchbox_api::{EntryView, GroupView, ReasonCode};
 
 use crate::badge::Badge;
 use crate::item::LauncherItem;
@@ -148,8 +148,8 @@ pub fn build(
     // -------------------------------------------------------------- floor
     // Only a category on a schedule has anything to say down here; an
     // always-available one gets no floor at all rather than an empty rule.
-    if let Some(closes) = group.and_then(|g| g.window_closes_at) {
-        well.append(&build_floor(closes, scale));
+    if let Some(schedule) = group.and_then(schedule_line) {
+        well.append(&build_floor(schedule, scale));
     }
 
     Compartment {
@@ -234,25 +234,25 @@ fn build_header(
 
 /// The compartment's bottom line: a hairline, a clock face pointing at the
 /// hour the category shuts, and that hour in words.
-fn build_floor(closes: chrono::DateTime<chrono::Local>, scale: f64) -> gtk4::Box {
+fn build_floor(schedule: Schedule, scale: f64) -> gtk4::Box {
     let floor = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(6, scale));
     floor.add_css_class("lb-compartment__floor");
     floor.set_valign(gtk4::Align::End);
     floor.set_vexpand(true);
 
-    // The face points at the hour the category shuts, not at the time it is.
+    // The face points at the hour being talked about, not at the time it is.
     // That is the whole reason it is worth drawing rather than writing out: a
     // child who cannot yet read "6:00 PM" can still see where the hand is
     // going to be.
-    let face = lunchbox_widgets::ClockFace::at(closes, theme::px(FLOOR_CLOCK_PX, scale));
+    let face = lunchbox_widgets::ClockFace::at(schedule.at, theme::px(FLOOR_CLOCK_PX, scale));
     face.add_css_class("lb-compartment__clock");
     face.set_valign(gtk4::Align::Center);
     floor.append(&face);
 
-    let schedule = gtk4::Label::new(Some(&schedule_line(closes)));
-    schedule.add_css_class("lb-compartment__schedule");
-    schedule.set_xalign(0.0);
-    floor.append(&schedule);
+    let label = gtk4::Label::new(Some(&schedule.text()));
+    label.add_css_class("lb-compartment__schedule");
+    label.set_xalign(0.0);
+    floor.append(&label);
     floor
 }
 
@@ -295,21 +295,53 @@ fn item_badge(
     None
 }
 
-/// What the compartment floor says about this category's hours today, given
-/// the time it shuts.
+/// What the compartment floor has to say about this category's hours.
 ///
-/// Only the closing time of the window the category is *currently inside*. A
-/// category with no schedule has no floor, and — for now — neither does one
-/// that is shut.
+/// One hour and one word, which is all the floor has room for and all the
+/// question needs: a category is either open and about to shut, or shut and
+/// about to open.
+pub struct Schedule {
+    /// The hour the face points at.
+    at: chrono::DateTime<chrono::Local>,
+    /// Whether that hour is when the category opens rather than shuts.
+    opens: bool,
+}
+
+impl Schedule {
+    fn text(&self) -> String {
+        let verb = if self.opens { "Opens" } else { "Until" };
+        format!("{verb} {}", format_clock(self.at))
+    }
+}
+
+/// What this category's floor says, if it says anything.
 ///
-/// The shut case is the bedtime screen's, which the branding brief leaves to be
-/// designed rather than guessed at (§9), and it is blocked on the engine
-/// besides: `ReasonCode::OutsideTimeWindow` carries a `next_window_start` that
-/// nothing has ever filled in (see the TODO in `Engine::evaluate_entry`). So
-/// "Opens 10:00 AM" needs that computed first, and this is the one line that
-/// will want it.
-fn schedule_line(closes: chrono::DateTime<chrono::Local>) -> String {
-    format!("Until {}", format_clock(closes))
+/// A category with no schedule at all has no floor: an empty rule under an
+/// always-available category is a line about nothing. One that is shut says
+/// when it opens, and one that is open says when it shuts — the shut half is
+/// the bedtime screen the brief left to be designed (§9), and it was blocked
+/// until the engine started working out `next_window_start`.
+///
+/// The shut case reads its hour out of the *reason* rather than off the view,
+/// because that is where the engine puts it. A category shut for some other
+/// reason — its quota spent, a cooldown running — has no hour to give, and
+/// keeps its floor quiet rather than inventing one.
+fn schedule_line(group: &GroupView) -> Option<Schedule> {
+    if let Some(at) = next_window_start(&group.reasons) {
+        return Some(Schedule { at, opens: true });
+    }
+    group
+        .window_closes_at
+        .map(|at| Schedule { at, opens: false })
+}
+
+/// The hour an `OutsideTimeWindow` among these reasons says the category comes
+/// back, if one of them says so.
+fn next_window_start(reasons: &[ReasonCode]) -> Option<chrono::DateTime<chrono::Local>> {
+    reasons.iter().find_map(|reason| match reason {
+        ReasonCode::OutsideTimeWindow { next_window_start } => *next_window_start,
+        _ => None,
+    })
 }
 
 /// Lay a category's members out in columns at most `rows` tall, in config
@@ -414,7 +446,13 @@ pub fn budget(field_height: i32, scale: f64) -> Budget {
     let column = new_column(scale);
     columns.append(&column);
     well.append(&columns);
-    well.append(&build_floor(lunchbox_util::now(), scale));
+    well.append(&build_floor(
+        Schedule {
+            at: lunchbox_util::now(),
+            opens: false,
+        },
+        scale,
+    ));
     row.append(&well);
 
     let chrome = measure() - margins;
@@ -854,32 +892,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_open_category_floor_says_when_it_shuts() {
-        let closes = chrono::Local
-            .with_ymd_and_hms(2026, 9, 19, 18, 0, 0)
-            .unwrap();
-        assert_eq!(schedule_line(closes), "Until 6:00 PM");
+    /// The floor of the compartment, as the child reads it.
+    fn floor_of(group: &GroupView) -> Option<String> {
+        schedule_line(group).map(|s| s.text())
     }
 
-    /// The floor is built from `window_closes_at` and nothing else, so a
-    /// category with no schedule gets no floor at all rather than an empty
-    /// rule — and neither, for now, does one that is already shut.
-    ///
-    /// The shut case is the bedtime screen's, and it is waiting on somebody
-    /// else besides: `ReasonCode::OutsideTimeWindow` carries a
-    /// `next_window_start` that nothing computes yet, so the "Opens 10:00 AM"
-    /// that belongs there has nothing to print.
-    #[test]
-    fn a_category_with_no_closing_time_has_no_floor() {
-        assert_eq!(group().window_closes_at, None);
+    fn six_pm() -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .with_ymd_and_hms(2026, 9, 19, 18, 0, 0)
+            .unwrap()
+    }
 
-        let mut shut = group();
-        shut.enabled = false;
-        shut.reasons = vec![lunchbox_api::ReasonCode::OutsideTimeWindow {
-            next_window_start: None,
+    #[test]
+    fn an_open_category_floor_says_when_it_shuts() {
+        let mut g = group();
+        g.window_closes_at = Some(six_pm());
+        assert_eq!(floor_of(&g), Some("Until 6:00 PM".into()));
+    }
+
+    /// The other half, and the one the brief left to be designed: a category
+    /// outside its hours says when it comes back rather than only that it is
+    /// gone.
+    #[test]
+    fn a_shut_category_floor_says_when_it_opens() {
+        let mut g = group();
+        g.enabled = false;
+        g.reasons = vec![ReasonCode::OutsideTimeWindow {
+            next_window_start: Some(
+                chrono::Local
+                    .with_ymd_and_hms(2026, 9, 20, 10, 0, 0)
+                    .unwrap(),
+            ),
         }];
-        assert_eq!(shut.window_closes_at, None);
+        assert_eq!(floor_of(&g), Some("Opens 10:00 AM".into()));
+    }
+
+    /// Opening wins over closing. A category can carry both — it is outside
+    /// today's window and the view still knows when that window ended — and
+    /// the useful half is the one that has not happened yet.
+    #[test]
+    fn the_hour_that_has_not_happened_yet_is_the_one_shown() {
+        let mut g = group();
+        g.window_closes_at = Some(six_pm());
+        g.reasons = vec![ReasonCode::OutsideTimeWindow {
+            next_window_start: Some(
+                chrono::Local
+                    .with_ymd_and_hms(2026, 9, 20, 10, 0, 0)
+                    .unwrap(),
+            ),
+        }];
+        assert_eq!(floor_of(&g), Some("Opens 10:00 AM".into()));
+    }
+
+    /// A category with no schedule at all has no floor: an empty rule under
+    /// an always-available category is a line about nothing.
+    #[test]
+    fn a_category_with_no_hours_has_no_floor() {
+        assert_eq!(floor_of(&group()), None);
+    }
+
+    /// And one shut for a reason that is not the clock keeps quiet rather
+    /// than inventing an hour. A spent quota comes back at midnight, which is
+    /// not something to put in front of a child as a time to wait for.
+    #[test]
+    fn a_category_shut_for_some_other_reason_has_no_hour_to_give() {
+        let mut g = group();
+        g.enabled = false;
+        g.reasons = vec![ReasonCode::QuotaExhausted {
+            used: std::time::Duration::from_secs(3600),
+            quota: std::time::Duration::from_secs(3600),
+        }];
+        assert_eq!(floor_of(&g), None);
     }
 
     #[test]
