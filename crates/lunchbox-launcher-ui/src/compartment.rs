@@ -15,6 +15,13 @@ use crate::badge::Badge;
 use crate::item::LauncherItem;
 use crate::theme;
 
+/// Diameter of the clock face on a compartment's floor, unscaled.
+///
+/// The concept draws it a shade larger than the type beside it, so it reads as
+/// a picture rather than as one more glyph in the line. Derived from the
+/// footer's own size rather than written down, so the two move together.
+const FLOOR_CLOCK_PX: i32 = theme::tokens::FOOTER_FONT_PX + 2;
+
 /// A category on screen, and the items it holds in the order they are drawn.
 pub struct Compartment {
     /// The well itself, to put in the row.
@@ -118,13 +125,22 @@ pub fn build(
     // -------------------------------------------------------------- floor
     // Only a category on a schedule has anything to say down here; an
     // always-available one gets no floor at all rather than an empty rule.
-    if let Some(text) = group.and_then(schedule_line) {
-        let floor = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(8, scale));
+    if let Some(closes) = group.and_then(|g| g.window_closes_at) {
+        let floor = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(6, scale));
         floor.add_css_class("lb-compartment__floor");
         floor.set_valign(gtk4::Align::End);
         floor.set_vexpand(true);
 
-        let schedule = gtk4::Label::new(Some(&text));
+        // The face points at the hour the category shuts, not at the time it
+        // is. That is the whole reason it is worth drawing rather than writing
+        // out: a child who cannot yet read "6:00 PM" can still see where the
+        // hand is going to be.
+        let face = lunchbox_widgets::ClockFace::at(closes, theme::px(FLOOR_CLOCK_PX, scale));
+        face.add_css_class("lb-compartment__clock");
+        face.set_valign(gtk4::Align::Center);
+        floor.append(&face);
+
+        let schedule = gtk4::Label::new(Some(&schedule_line(closes)));
         schedule.add_css_class("lb-compartment__schedule");
         schedule.set_xalign(0.0);
         floor.append(&schedule);
@@ -178,7 +194,8 @@ fn item_badge(
     None
 }
 
-/// What the compartment floor says about this category's hours today.
+/// What the compartment floor says about this category's hours today, given
+/// the time it shuts.
 ///
 /// Only the closing time of the window the category is *currently inside*. A
 /// category with no schedule has no floor, and — for now — neither does one
@@ -190,38 +207,8 @@ fn item_badge(
 /// nothing has ever filled in (see the TODO in `Engine::evaluate_entry`). So
 /// "Opens 10:00 AM" needs that computed first, and this is the one line that
 /// will want it.
-fn schedule_line(group: &GroupView) -> Option<String> {
-    group
-        .window_closes_at
-        .map(|closes| format!("{} Until {}", clock_face(closes), format_clock(closes)))
-}
-
-/// The Unicode clock face nearest the given time, rounding *down*.
-///
-/// The concept images set a little analog clock before the floor's text, and
-/// the face is drawn at the hour it is talking about rather than being one
-/// fixed glyph — which is the whole reason it is worth having: a child who
-/// cannot yet read "6:00 PM" can still see where the hand points.
-///
-/// Unicode gives twenty-four of these: twelve on the hour from U+1F550, and
-/// twelve on the half hour from U+1F55C. Rounding down rather than to nearest
-/// keeps the picture honest — a face showing half past with twenty-nine
-/// minutes still to go would say the time is later than it is.
-fn clock_face(at: chrono::DateTime<chrono::Local>) -> char {
-    use chrono::Timelike;
-
-    // 0 becomes 12: the faces are labelled the way a clock is, not the way a
-    // 24-hour clock counts.
-    let hour = match at.hour() % 12 {
-        0 => 12,
-        h => h,
-    };
-    let base: u32 = if at.minute() < 30 {
-        0x1F550 // CLOCK FACE ONE OCLOCK
-    } else {
-        0x1F55C // CLOCK FACE ONE-THIRTY
-    };
-    char::from_u32(base + hour - 1).unwrap_or('\u{1F550}')
+fn schedule_line(closes: chrono::DateTime<chrono::Local>) -> String {
+    format!("Until {}", format_clock(closes))
 }
 
 /// Break a category's members into stacks of `ROWS_PER_STACK`, in config
@@ -413,75 +400,30 @@ mod tests {
 
     #[test]
     fn an_open_category_floor_says_when_it_shuts() {
-        let mut g = group();
-        g.window_closes_at = Some(
-            chrono::Local
-                .with_ymd_and_hms(2026, 9, 19, 18, 0, 0)
-                .unwrap(),
-        );
-        assert_eq!(
-            schedule_line(&g),
-            Some("\u{1F555} Until 6:00 PM".to_string())
-        );
+        let closes = chrono::Local
+            .with_ymd_and_hms(2026, 9, 19, 18, 0, 0)
+            .unwrap();
+        assert_eq!(schedule_line(closes), "Until 6:00 PM");
     }
 
-    /// The face is drawn at the hour it is talking about, not one fixed glyph.
+    /// The floor is built from `window_closes_at` and nothing else, so a
+    /// category with no schedule gets no floor at all rather than an empty
+    /// rule — and neither, for now, does one that is already shut.
+    ///
+    /// The shut case is the bedtime screen's, and it is waiting on somebody
+    /// else besides: `ReasonCode::OutsideTimeWindow` carries a
+    /// `next_window_start` that nothing computes yet, so the "Opens 10:00 AM"
+    /// that belongs there has nothing to print.
     #[test]
-    fn the_clock_face_points_at_the_hour() {
-        let at = |h, m| {
-            chrono::Local
-                .with_ymd_and_hms(2026, 9, 19, h, m, 0)
-                .unwrap()
-        };
-        // U+1F550 is one o'clock, so six o'clock is five along.
-        assert_eq!(clock_face(at(18, 0)), '\u{1F555}');
-        assert_eq!(clock_face(at(6, 0)), '\u{1F555}');
-        assert_eq!(clock_face(at(13, 0)), '\u{1F550}');
-    }
+    fn a_category_with_no_closing_time_has_no_floor() {
+        assert_eq!(group().window_closes_at, None);
 
-    /// Rounding down, always.
-    #[test]
-    fn the_clock_face_rounds_down() {
-        let at = |h, m| {
-            chrono::Local
-                .with_ymd_and_hms(2026, 9, 19, h, m, 0)
-                .unwrap()
-        };
-        assert_eq!(clock_face(at(18, 29)), '\u{1F555}', "still six o'clock");
-        assert_eq!(clock_face(at(18, 30)), '\u{1F561}', "half past six");
-        assert_eq!(clock_face(at(18, 59)), '\u{1F561}', "still half past six");
-    }
-
-    /// Midnight and noon are twelve, not zero.
-    #[test]
-    fn the_clock_face_knows_there_is_no_zero_oclock() {
-        let at = |h, m| {
-            chrono::Local
-                .with_ymd_and_hms(2026, 9, 19, h, m, 0)
-                .unwrap()
-        };
-        assert_eq!(clock_face(at(0, 0)), '\u{1F55B}', "twelve o'clock");
-        assert_eq!(clock_face(at(12, 0)), '\u{1F55B}');
-        assert_eq!(clock_face(at(0, 30)), '\u{1F567}', "twelve-thirty");
-    }
-
-    #[test]
-    fn a_category_with_no_schedule_has_no_floor() {
-        assert_eq!(schedule_line(&group()), None);
-    }
-
-    #[test]
-    fn a_shut_category_has_no_floor_yet() {
-        // Deliberate, and the one thing here that is waiting on somebody else:
-        // a category outside its hours has no closing time to print, and the
-        // "Opens 10:00 AM" that belongs there needs an engine that computes
-        // `next_window_start` -- which nothing does yet.
-        let mut g = group();
-        g.enabled = false;
-        g.reasons = vec![lunchbox_api::ReasonCode::OutsideTimeWindow {
+        let mut shut = group();
+        shut.enabled = false;
+        shut.reasons = vec![lunchbox_api::ReasonCode::OutsideTimeWindow {
             next_window_start: None,
         }];
-        assert_eq!(schedule_line(&g), None);
+        assert_eq!(shut.window_closes_at, None);
     }
 
     #[test]

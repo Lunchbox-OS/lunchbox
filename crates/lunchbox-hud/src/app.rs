@@ -934,7 +934,11 @@ fn build_hud_content(
     // `HH:MM` is wider than a 48px bar can hold, and a clock read sideways is
     // worse than none — so the vertical bar shows a round face instead, which
     // is the one form of a clock as wide as it is tall (issue #171).
-    let analog_clock = vertical.then(crate::analog_clock::build);
+    let analog_clock = vertical.then(|| {
+        let face = lunchbox_widgets::ClockFace::now(lunchbox_widgets::clock_face::HUD_DIAMETER);
+        face.add_css_class("analog-clock");
+        face
+    });
     let clock_label = gtk4::Label::new(Some("--:--"));
     clock_label.add_css_class("clock-label");
     match &analog_clock {
@@ -1543,9 +1547,8 @@ fn build_hud_content(
                 icon.set_pixel_size(icon_size);
             }
             if let Some(face) = &analog_clock_for_scale {
-                crate::analog_clock::set_diameter(
-                    face,
-                    (f64::from(crate::analog_clock::BASE_CLOCK_DIAMETER) * desired_scale).round()
+                face.set_diameter(
+                    (f64::from(lunchbox_widgets::clock_face::HUD_DIAMETER) * desired_scale).round()
                         as i32,
                 );
             }
@@ -2683,9 +2686,9 @@ const CSS_TEMPLATE: &str = r#"
         }
 
         /* The analog clock draws itself in whatever colour CSS resolves for
-           it (`Widget::color`), and a `GtkDrawingArea` is not an `image` node,
-           so without this it inherits the *theme's* default text colour --
-           near-black, and all but invisible against the bar. */
+           it (`Widget::color`; see lunchbox-widgets), and it is not an `image`
+           node, so without this it inherits the *theme's* default text colour
+           -- near-black, and all but invisible against the bar. */
         .analog-clock {
             color: var(--text-primary);
         }

@@ -284,6 +284,15 @@ window.lb-launcher {
     padding-top: 8px;
 }
 
+/* The face on the floor is drawn, not styled, so the only thing the sheet has
+   to say about it is its colour — which it reads back with `Widget::color()`.
+   Same value as the line it sits in front of; stated rather than inherited,
+   because a drawn widget with no colour of its own would take the GTK theme's
+   default text colour instead. */
+.lb-compartment__clock {
+    color: @color-muted@;
+}
+
 .lb-compartment__schedule {
     font-family: @font-ui@;
     font-size: @type-footer-size@px;

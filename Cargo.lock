@@ -3078,6 +3078,7 @@ dependencies = [
  "lunchbox-bridge",
  "lunchbox-ipc",
  "lunchbox-util",
+ "lunchbox-widgets",
  "serde",
  "serde_json",
  "tokio",
@@ -3114,6 +3115,7 @@ dependencies = [
  "lunchbox-api",
  "lunchbox-ipc",
  "lunchbox-util",
+ "lunchbox-widgets",
  "serde",
  "serde_json",
  "tokio",
@@ -3391,6 +3393,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lunchbox-widgets"
+version = "0.5.1"
+dependencies = [
+ "chrono",
+ "gtk4",
+ "lunchbox-util",
 ]
 
 [[package]]

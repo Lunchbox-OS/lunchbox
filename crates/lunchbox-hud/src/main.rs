@@ -3,7 +3,6 @@
 //! This is the heads-up display that remains visible during active sessions.
 //! It shows time remaining, battery, volume, and provides session controls.
 
-mod analog_clock;
 mod app;
 mod battery;
 mod brightness;

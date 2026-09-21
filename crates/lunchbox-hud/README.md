@@ -263,9 +263,13 @@ alone would not work:
   `translate(0, height) · rotate(-90°)` in `size_allocate`. Keeping a real
   label is what preserves the CSS-driven font size *and* the `EllipsizeMode`
   that stops a long book title pushing the end-session button off the bar.
-- **The wall clock** (`analog_clock.rs`). `HH:MM` is wider than the bar, and a
-  clock read sideways is worse than none, so it becomes a round face — the one
-  form of a clock as wide as it is tall. First `GtkDrawingArea` in the repo.
+- **The wall clock** (`ClockFace`, in `lunchbox-widgets`). `HH:MM` is wider
+  than the bar, and a clock read sideways is worse than none, so it becomes a
+  round face — the one form of a clock as wide as it is tall. It started here
+  and moved out to the shared crate when the launcher wanted one too, on a
+  compartment's floor (review on #208); it is drawn rather than styled, so the
+  bar passes its size in (alongside the icon `set_pixel_size` calls in the
+  scale timer) and names its colour in CSS like everything else.
 - **The warning banner** (`WarningBanner` in `app.rs`). Warning text is
   operator-authored prose of no fixed length, a 48px bar cannot hold a sentence
   laid out horizontally, and GTK clips rather than wraps. So the bar keeps the

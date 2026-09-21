@@ -541,6 +541,81 @@ The history note also had a paragraph describing `grid.rs` as kept, written
 before the round that deleted it. It is a record rather than living
 documentation, so it keeps what it said and carries a pointer forward instead.
 
+## Review, fifth round: the emoji clock, and a crate for one widget
+
+The Unicode clock face from the third round did not survive its own review:
+
+> Particularly, the colors are not from the theme, and the skeumorphic design
+> does not match the rest of the flat appearance. Let's use the clock from the
+> HUD in vertical mode instead. You'll probably need to pull it out somewhere
+> the launcher can consume it, then update its appearance to match the concept
+> image, making sure to make it so that the size and color can be passed in so
+> that the HUD version can still (roughly) fit in.
+
+Both halves of that are right, and the second is the reason the first happened.
+A glyph is the cheapest possible picture: `format!("{face} Until {time}")` and
+there is a clock on the floor. What comes with it is a picture nobody in this
+project drew — whatever face the system emoji font ships, in whatever colours
+its designer chose, with the bevels and gradients an emoji set has and this
+branding explicitly does not. Every other colour on the screen comes out of
+`tokens.json`; that one came out of Noto.
+
+### The crate
+
+There was nowhere for a shared widget to go. `lunchbox-launcher-ui` and
+`lunchbox-hud` are both binary crates that happen to use GTK, and neither can
+depend on the other. So `crates/lunchbox-widgets`: GTK and drawing only, no
+daemon, no state, nothing from this repository but `lunchbox-util` — which the
+clock needs, because it has to respect `LUNCHBOX_MOCK_TIME` like everything
+else that reads the hour.
+
+One widget is a thin reason for a crate, and the alternative — copying 40 lines
+of cairo into the launcher — is how two clocks come to disagree about what a
+clock looks like. `OffsetBin` is the other candidate to move there eventually;
+it stays in the launcher until something else wants it.
+
+### Size in, colour in
+
+The reviewer's constraint is the interesting part of the design. The two
+callers want the same face at 14 px and at 36 px, in muted ink and in cream, and
+a drawn widget gets neither for free:
+
+* **Size** is a number, because it has to be: nothing drawn goes through either
+  stylesheet, so a face cannot be sized by a CSS rule. `ClockFace::now(px)` /
+  `ClockFace::at(time, px)` take it, `set_diameter` changes it, and everything
+  in the draw function is a fraction of it. The HUD already had this shape —
+  it re-tells the face on every scale change, beside the icon `set_pixel_size`
+  calls — and the launcher scales once at build time.
+* **Colour** is CSS, read back with `Widget::color()`. `color` inherits in GTK
+  CSS, so this is the one property a drawn widget can still take from the
+  stylesheet, and it means neither caller has to hold a palette: the HUD says
+  `var(--text-primary)`, the launcher says `@color-muted@`, the same token the
+  line beside it uses.
+
+There is also a real difference between the two faces that is not size or
+colour. The HUD's shows **now**, and has to be told to redraw. The launcher's
+shows **when the category shuts** — a time being talked about, not the time it
+is — and never changes. So the time is a constructor argument too, `None`
+meaning "read the clock in the draw function".
+
+### The appearance
+
+Flat: a rim and two hands. The HUD's version also drew four quarter-hour ticks,
+which were there to make a 36 px face readable and are wrong for this branding
+at any size. The ring's weight is the one number measured off the concept image
+rather than reasoned out — a 16 px face carries a 1.75 px ring — and it is
+clamped at both ends, because the same ratio that reads correctly at 14 px
+greys out below that and closes into a doughnut at the sizes the HUD asks for
+on a large output.
+
+The floor's face is drawn two pixels larger than the type beside it, derived
+from `type.footer.size` rather than written down, so it reads as a picture
+rather than as one more glyph in the line — which is, in the end, exactly what
+the emoji had been.
+
+The HUD's own appearance changed slightly with the move. That is sanctioned:
+the bar is being restyled in #209 anyway, and the reviewer said "roughly".
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here

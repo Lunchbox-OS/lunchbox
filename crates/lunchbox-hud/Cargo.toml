@@ -14,6 +14,7 @@ lunchbox-api = { workspace = true }
 lunchbox-bridge = { workspace = true }
 lunchbox-ipc = { workspace = true }
 lunchbox-util = { workspace = true }
+lunchbox-widgets = { workspace = true }
 
 gtk4 = { workspace = true }
 gtk4-layer-shell = { workspace = true }

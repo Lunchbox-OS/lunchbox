@@ -127,6 +127,7 @@ fn main() {
         ("HUD_H", "space-hud-h"),
         ("ROWS_PER_STACK", "space-rows"),
         ("ITEM_FONT_PX", "type-item-size"),
+        ("FOOTER_FONT_PX", "type-footer-size"),
     ] {
         let v = css[key]
             .parse::<f64>()
