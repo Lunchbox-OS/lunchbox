@@ -331,10 +331,34 @@ message = "10 seconds remaining!"
 # The daily quota is the key part: it is the COMBINED usage of every member, so
 # one game can spend the whole category's budget, and when it runs out every
 # member disappears at once.
+#
+# Groups are also what the launcher draws (issue #207). Each one is a
+# compartment on the home screen, **in the order they appear below**, holding
+# its members in the order those appear further down this file. An entry with
+# no group falls into a trailing "Everything else" compartment, so a config
+# that declares no groups at all still works — it simply gets one wide
+# compartment instead of a tin with sections.
+#
+# A group needs nothing but an `id` and a `label`. The four below that carry no
+# limits are there purely to sort the home screen; only "Play" actually
+# restricts anything.
 
 [[groups]]
-id = "attention-heavy"
-label = "Games"
+id = "books"
+label = "Books"
+
+[[groups]]
+id = "learn"
+label = "Learn"
+
+# This category is the token *source* for Play, below: time spent on anything
+# in here banks time toward Celeste. Naming the group rather than listing its
+# members means adding a new learning activity extends the deal automatically.
+# The launcher shows it as a "+" pill on the compartment header.
+
+[[groups]]
+id = "play"
+label = "Play"
 
 # One schedule for the whole category, instead of repeating identical
 # `[entries.availability]` blocks on each member.
@@ -361,16 +385,43 @@ cooldown_seconds = 600
 # (defaults to service.cooldown_min_session_seconds).
 # cooldown_min_session_seconds = 120
 
-# A group can also be token-gated (issue #8): earning unlocks every member at
-# once. Uncomment to require educational time before any of these appear.
-# [groups.tokens]
-# from = ["tuxmath", "gcompris"]
-# earn_ratio = 0.5
-# minimum_seconds = 600
+# A group can also be token-gated (issue #8), which gates the *whole* category:
+# earning unlocks every member at once, and running out relocks every member at
+# once. "Watch" below is the worked example.
 
 # A caregiver can override a whole category for the day through the management
-# API by passing `group:attention-heavy` as the override id — one call enables
-# or disables every member.
+# API by passing `group:play` as the override id — one call enables or disables
+# every member.
+
+[[groups]]
+id = "watch"
+label = "Watch"
+
+# Screen time has to be read for. This is the same feature as the
+# `[entries.tokens]` on Celeste and Pokemon FireRed further down, aimed at a
+# category instead of one activity, and the difference is worth seeing:
+#
+#   * an *entry's* gate belongs to that activity, and the launcher draws it
+#     under that activity's name;
+#   * a *category's* gate is shared by every member, so the launcher draws it
+#     once on the compartment header and not on any of the members. When it is
+#     shut, all three of these dim together.
+#
+# Naming a group as the source works the same way it does on an entry, so every
+# book counts and a book added later counts without editing this.
+[groups.tokens]
+from = ["group:books"]
+# A minute read earns a minute watched. Celeste's gate uses 0.5 to make its
+# trade deliberately less generous; both are ordinary choices.
+earn_ratio = 1.0
+# Twenty minutes of reading before the television opens at all.
+minimum_seconds = 1200
+# An afternoon with a book does not bank a whole evening of television.
+max_balance_seconds = 3600
+
+[[groups]]
+id = "listen"
+label = "Listen"
 
 # -----------------------------------------------------------------------------
 # Entries
@@ -383,6 +434,7 @@ cooldown_seconds = 600
 [[entries]]
 id = "tuxmath"
 label = "Tux Math"
+group = "learn"  # Earns time toward Celeste (see its [entries.tokens])
 icon = "tuxmath"  # Icon name from system icon theme
 
 [entries.kind]
@@ -409,6 +461,7 @@ end = "20:00"
 [[entries]]
 id = "scummvm-putt-putt"
 label = "Putt Putt Joins the Circus"
+group = "play"
 icon = "~/Games/Icons/Putt_Putt_Circus.png"  # Custom icon path
 
 [entries.kind]
@@ -437,6 +490,7 @@ end = "20:00"
 [[entries]]
 id = "scummvm-monkey-island"
 label = "Secret of Monkey Island"
+group = "play"
 icon = "~/Games/Icons/Secret_of_Monkey_Island.png"  # Custom icon path
 
 [entries.kind]
@@ -473,6 +527,7 @@ cooldown_seconds = 300  # 5 minute cooldown after each session
 [[entries]]
 id = "gcompris"
 label = "GCompris"
+group = "learn"
 # icon is autodetected from the snap's .desktop file (no need to specify)
 
 [entries.kind]
@@ -507,9 +562,9 @@ cooldown_seconds = 0  # No cooldown
 [[entries]]
 id = "steam-celeste"
 label = "Celeste"
-# Shares the "Games" schedule, short-burst cap, combined quota, and cooldown
+# Shares the "Play" schedule, short-burst cap, combined quota, and cooldown
 # with the other members of this category (issue #5).
-group = "attention-heavy"
+group = "play"
 # icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_504230"
 # icon = "~/Games/Icons/Celeste.png"  # Override with a custom image if preferred
 
@@ -539,8 +594,16 @@ end = "20:00"
 # the balance runs out the activity disappears from the launcher again until
 # more is earned.
 [entries.tokens]
-# Activities whose time counts toward this one. Any combination adds up.
-from = ["tuxmath", "gcompris", "scummvm-putt-putt"]
+# Activities whose time counts toward this one. Any combination adds up, and a
+# `group:` prefix names a whole category — so this reads "time on anything in
+# Learn earns Celeste time", and a learning activity added later is included
+# without touching this line. Individual entries work too:
+# `from = ["tuxmath", "gcompris"]`.
+#
+# The launcher draws the two spellings differently (issue #207): naming the
+# group puts one "+" pill on the Learn compartment's header, while naming
+# entries puts a "+" on each of those items instead.
+from = ["group:learn"]
 
 # Seconds banked per second spent on a source activity. Default 1.0. Use a
 # fraction to make the trade less generous: 0.5 means two minutes of Tux Math
@@ -593,7 +656,7 @@ carry_over = false
 [[entries]]
 id = "steam-a-short-hike"
 label = "A Short Hike"
-group = "attention-heavy"  # Shares the "Games" budget with Celeste
+group = "play"  # Shares the "Play" budget with Celeste
 # icon is autodetected from Steam's generated .desktop file, or falls back to "steam_icon_1055540"
 # icon = "~/Games/Icons/A_Short_Hike.png"  # Override with a custom image if preferred
 
@@ -642,6 +705,7 @@ end = "20:00"
 [[entries]]
 id = "steam-world-of-goo"
 label = "World of Goo"
+group = "play"
 input_compat = "touch_to_mouse"
 
 [entries.kind]
@@ -777,6 +841,7 @@ always = true
 [[entries]]
 id = "prism-launcher"
 label = "Prism Launcher"
+group = "play"
 # icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
@@ -838,6 +903,7 @@ max_volume = 60  # Limit volume during gaming sessions
 [[entries]]
 id = "krita"
 label = "Krita"
+group = "learn"
 # icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
@@ -866,6 +932,7 @@ cooldown_seconds = 0  # No cooldown
 [[entries]]
 id = "chrome-school"
 label = "School"
+group = "learn"
 # icon is autodetected from the Flatpak app_id (no need to specify)
 
 [entries.kind]
@@ -972,6 +1039,7 @@ daily_quota_seconds = 7200   # 2 hours per day
 [[entries]]
 id = "big-buck-bunny"
 label = "Big Buck Bunny"
+group = "watch"
 icon = "mpv"
 
 [entries.kind]
@@ -1002,6 +1070,7 @@ end = "20:00"
 [[entries]]
 id = "movies-library"
 label = "Movies"
+group = "watch"
 icon = "folder-videos"
 
 [entries.kind]
@@ -1030,6 +1099,7 @@ end = "20:00"
 [[entries]]
 id = "lofi-beats"
 label = "Lofi Beats"
+group = "listen"
 icon = "mpv"
 
 [entries.kind]
@@ -1070,6 +1140,7 @@ cooldown_seconds = 0  # No cooldown
 [[entries]]
 id = "youtube-channel"
 label = "Family YouTube Channel"
+group = "watch"
 icon = "folder-videos"
 
 [entries.kind]
@@ -1113,7 +1184,7 @@ label = "Pokemon FireRed"
 # troubleshooting section of docs/emulators.md, which shows how to check).
 # Shares the "Games" schedule, short-burst cap, combined quota, and cooldown
 # with the other members of this category (issue #5).
-group = "attention-heavy"
+group = "play"
 # icon is autodetected from RetroArch's .desktop file; point it at box art to
 # give the game its own tile.
 # icon = "~/Games/Icons/pokemon-firered.png"
@@ -1135,6 +1206,37 @@ max_run_seconds = 2700     # 45 minutes -- long enough to reach a save point
 daily_quota_seconds = 5400
 cooldown_seconds = 1800
 
+# A second token gate, so this file shows both halves of the feature and both
+# ways of naming a source. Celeste's gate above is the one with the full
+# explanation; read that first.
+#
+# The difference worth seeing here is what the *launcher* draws, which depends
+# entirely on the balance:
+#
+#   below minimum_seconds   a putty "have/need" pill -- `5/10` -- and the
+#                           activity dimmed to half, still on screen, because
+#                           the pill is what tells the child how much further
+#                           there is to go
+#   at or above it          a deep-teal pill with the banked time remaining --
+#                           `25m` -- and the activity live again
+#
+# A fresh install starts at zero, so the first thing this shows is `0/10`. The
+# balance is earned by playing the `from` activities, or granted outright from
+# the management UI ("Adjust banked time"), which is the quick way to see both
+# pills without playing twenty minutes of Tux Math.
+[entries.tokens]
+# Named individually rather than as `group:learn` -- both spellings work, and
+# Celeste above uses the other one. Tux Math alone earns this game.
+from = ["tuxmath"]
+# One second banked per second played, where Celeste's gate is half that: this
+# game is the cheaper reward.
+earn_ratio = 1.0
+# Ten minutes banked before it unlocks at all, and it relocks below that.
+minimum_seconds = 600
+# And a ceiling, so a long afternoon of Tux Math cannot bank a whole evening of
+# this. Time past the cap is not kept.
+max_balance_seconds = 2700
+
 ## === Reading (ebook) ===
 # Install the reader with:
 #   sudo lunchbox-admin apps install okular
@@ -1149,18 +1251,30 @@ cooldown_seconds = 1800
 # in that store's app -- a browser activity for Kindle Cloud Reader or Google
 # Play Books -- because the DRM is the point of the store, and Lunchbox is not
 # in the business of removing it.
+#
+# The two below are public domain, so you can actually fetch them and have this
+# file work as written:
+#
+#   mkdir -p ~/Books
+#   curl -L -o ~/Books/alice.epub https://www.gutenberg.org/ebooks/11.epub.noimages
+#   curl -L -o ~/Books/oz.epub    https://www.gutenberg.org/ebooks/55.epub.noimages
+#
+# An entry whose book is missing is simply unavailable, and a category with
+# nothing available is not drawn at all -- so skip the download and the "Books"
+# compartment does not appear.
 [[entries]]
-id = "the-hobbit"
-label = "The Hobbit"
+id = "alice-in-wonderland"
+label = "Alice's Adventures"
+group = "books"
 # The cover makes a far better tile than a generic book icon; without one,
 # Lunchbox falls back to the format's mime icon.
-# icon = "~/Books/covers/the-hobbit.png"
+# icon = "~/Books/covers/alice.png"
 
 [entries.kind]
 type = "ebook"
 # Absolute or ~/-prefixed, like a RetroArch `content`: a bare relative path
 # would resolve against the daemon's working directory, not yours.
-book = "~/Books/the-hobbit.epub"
+book = "~/Books/alice.epub"
 # layout = "facing_first_centered"
 #                       # the default: two pages like an open book, with the
 #                       # cover on its own so every later spread falls where a
@@ -1199,6 +1313,24 @@ always = true
 
 # A book needs no network. Belt to the reader's own restrictions: this is what
 # stops a link inside a book reaching anything.
+[entries.firewall]
+default = "deny"
+
+# A second book. Everything optional is explained on the entry above; this one
+# is what a book actually needs: an id, a label, the file, and the category it
+# belongs to.
+[[entries]]
+id = "wizard-of-oz"
+label = "The Wonderful Wizard of Oz"
+group = "books"
+
+[entries.kind]
+type = "ebook"
+book = "~/Books/oz.epub"
+
+[entries.availability]
+always = true
+
 [entries.firewall]
 default = "deny"
 

@@ -227,12 +227,15 @@ updates mid-session.
 ### Groups
 
 A group (issue #5) is a category of activities that share one schedule and one
-budget. Entries join with `group = "<id>"`.
+budget. Entries join with `group = "<id>"`. Groups are also the categories the
+launcher draws as compartments, in declaration order (issue #207), so a group
+is worth declaring for the sorting alone — `id` and `label` are the only
+required fields.
 
 ```toml
 [[groups]]
-id = "attention-heavy"
-label = "Games"
+id = "play"
+label = "Play"
 
 [groups.availability]
 [[groups.availability.windows]]
@@ -253,7 +256,7 @@ from = ["educational-game"]
 
 [[entries]]
 id = "some-game"
-group = "attention-heavy"
+group = "play"
 ```
 
 A token gate's `from` accepts group IDs prefixed with `group:`, so a whole
@@ -265,8 +268,8 @@ from = ["group:educational"]   # any member of that category banks time
 ```
 
 Groups are also limit subjects for daily overrides, so a caregiver can enable or
-disable a whole category for the day with a single call by passing
-`group:attention-heavy` as the override id.
+disable a whole category for the day with a single call by passing `group:play`
+as the override id.
 
 ### How the limits interact
 

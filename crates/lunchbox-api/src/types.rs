@@ -845,6 +845,16 @@ pub struct EntryView {
     /// - If enabled=false: entry is not available
     /// - If enabled=true: entry has no time limit (unlimited)
     pub max_run_if_started_now: Option<Duration>,
+    /// Whether time spent here banks time toward some *other* activity's gate
+    /// (issue #8) — i.e. this entry, or the category it belongs to, appears in
+    /// some `tokens.from`.
+    ///
+    /// The launcher wears it as the "earn" pill (issue #207), which is the only
+    /// place a child is told that this activity is worth something beyond
+    /// itself. Deriving it in a client is not possible: a gate names its
+    /// sources, so the sources themselves carry no trace of being one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub earns_tokens: bool,
 }
 
 /// View of a group for UI display (issue #5).
@@ -877,6 +887,22 @@ pub struct GroupView {
     /// member, so it belongs here rather than on any one of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<TokenStatus>,
+    /// When the availability window the category is *currently inside* closes
+    /// (issue #207). `None` when the category is always available, has no
+    /// windows, or is outside all of them — in none of those cases is there a
+    /// closing time today to name.
+    ///
+    /// The launcher prints it on the compartment floor ("Until 6:00 PM"), which
+    /// is why it is a wall-clock time rather than the remaining duration
+    /// `max_run_if_started_now` already carries: that one is the *shortest* of
+    /// every limit the category imposes, so it says when the child must stop,
+    /// not when the category shuts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_closes_at: Option<DateTime<Local>>,
+    /// Whether time spent on this category's members banks time toward some
+    /// other activity's gate. See `EntryView::earns_tokens`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub earns_tokens: bool,
 }
 
 /// Structured reason codes for why an entry is unavailable
@@ -1071,6 +1097,19 @@ pub struct ServiceStateSnapshot {
     /// Available entries for UI display
     #[serde(default)]
     pub entries: Vec<EntryView>,
+    /// The categories those entries belong to (issue #5), in policy order.
+    ///
+    /// Rides the snapshot rather than being a separate `list_groups` call
+    /// (issue #207): the launcher draws one compartment per category and has to
+    /// redraw on every `StateChanged`, so fetching them apart from the entries
+    /// would both double the round trips and let the two drift — a category's
+    /// banked time and its members' could be a moment out of step, which is
+    /// exactly what the child would notice.
+    ///
+    /// Empty from an older payload, which reads as "no categories" and renders
+    /// as the flat grid that predates compartments.
+    #[serde(default)]
+    pub groups: Vec<GroupView>,
     /// Latest known status of each configured internet connectivity check.
     /// Empty when no connectivity checks are configured.
     #[serde(default)]

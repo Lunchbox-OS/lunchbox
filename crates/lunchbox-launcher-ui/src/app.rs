@@ -14,97 +14,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::client::{CommandClient, ServiceClient};
-use crate::grid::LauncherGrid;
+use crate::field::LauncherField;
 use crate::state::{LauncherState, SharedState};
-
-/// CSS styling for the launcher
-const LAUNCHER_CSS: &str = r#"
-.admin-picker { padding: 32px 48px; }
-.admin-search { font-size: 20px; padding: 10px 14px; }
-window {
-    background-color: #1a1a2e;
-}
-
-.launcher-grid {
-    padding: 48px;
-}
-
-.launcher-tile {
-    background: #16213e;
-    background-color: #16213e;
-    border-radius: 16px;
-    padding: 16px;
-    min-width: 140px;
-    min-height: 140px;
-    border: 2px solid transparent;
-    transition: all 200ms ease;
-    color: #e0e0e0;
-    box-shadow: none;
-}
-
-.launcher-tile:hover {
-    background: #1f3460;
-    background-color: #1f3460;
-    border-color: #4a90d9;
-}
-
-.launcher-tile:focus,
-.launcher-tile:focus-visible {
-    background: #1f3460;
-    background-color: #1f3460;
-    border-color: #ffd166;
-}
-
-.launcher-tile:active {
-    background: #0f3460;
-    background-color: #0f3460;
-}
-
-.launcher-tile:disabled {
-    opacity: 0.4;
-}
-
-.tile-label {
-    color: #e0e0e0;
-    font-size: 14px;
-    font-weight: 500;
-}
-
-.launcher-tile image {
-    -gtk-icon-style: regular;
-    color: #e0e0e0;
-}
-
-.status-label {
-    color: #888888;
-    font-size: 18px;
-}
-
-.error-label {
-    color: #ff6b6b;
-    font-size: 16px;
-}
-
-.launching-spinner {
-    min-width: 64px;
-    min-height: 64px;
-}
-
-.session-active-box {
-    padding: 48px;
-}
-
-.session-label {
-    color: #ffffff;
-    font-size: 24px;
-    font-weight: 600;
-}
-
-.session-sublabel {
-    color: #888888;
-    font-size: 16px;
-}
-"#;
+use crate::theme;
 
 pub struct LauncherApp {
     socket_path: PathBuf,
@@ -130,9 +42,12 @@ impl LauncherApp {
     }
 
     fn build_ui(app: &gtk4::Application, socket_path: PathBuf) {
-        // Load CSS
+        // The stylesheet is written at the design size and multiplied for the
+        // output it lands on, so it cannot be loaded once and forgotten: the
+        // launcher is fullscreen on a screen whose size it does not know until
+        // it is mapped. Loaded at 1.0 here and corrected in `track_scale`.
         let provider = gtk4::CssProvider::new();
-        provider.load_from_data(LAUNCHER_CSS);
+        provider.load_from_data(&theme::stylesheet(1.0));
         gtk4::style_context_add_provider_for_display(
             &gtk4::gdk::Display::default().expect("Could not get default display"),
             &provider,
@@ -146,6 +61,7 @@ impl LauncherApp {
             .default_width(1280)
             .default_height(720)
             .build();
+        window.add_css_class("lb-launcher");
 
         // Make fullscreen
         window.fullscreen();
@@ -156,13 +72,13 @@ impl LauncherApp {
         stack.set_transition_duration(300);
 
         // Create views
-        let grid = LauncherGrid::new();
+        let field = LauncherField::new();
         let loading_view = Self::create_loading_view();
         let error_view = Self::create_error_view();
         let session_view = Self::create_session_view();
         let disconnected_view = Self::create_disconnected_view();
 
-        stack.add_named(&grid, Some("grid"));
+        stack.add_named(&field, Some("field"));
         stack.add_named(&loading_view, Some("loading"));
         stack.add_named(&error_view.0, Some("error"));
         stack.add_named(&session_view.0, Some("session"));
@@ -171,7 +87,7 @@ impl LauncherApp {
         // sees, over the system's `.desktop` files, with a search bar. Its own
         // grid instance rather than the child's, so the two launch paths cannot
         // be confused for one another — this one starts arbitrary programs.
-        let admin_grid = LauncherGrid::new();
+        let admin_field = LauncherField::new();
         let admin_search = gtk4::SearchEntry::builder()
             .placeholder_text("Search applications")
             .hexpand(true)
@@ -180,7 +96,7 @@ impl LauncherApp {
         let admin_view = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
         admin_view.add_css_class("admin-picker");
         admin_view.append(&admin_search);
-        admin_view.append(&admin_grid);
+        admin_view.append(&admin_field);
         stack.add_named(&admin_view, Some("admin"));
 
         window.set_child(Some(&stack));
@@ -197,9 +113,9 @@ impl LauncherApp {
 
         // Create command client for sending commands
         let command_client = Arc::new(CommandClient::new(&socket_path));
-        Self::setup_keyboard_input(&window, &grid);
+        Self::setup_keyboard_input(&window, &field, &admin_field, state.clone());
         Self::setup_admin_picker(
-            &admin_grid,
+            &admin_field,
             &admin_search,
             command_client.clone(),
             runtime.clone(),
@@ -207,17 +123,18 @@ impl LauncherApp {
         );
         Self::setup_gamepad_input(
             &window,
-            &grid,
+            &field,
             command_client.clone(),
             runtime.clone(),
             state.clone(),
         );
+        Self::track_scale(&window, &field, &provider);
 
-        // Connect grid launch callback
+        // Connect field launch callback
         let cmd_client = command_client.clone();
         let state_clone = state.clone();
         let rt = runtime.clone();
-        grid.connect_launch(move |entry_id| {
+        field.connect_launch(move |entry_id| {
             // Only act while the grid is what the child is actually looking
             // at. Every input path funnels through here — keyboard, pointer
             // and the evdev-polled gamepad — so this is the one place that
@@ -290,6 +207,7 @@ impl LauncherApp {
                                 } else {
                                     state.set(LauncherState::Idle {
                                         entries: snapshot.entries,
+                                        groups: snapshot.groups,
                                     });
                                 }
                             }
@@ -343,7 +261,7 @@ impl LauncherApp {
 
         // Set up state change handler
         let stack_weak = stack.downgrade();
-        let grid_weak = grid.downgrade();
+        let field_weak = field.downgrade();
         let window_weak = window.downgrade();
         let error_label = error_view.1.clone();
         let session_label = session_view.1.clone();
@@ -361,7 +279,7 @@ impl LauncherApp {
                     break;
                 };
 
-                let grid = grid_weak.upgrade();
+                let field = field_weak.upgrade();
                 let window = window_weak.upgrade();
 
                 match state {
@@ -377,21 +295,19 @@ impl LauncherApp {
                         }
                         stack.set_visible_child_name("loading");
                     }
-                    LauncherState::Idle { entries } => {
-                        if let Some(grid) = grid {
-                            grid.set_entries(entries);
-                            grid.set_tiles_sensitive(true);
-                            grid.grab_focus();
+                    LauncherState::Idle { entries, groups } => {
+                        if let Some(field) = field {
+                            field.set_state(entries, groups);
                         }
                         if let Some(ref win) = window {
                             win.set_visible(true);
                         }
-                        stack.set_visible_child_name("grid");
+                        stack.set_visible_child_name("field");
                     }
                     LauncherState::Launching { entry_id: _ } => {
-                        if let Some(grid) = grid {
-                            grid.set_tiles_sensitive(false);
-                        }
+                        // Nothing to desensitise: every launch path checks the
+                        // state before it acts, so the field being behind the
+                        // loading view is already enough to make it inert.
                         stack.set_visible_child_name("loading");
                     }
                     LauncherState::Closing { entry_label } => {
@@ -465,7 +381,7 @@ impl LauncherApp {
     /// tick picks it up, which is the same shape the rest of this file uses for
     /// crossing that boundary.
     fn setup_admin_picker(
-        grid: &LauncherGrid,
+        field: &LauncherField,
         search: &gtk4::SearchEntry,
         client: Arc<CommandClient>,
         runtime: Arc<Runtime>,
@@ -480,7 +396,7 @@ impl LauncherApp {
         let client_for_launch = client.clone();
         let runtime_for_launch = runtime.clone();
         let state_for_launch = state.clone();
-        grid.connect_launch(move |entry_id| {
+        field.connect_launch(move |entry_id| {
             // This grid's "entry id" is a desktop file ID, which is what
             // `launch_desktop_app` takes. Guarded on the state as well as the
             // daemon's own gate, so a stale click cannot start something after
@@ -498,9 +414,12 @@ impl LauncherApp {
             });
         });
 
-        let grid_for_search = grid.clone();
+        let field_for_search = field.downgrade();
         let apps_for_search = apps.clone();
         search.connect_search_changed(move |entry| {
+            let Some(field) = field_for_search.upgrade() else {
+                return;
+            };
             let needle = entry.text().to_lowercase();
             let filtered: Vec<_> = apps_for_search
                 .borrow()
@@ -514,18 +433,19 @@ impl LauncherApp {
                 })
                 .map(Self::desktop_app_as_entry)
                 .collect();
-            grid_for_search.set_entries(filtered);
-            grid_for_search.select_first();
+            field.set_state(filtered, Self::picker_category());
         });
 
-        let grid_for_tick = grid.clone();
+        let field_for_tick = field.downgrade();
         let search_for_tick = search.clone();
         let mut was_admin = false;
         glib::timeout_add_local(Duration::from_millis(300), move || {
             let is_admin = matches!(state.get(), LauncherState::AdminMode);
             if is_admin && !was_admin {
                 search_for_tick.set_text("");
-                grid_for_tick.set_entries(Vec::new());
+                if let Some(field) = field_for_tick.upgrade() {
+                    field.set_state(Vec::new(), Self::picker_category());
+                }
                 let client = client.clone();
                 let slot = fetched.clone();
                 runtime.spawn(async move {
@@ -541,8 +461,9 @@ impl LauncherApp {
             if let Some(list) = fetched.lock().unwrap().take() {
                 let views: Vec<_> = list.iter().map(Self::desktop_app_as_entry).collect();
                 *apps.borrow_mut() = list;
-                grid_for_tick.set_entries(views);
-                grid_for_tick.select_first();
+                if let Some(field) = field_for_tick.upgrade() {
+                    field.set_state(views, Self::picker_category());
+                }
                 search_for_tick.grab_focus();
             }
             glib::ControlFlow::Continue
@@ -555,6 +476,34 @@ impl LauncherApp {
     /// launch path takes. Everything policy-shaped is inert: these are not
     /// activities, have no limits, and are always launchable while the mode is
     /// on — the mode is the gate.
+    /// The one category the picker puts everything in.
+    ///
+    /// Administrator mode has no categories of its own — a `.desktop` file
+    /// belongs to no group and carries no policy — so the picker borrows the
+    /// child's field by handing it a single synthetic one. Everything the
+    /// branding does then applies without being asked for: the sunk cream
+    /// well, the selected cell, the item treatment, the scrolling and its
+    /// fades. It is also the whole reason there is no second grid widget to
+    /// keep in step with the first.
+    fn picker_category() -> Vec<lunchbox_api::GroupView> {
+        vec![lunchbox_api::GroupView {
+            group_id: lunchbox_util::GroupId::new(Self::PICKER_GROUP),
+            label: "Applications".to_string(),
+            member_ids: Vec::new(),
+            enabled: true,
+            reasons: Vec::new(),
+            used_today: Duration::ZERO,
+            daily_quota: None,
+            max_run_if_started_now: None,
+            tokens: None,
+            window_closes_at: None,
+            earns_tokens: false,
+        }]
+    }
+
+    /// The group id the picker's entries and its synthetic category share.
+    const PICKER_GROUP: &'static str = "lunchbox:installed-applications";
+
     fn desktop_app_as_entry(app: &lunchbox_api::DesktopApp) -> lunchbox_api::EntryView {
         lunchbox_api::EntryView {
             entry_id: EntryId::new(&app.id),
@@ -562,41 +511,84 @@ impl LauncherApp {
             icon_ref: app.icon.clone(),
             kind_tag: lunchbox_api::EntryKindTag::Process,
             enabled: true,
-            group: None,
+            group: Some(lunchbox_util::GroupId::new(Self::PICKER_GROUP)),
             reasons: Vec::new(),
             tokens: None,
+            // Not an activity, so nothing about it can earn or be earned.
+            earns_tokens: false,
             max_run_if_started_now: None,
         }
     }
 
-    fn setup_keyboard_input(window: &gtk4::ApplicationWindow, grid: &LauncherGrid) {
+    fn setup_keyboard_input(
+        window: &gtk4::ApplicationWindow,
+        field: &LauncherField,
+        admin_field: &LauncherField,
+        state: SharedState,
+    ) {
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        let grid_weak = grid.downgrade();
+        let field_weak = field.downgrade();
+        let admin_weak = admin_field.downgrade();
         key_controller.connect_key_pressed(move |_, key, _, _| {
-            let Some(grid) = grid_weak.upgrade() else {
+            // Capture-phase, so this sees every key before anything else does.
+            // Which field it steers depends on which one is on screen; in any
+            // other state it steers nothing and lets the key through.
+            let (field, in_picker) = match state.get() {
+                LauncherState::Idle { .. } => (field_weak.upgrade(), false),
+                LauncherState::AdminMode => (admin_weak.upgrade(), true),
+                _ => return glib::Propagation::Proceed,
+            };
+            let Some(field) = field else {
                 return glib::Propagation::Proceed;
             };
 
+            // The picker has a search box, and a search box has to be able to
+            // contain a space. The child's field has no text entry anywhere,
+            // so space stays a second "launch this" there.
+            if in_picker && key == gtk4::gdk::Key::space {
+                return glib::Propagation::Proceed;
+            }
+
+            // WASD is a second D-pad for the child's field, where every key is
+            // a button. In the picker those are letters someone is typing into
+            // the search box, so only the arrows steer there.
+            let wasd = !in_picker;
             let handled = match key {
-                gtk4::gdk::Key::Up | gtk4::gdk::Key::w | gtk4::gdk::Key::W => {
-                    grid.move_selection(0, -1);
+                gtk4::gdk::Key::Up => {
+                    field.move_selection(0, -1);
                     true
                 }
-                gtk4::gdk::Key::Down | gtk4::gdk::Key::s | gtk4::gdk::Key::S => {
-                    grid.move_selection(0, 1);
+                gtk4::gdk::Key::Down => {
+                    field.move_selection(0, 1);
                     true
                 }
-                gtk4::gdk::Key::Left | gtk4::gdk::Key::a | gtk4::gdk::Key::A => {
-                    grid.move_selection(-1, 0);
+                gtk4::gdk::Key::Left => {
+                    field.move_selection(-1, 0);
                     true
                 }
-                gtk4::gdk::Key::Right | gtk4::gdk::Key::d | gtk4::gdk::Key::D => {
-                    grid.move_selection(1, 0);
+                gtk4::gdk::Key::Right => {
+                    field.move_selection(1, 0);
+                    true
+                }
+                gtk4::gdk::Key::w | gtk4::gdk::Key::W if wasd => {
+                    field.move_selection(0, -1);
+                    true
+                }
+                gtk4::gdk::Key::s | gtk4::gdk::Key::S if wasd => {
+                    field.move_selection(0, 1);
+                    true
+                }
+                gtk4::gdk::Key::a | gtk4::gdk::Key::A if wasd => {
+                    field.move_selection(-1, 0);
+                    true
+                }
+                gtk4::gdk::Key::d | gtk4::gdk::Key::D if wasd => {
+                    field.move_selection(1, 0);
                     true
                 }
                 gtk4::gdk::Key::Return | gtk4::gdk::Key::KP_Enter | gtk4::gdk::Key::space => {
-                    grid.launch_selected();
+                    field.launch_selected();
                     true
                 }
                 _ => false,
@@ -611,9 +603,56 @@ impl LauncherApp {
         window.add_controller(key_controller);
     }
 
+    /// Keep the stylesheet and the field's geometry matched to the output.
+    ///
+    /// The window is fullscreen, so its real size arrives after it is mapped,
+    /// and can change again if the device is docked to another display
+    /// (issue #87). Both the CSS and the widget size requests are derived from
+    /// that size, so both are redone whenever it changes — and only then, since
+    /// reloading the stylesheet restyles every widget on the display.
+    fn track_scale(
+        window: &gtk4::ApplicationWindow,
+        field: &LauncherField,
+        provider: &gtk4::CssProvider,
+    ) {
+        let applied = Rc::new(std::cell::Cell::new(f64::NAN));
+        let apply = {
+            let field = field.downgrade();
+            let provider = provider.clone();
+            move |width: i32, height: i32| {
+                let scale = theme::scale_for(width, height);
+                if (scale - applied.get()).abs() < f64::EPSILON {
+                    return;
+                }
+                applied.set(scale);
+                debug!(width, height, scale, "Laying the field out for the output");
+                provider.load_from_data(&theme::stylesheet(scale));
+                if let Some(field) = field.upgrade() {
+                    field.relayout();
+                }
+            }
+        };
+
+        let apply = Rc::new(apply);
+        for property in ["default-width", "default-height"] {
+            let apply = apply.clone();
+            window.connect_notify_local(Some(property), move |win, _| {
+                apply(win.width(), win.height());
+            });
+        }
+        let apply_on_map = apply.clone();
+        window.connect_map(move |win| {
+            // The size is still the pre-fullscreen default at map time on some
+            // compositors, so ask again once the frame has settled.
+            let win = win.clone();
+            let apply = apply_on_map.clone();
+            glib::idle_add_local_once(move || apply(win.width(), win.height()));
+        });
+    }
+
     fn setup_gamepad_input(
         _window: &gtk4::ApplicationWindow,
-        grid: &LauncherGrid,
+        field: &LauncherField,
         command_client: Arc<CommandClient>,
         runtime: Arc<Runtime>,
         state: SharedState,
@@ -626,14 +665,14 @@ impl LauncherApp {
             }
         };
 
-        let grid_weak = grid.downgrade();
+        let field_weak = field.downgrade();
         let cmd_client = command_client.clone();
         let rt = runtime.clone();
         let state_clone = state.clone();
         let mut stick_nav = StickNav::default();
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
-            let Some(grid) = grid_weak.upgrade() else {
+            let Some(field) = field_weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
 
@@ -655,12 +694,12 @@ impl LauncherApp {
                         continue;
                     }
                     match button {
-                        gilrs::Button::DPadUp => grid.move_selection(0, -1),
-                        gilrs::Button::DPadDown => grid.move_selection(0, 1),
-                        gilrs::Button::DPadLeft => grid.move_selection(-1, 0),
-                        gilrs::Button::DPadRight => grid.move_selection(1, 0),
+                        gilrs::Button::DPadUp => field.move_selection(0, -1),
+                        gilrs::Button::DPadDown => field.move_selection(0, 1),
+                        gilrs::Button::DPadLeft => field.move_selection(-1, 0),
+                        gilrs::Button::DPadRight => field.move_selection(1, 0),
                         gilrs::Button::South | gilrs::Button::East | gilrs::Button::Start => {
-                            grid.launch_selected();
+                            field.launch_selected();
                         }
                         gilrs::Button::Mode => {
                             Self::request_stop_current(
@@ -685,10 +724,10 @@ impl LauncherApp {
                 let y = gp.value(gilrs::Axis::LeftStickY);
                 if let Some(dir) = stick_nav.tick(x, y, Instant::now()) {
                     match dir {
-                        NavDir::Up => grid.move_selection(0, -1),
-                        NavDir::Down => grid.move_selection(0, 1),
-                        NavDir::Left => grid.move_selection(-1, 0),
-                        NavDir::Right => grid.move_selection(1, 0),
+                        NavDir::Up => field.move_selection(0, -1),
+                        NavDir::Down => field.move_selection(0, 1),
+                        NavDir::Left => field.move_selection(-1, 0),
+                        NavDir::Right => field.move_selection(1, 0),
                     }
                 }
             }
@@ -725,36 +764,43 @@ impl LauncherApp {
         });
     }
 
+    /// A card centred on the enamel. Every view that is not the field is one
+    /// of these, so the launcher never shows bare text on a teal ground.
+    fn create_card(spacing: i32) -> gtk4::Box {
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, spacing);
+        card.add_css_class("lb-card");
+        card.set_halign(gtk4::Align::Center);
+        card.set_valign(gtk4::Align::Center);
+        card
+    }
+
     fn create_loading_view() -> gtk4::Box {
-        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
-        container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::Center);
+        let container = Self::create_card(16);
 
         let spinner = gtk4::Spinner::new();
         spinner.set_spinning(true);
-        spinner.add_css_class("launching-spinner");
+        spinner.add_css_class("lb-spinner");
         container.append(&spinner);
 
-        let label = gtk4::Label::new(Some("Loading..."));
-        label.add_css_class("status-label");
+        let label = gtk4::Label::new(Some("Just a moment"));
+        label.add_css_class("lb-message-title");
         container.append(&label);
 
         container
     }
 
     fn create_error_view() -> (gtk4::Box, gtk4::Label) {
-        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
-        container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::Center);
+        let container = Self::create_card(16);
 
-        let icon = gtk4::Image::from_icon_name("dialog-error");
-        icon.set_pixel_size(64);
-        container.append(&icon);
+        let title = gtk4::Label::new(Some("That didn't work"));
+        title.add_css_class("lb-message-title");
+        container.append(&title);
 
-        let label = gtk4::Label::new(Some("An error occurred"));
-        label.add_css_class("error-label");
+        let label = gtk4::Label::new(None);
+        label.add_css_class("lb-message-body");
         label.set_wrap(true);
         label.set_max_width_chars(40);
+        label.set_justify(gtk4::Justification::Center);
         container.append(&label);
 
         (container, label)
@@ -764,42 +810,38 @@ impl LauncherApp {
     /// and while it is being closed. Returns the headline and the sublabel,
     /// because the two states need different hints.
     fn create_session_view() -> (gtk4::Box, gtk4::Label, gtk4::Label) {
-        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 24);
-        container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::Center);
-        container.add_css_class("session-active-box");
+        let container = Self::create_card(16);
 
         let spinner = gtk4::Spinner::new();
         spinner.set_spinning(true);
-        spinner.add_css_class("launching-spinner");
+        spinner.add_css_class("lb-spinner");
         container.append(&spinner);
 
         let label = gtk4::Label::new(Some("Loading..."));
-        label.add_css_class("session-label");
+        label.add_css_class("lb-message-title");
         container.append(&label);
 
         let hint = gtk4::Label::new(Some("Please wait while the application starts"));
-        hint.add_css_class("session-sublabel");
+        hint.add_css_class("lb-message-body");
         container.append(&hint);
 
         (container, label, hint)
     }
 
     fn create_disconnected_view() -> (gtk4::Box, gtk4::Button) {
-        let container = gtk4::Box::new(gtk4::Orientation::Vertical, 24);
-        container.set_halign(gtk4::Align::Center);
-        container.set_valign(gtk4::Align::Center);
+        let container = Self::create_card(20);
 
-        let icon = gtk4::Image::from_icon_name("network-offline");
-        icon.set_pixel_size(64);
-        container.append(&icon);
-
-        let label = gtk4::Label::new(Some("System not ready"));
-        label.add_css_class("status-label");
+        let label = gtk4::Label::new(Some("Not ready yet"));
+        label.add_css_class("lb-message-title");
         container.append(&label);
 
-        let retry_button = gtk4::Button::with_label("Retry");
-        retry_button.add_css_class("launcher-tile");
+        let hint = gtk4::Label::new(Some("Waiting for the Lunchbox service"));
+        hint.add_css_class("lb-message-body");
+        container.append(&hint);
+
+        let retry_button = gtk4::Button::with_label("Try again");
+        retry_button.add_css_class("lb-button");
+        retry_button.set_halign(gtk4::Align::Center);
         container.append(&retry_button);
 
         (container, retry_button)

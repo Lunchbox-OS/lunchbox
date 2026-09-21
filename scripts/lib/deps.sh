@@ -152,6 +152,55 @@ install_lint_components() {
     rustup component add "${missing[@]}"
 }
 
+# Make the launcher's display face available to a *development* run
+# (issue #207).
+#
+# An installed device gets Baloo 2 from `install_fonts` in install.sh, under
+# /usr/share/fonts. Nothing installs anything when the stack is run out of
+# target/debug by `dev headless` or ./run-dev, so the same font is linked into
+# this user's own font directory instead -- no root, and nothing placed outside
+# $HOME.
+#
+# Symlinked rather than copied so editing the file in the repo needs no second
+# step; fontconfig follows the link and reads the mtime through it.
+install_branding_fonts() {
+    local repo_root
+    repo_root="$(get_repo_root)"
+    local src_dir="$repo_root/assets/fonts"
+
+    if [[ ! -d "$src_dir" ]]; then
+        warn "No branding fonts at $src_dir; the launcher will use its fallback"
+        return 0
+    fi
+
+    local dst_dir="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/lunchbox"
+    info "Linking branding fonts into $dst_dir..."
+    mkdir -p "$dst_dir"
+
+    local font
+    for font in "$src_dir"/*.ttf; do
+        [[ -f "$font" ]] || continue
+        ln -sfn "$font" "$dst_dir/$(basename "$font")"
+    done
+
+    # Without this the font is on disk and still invisible: fontconfig answers
+    # from its cache, and a cache built before the directory existed has no
+    # reason to look again. This is the step whose absence looks exactly like a
+    # font that was never installed.
+    if command_exists fc-cache; then
+        fc-cache -f >/dev/null 2>&1 \
+            || warn "Could not refresh the font cache; run 'fc-cache -f'"
+    else
+        warn "fc-cache not found; the launcher will use its fallback font"
+    fi
+}
+
+# Whether the launcher's display face is where fontconfig can find it.
+is_branding_font_installed() {
+    command_exists fc-match || return 1
+    fc-match "Baloo 2" 2>/dev/null | grep -qi "baloo"
+}
+
 # Install the BPF authoring toolchain: nightly Rust (for `-Zbuild-std`),
 # rust-src (so the BPF crate can build core for bpfel-unknown-none), and
 # `bpf-linker` (which crates/lunchbox-firewall-bpf uses to emit the
@@ -777,6 +826,7 @@ deps_install() {
     # deliberately comes from pip. Runs after apt so python3-venv is present.
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         install_media_deps
+        install_branding_fonts
     fi
 
     # The cross set needs rustc's own std for the target, which apt cannot
@@ -831,6 +881,10 @@ deps_check() {
     if [[ "$set_name" == "run" ]] || [[ "$set_name" == "dev" ]]; then
         if ! is_ytdlp_installed; then
             warn "yt-dlp is not installed (run: lunchbox deps install run)"
+            return 1
+        fi
+        if ! is_branding_font_installed; then
+            warn "Baloo 2 is not installed (run: lunchbox deps install $set_name)"
             return 1
         fi
     fi

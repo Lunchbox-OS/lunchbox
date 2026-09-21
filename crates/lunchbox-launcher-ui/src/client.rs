@@ -151,6 +151,7 @@ impl ServiceClient {
         } else {
             self.state.set(LauncherState::Idle {
                 entries: snapshot.entries,
+                groups: snapshot.groups,
             });
         }
     }

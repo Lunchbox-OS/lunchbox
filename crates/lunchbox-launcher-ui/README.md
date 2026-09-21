@@ -10,8 +10,9 @@ This is what users see when no session is active—the "home screen" of the envi
 
 ## Features
 
-- **Entry grid** - Large, touch-friendly tiles for each available entry
-- **Availability display** - Visual indication of enabled/disabled entries
+- **The field** - One sunk compartment per category, activities inside them
+- **Time badges** - What a category or activity has banked, needs, or earns
+- **Availability display** - Locked activities stay visible, wearing their badge
 - **Launch requests** - Send launch commands to the service
 - **State synchronization** - Always reflects service's authoritative state
 
@@ -72,40 +73,192 @@ lunchboxd. The service applies the configured `[volume]` policy
 (`max_volume`, `min_volume`, `allow_mute`, `allow_change`) and broadcasts
 a `VolumeChanged` event so the HUD slider follows the change.
 
-## Grid Behavior
+## Field Behaviour
 
-### Entry Tiles
+The home screen is a row of **compartments**, one per category, in config order
+(`src/field.rs`). Entries belonging to no category fall into a trailing
+"Everything else". A category with nothing to show is not drawn at all.
 
-Each tile displays:
+Lunchbox is a sectioned tin, and the launcher is that tin at screen size: an
+enamel field with cream compartments sunk into it. The design tokens and the
+mark live in `assets/branding`; `src/theme.rs` is their Rust half.
 
-- **Icon** - Large, recognizable icon
-- **Label** - Entry name
-- **Status** - Enabled (bright) or disabled (dimmed)
-- **Time indicator** - Max duration if started now (e.g., "30 min")
+### Compartments
 
-### Enabled Entries
+Each compartment shows its category's name, at most one badge, its members in
+columns that spill *rightwards*, and — when the category is on a schedule —
+its hours on the floor — "Until 6:00 PM" while it is open, "Opens 4:00 PM"
+while it is shut — behind a little clock face whose hands point at that hour
+(`ClockFace`, from `lunchbox-widgets`, shared with the HUD's vertical bar). A
+child who cannot yet read "6:00 PM" can still see where the hand is going to
+be. The shut half reads its hour out of the `OutsideTimeWindow` reason rather
+than off the view; a category shut for some other reason keeps its floor quiet
+rather than inventing an hour.
 
-When an entry is enabled:
-1. Tile is fully visible and interactive
-2. Tapping sends `Launch` command to service
-3. Grid shows "Launching..." state
-4. On success: launcher hides, application starts
+Height never grows: a category with more members gets wider, and if the row
+overflows the screen the row scrolls **horizontally**. The field never scrolls
+vertically.
 
-### Disabled Entries
+A category only claims the height its own items need, so the field is a row of
+**columns** rather than of compartments: two short categories stand one above
+the other in a single column instead of each wasting most of a screen
+(`compartment::pack_into_slots`). The packing is greedy and strictly in config
+order, so reading a column downwards and then moving right reads the categories
+in the order the configuration lists them; a cleverer fit would have to shuffle
+them, and a home screen whose sections move about when one of them gains an
+activity is worse than one with a gap in it. Everything in a column is as wide
+as the widest of them, and the column fills the field's height, so the row
+still reads as one tin.
 
-When an entry is disabled it is not displayed.
+The row is **centred** in the field, so the margin past the last compartment
+matches the one before the first. It carries the design's 40px side margins
+itself; centring is about the slack beyond them, which would otherwise all
+land at the right-hand end. When the row is wider than the screen this does
+nothing at all — it takes its natural width and scrolls.
+
+An item cell is **exactly** `space.item-w` wide, not merely at least. A size
+request is a floor in GTK, so without a ceiling to match it a cell is as wide
+as its own name wants, and cells come out at every width between the floor and
+`NAME_MAX_CHARS`. The branding is explicit that a cell is one size (§3), and
+the row's arithmetic below needs it to be true.
+
+When the row misses fitting the screen by **less than half a cell**, the cells
+give up the difference instead of the field scrolling
+(`LauncherField::squish_to_fit`). Scrolling is the right answer for a row that
+genuinely does not fit; it is a poor one for a row forty pixels too wide, where
+the child gets a chevron, a fade and a gesture to learn in order to reach a
+strip of screen narrower than an icon. Above half a cell the row really is too
+big and scrolling is what it is for.
+
+Squishing a cell takes three things, because a GTK minimum is the largest of
+everything that asks for one: a **ceiling** on the natural width (a size
+request is a floor, and the name's own `NAME_MAX_CHARS` is what makes a cell as
+wide as it is), the cell's own request, and the name's request — the floor
+*inside* the cell, and the one that actually bites. It is safe to do after the
+fact because a cell's width feeds nothing decided earlier: the rows, the
+columns and the pairing all came from the height budget.
+
+It measures, narrows and measures again rather than dividing once, because a
+`measure` taken in the same turn as the size request that provoked it does not
+reliably agree with the allocation that follows. The loop converges on a row
+that fits; it can overshoot by a few pixels, which the centring above turns
+into a slightly wider margin at both ends rather than a ragged one at a
+single end.
+
+The D-pad model follows the *columns*, not the compartments: one navigable
+stack per x position, carrying the items of every compartment at that x, so
+Down runs off the end of the upper category straight into the start of the
+lower one.
+
+The field lays itself out again whenever its **allocation** changes, not only
+when the scale does (`WidgetImpl::size_allocate`). Everything below is an
+answer to "how much room is there", and two sizes can share a scale — so
+watching the scale alone left a window that grew without crossing a scale
+boundary showing a layout meant for the size before it.
+
+A compartment is never narrower than **two item columns**, whatever it holds.
+The header carries the category's name and a badge pushed to the far end of
+the same line; at one column wide there is not room for both, and since the
+name does not ellipsize it is the compartment that gives — stretching to
+whatever the words need, which puts every badge at a different offset again.
+It buys a row of headers that all work.
+
+The members are **dealt across** into those columns in reading order — the top
+row left to right, then the row under it — so a category that does not fill its
+compartment leaves the gap along the bottom rather than down the right-hand
+side, where the two-column floor would otherwise leave an empty column standing
+in the tin. The *columns* are what `Compartment::stacks` returns, because that
+is what the D-pad moves between; only the dealing runs the other way, and the
+compartment is the same width either way.
+
+How tall a stack may be is **measured, not fixed**
+(`compartment::rows_that_fit`). The design hands down three (`space.rows`),
+which is what a 1280×720 screen has room for, but `scale_for` scales by the
+narrower axis so the row never reflows — so a screen taller than 16:9 has
+height under the compartments that a fixed three would waste, and a shorter one
+clips. The field measures a probe compartment against its own height once per
+layout and hands every compartment the same answer, so they all agree on where
+their items start. The design's three is what that returns before the window
+knows its size.
+
+### Items
+
+Each item shows the activity's own icon at 64px with an ink keyline traced
+around its silhouette, its name, and its badge.
+
+### Time badges
+
+Time is shown where it applies — on the compartment when the gate belongs to the
+category, on the item when it is the item's own — and never in a panel of its
+own:
+
+| Badge | Means |
+|---|---|
+| `+` on yellow | Time spent here earns time toward something else |
+| `25m` on deep teal | Banked and ready to spend |
+| `5/10` on putty | Have against need; not yet |
+| `8m` on putty | Cooling down |
+
+### Locked activities
+
+An activity the policy has switched off is **still drawn**, at 50% opacity, with
+its badge — because a child who cannot see Celeste cannot learn that ten minutes
+of Tux Math would open it. It can be selected but not launched; a press shakes
+its badge instead.
+
+That applies to obstacles the child can act on: a closed window, a spent quota,
+a cooldown, an unmet gate, a gamepad to plug in. Configuration and capability
+problems — an entry the caregiver disabled, a kind this host cannot run, a
+protection that cannot be applied — are hidden instead, because nothing the
+child does changes them and a permanently dead icon teaches them to ignore
+dimmed items.
+
+**A permanent blocker wins.** Several reasons can block one activity at once,
+and an entry switched off in the configuration stays off however many clocks
+also happen to be against it. `is_shown_when_locked` in `src/item.rs` splits the
+two kinds, and a new `ReasonCode` has to be classified in both.
+
+### Selection
+
+**At most one item is selected, and not until something has selected it.** The
+launcher comes up with no selection at all and wakes on the first direction
+press, hover or tap; that first press *reveals* the selection where it already
+is rather than moving it, and a tap on empty space puts it away again. Pressing
+A/Enter with nothing selected reveals rather than launches — starting something
+the child cannot see is the worse failure.
+
+The branding asks for exactly one item focused at all times, which is right for
+a D-pad and wrong for a touchscreen: there is no cursor there to explain a
+standing highlight, and it claims a choice nobody has made.
+
+Left/right move between stacks and across compartments; up/down move within a
+stack and wrap. Running off either end of the row nudges the scroll rather than
+wrapping — by most of a screenful, since a chevron is a "next page" control.
+Hovering with a pointer selects, so the pointer and the D-pad produce the same
+single state.
+
+The selected look is carried by a CSS class the field manages, not by `:focus`
+— see the note on `.lb-item--selected` in `src/theme.rs` for why.
+
+### Scaling
+
+The stylesheet is written for 1280x720 and every `px` literal in it is
+multiplied for the output the launcher actually lands on (`theme::stylesheet`).
+The layout is one row at every size; scaling keeps the ratios rather than
+reflowing. **A size that should scale has to be written in `px` in that
+stylesheet** — anything left to the GTK theme keeps its logical value and so
+shrinks on screen as everything around it grows.
 
 ### Launch Flow
 
 ```
-User taps tile
+User presses an activity
       │
       ▼
-Launcher sends Launch command
+Press animates (120ms), then Launch goes out
       │
       ▼
-Grid input disabled
-"Starting..." overlay shown
+Loading view replaces the field
       │
       ▼
 ┌─────┴─────┐
@@ -114,22 +267,37 @@ Grid input disabled
 Success     Failure
 │           │
 ▼           ▼
-Launcher    Error message
-hides       Grid restored
+Launcher    Error message,
+hides       field restored
 ```
+
+Nothing is desensitised while a launch is in flight: every launch path checks
+the state before it acts, so the field being behind another view is already
+enough to make it inert. A locked activity never launches at all — its badge
+shakes instead.
 
 ## State Management
 
-The launcher maintains a reactive state model:
+The launcher maintains a reactive state model — one enum, in `src/state.rs`,
+of which view is on screen:
 
 ```rust
-struct LauncherState {
-    entries: Vec<EntryView>,   // From service
-    current_session: Option<SessionInfo>,
-    connected: bool,
-    launching: Option<EntryId>,
+enum LauncherState {
+    Disconnected,
+    Connecting,
+    Idle { entries: Vec<EntryView>, groups: Vec<GroupView> },
+    Launching { entry_id: String },
+    Closing { entry_label: String },
+    SessionActive { .. },
+    AdminMode,
+    Error { message: String },
+    Suspending,
 }
 ```
+
+`Idle` carries the categories alongside the entries because the field draws one
+compartment per category: the two are one picture, and fetching them separately
+would let a compartment's badge disagree with the items sitting in it.
 
 ### Event Handling
 
@@ -194,17 +362,40 @@ If connection to service is lost:
 
 ## Styling
 
-The launcher uses a child-friendly design:
+Everything visual comes from `assets/branding/tokens.json`, the hand-off from
+the design canvas. `build.rs` turns it into constants that `src/theme.rs`
+includes, and the stylesheet reaches the same table through `@name@`
+placeholders. **There is no second copy to keep in step**: change a colour, a
+radius or a type size in the token file and it changes here, or the build fails
+saying which token the stylesheet wanted and the design file does not define.
 
-- Large, colorful icons
-- Rounded corners
-- Clear enabled/disabled distinction
-- Smooth transitions
-- Dark background (for contrast)
+Generated at build time rather than committed, unlike the wire codegen: nothing
+here leaves Rust, so there is no artifact to go stale and no drift test to need.
+What is *not* generated is what the design file does not decide — the shape of
+the CSS, the two sizes the brief gives only in prose, and the few places the
+implementation deliberately departs from the design. Each of those says so, and
+why.
+
+The display face is **Baloo 2** (SIL Open Font License), shipped in
+`assets/fonts` because no Ubuntu release packages it and the kiosk is offline by
+default. `lunchbox install` puts it under `/usr/share/fonts`; for a run out of
+`target/debug`, `lunchbox deps install dev` links it into this user's font
+directory. The launcher names it first in a fallback stack, so a device without
+it still comes up in an ordinary sans.
+
+If the lettering is ordinary when you expect Baloo 2, suspect a stale fontconfig
+cache before a missing file: run `fc-cache -f` and look again. That failure is
+silent and looks exactly like the font was never installed.
+
+Administrator mode's application picker is the *same* `LauncherField`, handed a
+single synthetic category holding everything installed. It had its own widget
+once; sharing one means the sunk wells, the selected cell, the scrolling and its
+fades cannot drift apart between the two surfaces.
 
 ## Dependencies
 
 - `gtk4` - GTK4 bindings
+- `cairo-rs` - Drawing the coin glyph on a badge pill
 - `tokio` - Async runtime
 - `lunchbox-api` - Protocol types
 - `lunchbox-ipc` - Client implementation

@@ -270,6 +270,34 @@ impl TimeWindow {
         }
     }
 
+    /// When this window next opens, at or after `dt`.
+    ///
+    /// The answer a child needs when a category is shut: not "it is shut" but
+    /// "it opens at four". `None` only if the window has no days at all, which
+    /// configuration validation rules out.
+    ///
+    /// Searched a day at a time rather than reasoned about, because the
+    /// reasoning has three cases that all look alike and one of them is
+    /// wrong — today-but-later, today-but-already-past, and a window that
+    /// crosses midnight, whose *start* is still on the day its mask names.
+    /// Eight days, so that a mask with a single day in it comes back round.
+    ///
+    /// A start that local time skips over — the hour a spring-forward
+    /// swallows — is skipped with it, and the window opens on the next day it
+    /// names instead. Two starts on the same instant (autumn) take the first.
+    pub fn next_start(&self, dt: &DateTime<Local>) -> Option<DateTime<Local>> {
+        let today = dt.date_naive();
+        (0..8).find_map(|offset| {
+            let date = today.checked_add_signed(chrono::Duration::days(offset))?;
+            if !self.days.contains(date.weekday()) {
+                return None;
+            }
+            let naive = date.and_time(self.start.to_naive_time());
+            let start = Local.from_local_datetime(&naive).earliest()?;
+            (start > *dt).then_some(start)
+        })
+    }
+
     /// Calculate duration remaining in this window from the given time
     pub fn remaining_duration(&self, dt: &DateTime<Local>) -> Option<Duration> {
         if !self.contains(dt) {
@@ -318,6 +346,99 @@ pub fn format_duration(d: Duration) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
+        Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    /// 2026-09-21 is a Monday; 09-26 a Saturday.
+    #[test]
+    fn next_start_finds_later_today() {
+        let window = TimeWindow::new(
+            DaysOfWeek::WEEKDAYS,
+            WallClock::new(16, 0).unwrap(),
+            WallClock::new(18, 0).unwrap(),
+        );
+        assert_eq!(
+            window.next_start(&at(2026, 9, 21, 9, 0)),
+            Some(at(2026, 9, 21, 16, 0))
+        );
+    }
+
+    /// Past today's start, the answer is tomorrow — including from *inside*
+    /// the window, which is what an overlapping pair of windows needs.
+    #[test]
+    fn next_start_rolls_over_to_the_next_day_it_names() {
+        let window = TimeWindow::new(
+            DaysOfWeek::WEEKDAYS,
+            WallClock::new(16, 0).unwrap(),
+            WallClock::new(18, 0).unwrap(),
+        );
+        assert_eq!(
+            window.next_start(&at(2026, 9, 21, 19, 0)),
+            Some(at(2026, 9, 22, 16, 0)),
+            "Monday evening: Tuesday"
+        );
+        assert_eq!(
+            window.next_start(&at(2026, 9, 21, 17, 0)),
+            Some(at(2026, 9, 22, 16, 0)),
+            "inside it, the *next* start is tomorrow's"
+        );
+    }
+
+    /// A weekend window asked on a Monday skips five days, and a single-day
+    /// mask comes back round to itself a week later.
+    #[test]
+    fn next_start_skips_the_days_the_mask_does_not_name() {
+        let weekend = TimeWindow::new(
+            DaysOfWeek::WEEKENDS,
+            WallClock::new(10, 0).unwrap(),
+            WallClock::new(18, 0).unwrap(),
+        );
+        assert_eq!(
+            weekend.next_start(&at(2026, 9, 21, 9, 0)),
+            Some(at(2026, 9, 26, 10, 0)),
+            "Monday morning: Saturday"
+        );
+
+        let sundays = TimeWindow::new(
+            DaysOfWeek::new(DaysOfWeek::SUNDAY),
+            WallClock::new(10, 0).unwrap(),
+            WallClock::new(12, 0).unwrap(),
+        );
+        assert_eq!(
+            sundays.next_start(&at(2026, 9, 27, 13, 0)),
+            Some(at(2026, 10, 4, 10, 0)),
+            "a Sunday afternoon: next Sunday"
+        );
+    }
+
+    /// A window that crosses midnight starts on the day its mask names, not
+    /// on the day it finishes.
+    #[test]
+    fn next_start_of_a_cross_midnight_window_is_on_its_own_day() {
+        let window = TimeWindow::new(
+            DaysOfWeek::new(DaysOfWeek::FRIDAY),
+            WallClock::new(22, 0).unwrap(),
+            WallClock::new(2, 0).unwrap(),
+        );
+        // Saturday at 01:00 is *inside* Friday's window, and the next start is
+        // a week later rather than in an hour's time.
+        assert_eq!(
+            window.next_start(&at(2026, 9, 26, 1, 0)),
+            Some(at(2026, 10, 2, 22, 0))
+        );
+    }
+
+    #[test]
+    fn next_start_of_a_window_with_no_days_is_never() {
+        let window = TimeWindow::new(
+            DaysOfWeek::NONE,
+            WallClock::new(10, 0).unwrap(),
+            WallClock::new(12, 0).unwrap(),
+        );
+        assert_eq!(window.next_start(&at(2026, 9, 21, 9, 0)), None);
+    }
 
     #[test]
     fn test_wall_clock_ordering() {

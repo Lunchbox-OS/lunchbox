@@ -270,6 +270,37 @@ impl Policy {
             .iter()
             .filter(move |e| e.group.as_ref() == Some(id))
     }
+
+    /// Whether time spent on `subject` banks time toward some *other*
+    /// activity's token gate (issue #8) — that is, whether any gate anywhere
+    /// in the policy names it in `from`.
+    ///
+    /// A gate names its sources, so a source carries no record of being one;
+    /// answering this means sweeping every gate. The launcher shows it as the
+    /// "earn" pill (issue #207), and the sweep is over a handful of gates on a
+    /// policy that only changes on reload, so it is not worth an index.
+    ///
+    /// An entry inside a group earns when *either* it or its group is named:
+    /// banking is credited through the group, so to the child the distinction
+    /// does not exist.
+    pub fn earns_tokens(&self, subject: &LimitSubject) -> bool {
+        let mut subjects = vec![subject.clone()];
+        if let LimitSubject::Entry(id) = subject
+            && let Some(group) = self.get_entry(id).and_then(|e| e.group.as_ref())
+        {
+            subjects.push(LimitSubject::Group(group.clone()));
+        }
+
+        let gates = self
+            .entries
+            .iter()
+            .filter_map(|e| e.tokens.as_ref())
+            .chain(self.groups.iter().filter_map(|g| g.tokens.as_ref()));
+
+        gates
+            .flat_map(|t| t.from.iter())
+            .any(|s| subjects.contains(s))
+    }
 }
 
 /// A group of entries sharing an availability schedule and limits (issue #5).
@@ -953,6 +984,24 @@ impl AvailabilityPolicy {
             return true; // No windows = always available
         }
         self.windows.iter().any(|w| w.contains(dt))
+    }
+
+    /// When this comes back, at or after `dt`.
+    ///
+    /// The earliest of the windows' own next starts — which is the right
+    /// answer whether `dt` is outside all of them (the usual case, and what a
+    /// shut compartment shows) or inside one that overlaps another.
+    ///
+    /// `None` when there is nothing to wait for: always available, or no
+    /// windows at all, which means the same thing.
+    pub fn next_start(
+        &self,
+        dt: &chrono::DateTime<chrono::Local>,
+    ) -> Option<chrono::DateTime<chrono::Local>> {
+        if self.always || self.windows.is_empty() {
+            return None;
+        }
+        self.windows.iter().filter_map(|w| w.next_start(dt)).min()
     }
 
     /// Get remaining time in current window

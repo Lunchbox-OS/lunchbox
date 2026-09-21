@@ -2702,6 +2702,7 @@ mod tests {
             current_session: None,
             entry_count: 0,
             entries: vec![],
+            groups: vec![],
             internet_status: vec![],
             diagnostics: Default::default(),
             admin_mode: false,

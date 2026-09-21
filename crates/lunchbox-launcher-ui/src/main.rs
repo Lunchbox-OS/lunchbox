@@ -4,10 +4,14 @@
 //! It displays available entries from lunchboxd and allows launching them.
 
 mod app;
+mod badge;
 mod client;
-mod grid;
+mod compartment;
+mod field;
+mod item;
+mod offset;
 mod state;
-mod tile;
+mod theme;
 
 use crate::client::CommandClient;
 use anyhow::Result;
