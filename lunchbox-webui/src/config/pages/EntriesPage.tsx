@@ -1,22 +1,26 @@
 /**
  * Activities, as a board grouped by category.
  *
- * Dragging a card into a column sets `group = "..."` — the one field whose
- * meaning is genuinely spatial. `@dnd-kit` rather than raw pointer events
+ * Dragging is how two genuinely spatial things are set here: which column a
+ * card is in is `group = "..."`, and where it sits in that column is where its
+ * `[[entries]]` block sits in the file, which is the order the launcher draws
+ * the compartment in (issue #210). `@dnd-kit` rather than raw pointer events
  * because it brings keyboard and screen-reader support with it, which matters
  * more here than on the schedule grid, where every gesture already has a
  * numeric equivalent in the detail panel.
  */
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   DndContext,
+  DragOverlay,
   KeyboardSensor,
   PointerSensor,
+  useDndContext,
   useDraggable,
-  useDroppable,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -38,15 +42,16 @@ import AddIcon from "@mui/icons-material/Add";
 import CloseIcon from "@mui/icons-material/Close";
 import DeleteIcon from "@mui/icons-material/DeleteOutlined";
 import ErrorIcon from "@mui/icons-material/ErrorOutlined";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useConfigDoc } from "../doc/ConfigDocProvider";
-import { entryPath, insert, set, unset } from "../doc/patches";
+import { dragKey, insert, unset } from "../doc/patches";
 import type { RawConfig, RawEntry } from "../model/config.generated";
 import { KIND_LABELS, blankKind, type KindTag } from "../model/kinds";
 import { issuesForEntry } from "../model/report";
+import { columnOf, entryDropPatches, UNGROUPED } from "../model/reorder";
 import { EntryDetail } from "../components/EntryDetail";
+import { DropGap, droppedGap, gapCollision, useDropColumn } from "../components/DropGap";
 import type { FocusRequest } from "../navigation";
-
-const UNGROUPED = "__ungrouped__";
 
 export function EntriesPage({
   config,
@@ -62,10 +67,11 @@ export function EntriesPage({
   /** Jump to a category's own settings. */
   onOpenGroup?: (groupId: string) => void;
 }) {
-  const { apply, report } = useConfigDoc();
+  const { apply, endGesture, report } = useConfigDoc();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<RawEntry | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   // Consumed on apply: this page unmounts when you leave the tab, and a fresh
   // mount runs this effect whatever its deps say, so an unspent request would
@@ -85,24 +91,33 @@ export function EntriesPage({
   const groups = config.groups ?? [];
   const selected = entries.find((e) => e.id === selectedId) ?? null;
 
+  // Categories first, in the order they are declared — the order the launcher
+  // draws them in — then the leftovers, which is also where it puts them.
+  const knownGroups = useMemo(() => new Set(groups.map((g) => g.id)), [groups]);
   const columns = useMemo(() => {
     const byGroup = new Map<string, RawEntry[]>();
-    byGroup.set(UNGROUPED, []);
     for (const g of groups) byGroup.set(g.id, []);
-    for (const entry of entries) {
-      const key = entry.group && byGroup.has(entry.group) ? entry.group : UNGROUPED;
-      byGroup.get(key)?.push(entry);
-    }
+    byGroup.set(UNGROUPED, []);
+    for (const entry of entries) byGroup.get(columnOf(entry, knownGroups))?.push(entry);
     return byGroup;
-  }, [entries, groups]);
+  }, [entries, groups, knownGroups]);
+
+  const onDragStart = (event: DragStartEvent) => setDraggingId(String(event.active.id));
 
   const onDragEnd = (event: DragEndEvent) => {
-    const entryId = String(event.active.id);
-    const target = event.over ? String(event.over.id) : null;
-    if (!target) return;
-    const path = entryPath(entryId, "group");
-    if (target === UNGROUPED) apply(unset(path));
-    else apply(set(path, target));
+    setDraggingId(null);
+    const gap = droppedGap(event.over);
+    if (!gap) return;
+    const patches = entryDropPatches(
+      entries,
+      knownGroups,
+      String(event.active.id),
+      gap.column,
+      gap.slot,
+    );
+    // Category and position are one gesture, so they are one undo step.
+    for (const patch of patches) apply(patch, dragKey("entries.order"));
+    endGesture();
   };
 
   const deleteEntry = (entry: RawEntry) => {
@@ -133,33 +148,76 @@ export function EntriesPage({
         </Card>
       )}
 
-      <DndContext sensors={sensors} onDragEnd={onDragEnd}>
-        <Stack direction="row" spacing={2} sx={{ overflowX: "auto", pb: 2 }}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={gapCollision}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onDragCancel={() => setDraggingId(null)}
+        accessibility={{
+          screenReaderInstructions: {
+            draggable:
+              "Press space to pick up an activity, then use the arrow keys to move it " +
+              "between and within the category columns. Press space again to drop it " +
+              "where it sits, or escape to cancel.",
+          },
+          announcements: {
+            onDragStart: ({ active }) => `Picked up ${labelOf(entries, active.id)}.`,
+            onDragOver: ({ active, over }) =>
+              `${labelOf(entries, active.id)} would go ${describeGap(over, columns, groups)}.`,
+            onDragEnd: ({ active, over }) =>
+              over
+                ? `${labelOf(entries, active.id)} dropped ${describeGap(over, columns, groups)}.`
+                : `${labelOf(entries, active.id)} left where it was.`,
+            onDragCancel: ({ active }) => `${labelOf(entries, active.id)} left where it was.`,
+          },
+        }}
+      >
+        <Stack
+          direction="row"
+          spacing={2}
+          sx={{ overflowX: "auto", pb: 2, alignItems: "stretch" }}
+        >
           {[...columns.entries()].map(([groupId, members]) => (
             <GroupColumn
               key={groupId}
               id={groupId}
-              label={
-                groupId === UNGROUPED
-                  ? "No category"
-                  : (groups.find((g) => g.id === groupId)?.label ?? groupId)
-              }
+              label={labelOfColumn(groupId, groups)}
               count={members.length}
               onOpen={groupId === UNGROUPED ? undefined : () => onOpenGroup?.(groupId)}
             >
-              {members.map((entry) => (
-                <EntryCard
-                  key={entry.id}
-                  entry={entry}
-                  issueCount={issuesForEntry(report, entry.id).length}
-                  selected={entry.id === selectedId}
-                  onOpen={() => setSelectedId(entry.id)}
-                  onDelete={() => setConfirmDelete(entry)}
-                />
+              {members.map((entry, i) => (
+                <Fragment key={entry.id}>
+                  <DropGap column={groupId} slot={i} />
+                  <EntryCard
+                    entry={entry}
+                    issueCount={issuesForEntry(report, entry.id).length}
+                    selected={entry.id === selectedId}
+                    onOpen={() => setSelectedId(entry.id)}
+                    onDelete={() => setConfirmDelete(entry)}
+                  />
+                </Fragment>
               ))}
+              <DropGap column={groupId} slot={members.length} grow />
             </GroupColumn>
           ))}
         </Stack>
+
+        {/* Follows the pointer, at full opacity, above everything. */}
+        <DragOverlay>
+          {draggingId && (
+            <Card variant="outlined" sx={{ cursor: "grabbing", boxShadow: 6 }}>
+              <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                  <DragIndicatorIcon fontSize="small" color="disabled" />
+                  <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+                    {labelOf(entries, draggingId)}
+                  </Typography>
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
+        </DragOverlay>
       </DndContext>
 
       <Drawer
@@ -221,6 +279,29 @@ export function EntriesPage({
   );
 }
 
+/** How a column is named, wherever it is named. */
+function labelOfColumn(groupId: string, groups: { id: string; label: string }[]): string {
+  if (groupId === UNGROUPED) return "No category";
+  return groups.find((g) => g.id === groupId)?.label ?? groupId;
+}
+
+function labelOf(entries: RawEntry[], id: string | number): string {
+  return entries.find((e) => e.id === String(id))?.label ?? String(id);
+}
+
+/** What a drop on this gap would mean, for the screen-reader announcements. */
+function describeGap(
+  over: { id: string | number; data: { current?: unknown } } | null,
+  columns: Map<string, RawEntry[]>,
+  groups: { id: string; label: string }[],
+): string {
+  const gap = droppedGap(over);
+  if (!gap) return "nowhere";
+  const where = labelOfColumn(gap.column, groups);
+  const above = columns.get(gap.column)?.[gap.slot];
+  return above ? `into ${where}, above ${above.label}` : `at the end of ${where}`;
+}
+
 function GroupColumn({
   id,
   label,
@@ -235,7 +316,11 @@ function GroupColumn({
   /** Absent for the "No category" column, which has no settings to open. */
   onOpen?: () => void;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id });
+  // Registered only so `gapCollision` can tell which column a card is over;
+  // nothing is ever dropped on the column itself.
+  const { setNodeRef } = useDropColumn(id);
+  const { over } = useDndContext();
+  const isOver = (over?.data.current as { column?: string } | undefined)?.column === id;
   return (
     <Box
       ref={setNodeRef}
@@ -243,6 +328,8 @@ function GroupColumn({
         minWidth: 260,
         maxWidth: 300,
         flexShrink: 0,
+        display: "flex",
+        flexDirection: "column",
         p: 1,
         borderRadius: 2,
         border: "1px dashed",
@@ -270,7 +357,11 @@ function GroupColumn({
         )}
         <Chip size="small" label={count} />
       </Stack>
-      <Stack spacing={1}>{children}</Stack>
+      {/* No spacing: the drop gaps between the cards are the spacing, so the
+          board does not shift when a drag begins. */}
+      <Box sx={{ display: "flex", flexDirection: "column", flexGrow: 1, minHeight: 80 }}>
+        {children}
+      </Box>
     </Box>
   );
 }
@@ -288,19 +379,20 @@ function EntryCard({
   onOpen: () => void;
   onDelete: () => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: entry.id,
-  });
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: entry.id });
 
+  // The card being dragged stays in its slot as a hole in the board, and a
+  // copy of it follows the pointer in the `DragOverlay`. Translating this one
+  // instead would slide a half-transparent card over the cards it passes,
+  // which is exactly when it matters most to see where it is going.
   return (
     <Card
       ref={setNodeRef}
       variant="outlined"
       onClick={onOpen}
       sx={{
-        cursor: "pointer",
-        opacity: isDragging ? 0.4 : entry.disabled ? 0.55 : 1,
-        transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+        cursor: "grab",
+        opacity: isDragging ? 0.3 : entry.disabled ? 0.55 : 1,
         borderColor: selected ? "primary.main" : issueCount > 0 ? "error.main" : "divider",
         borderWidth: selected ? 2 : 1,
       }}
@@ -309,6 +401,9 @@ function EntryCard({
     >
       <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
         <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
+          {/* Says the card is draggable. The whole card is the handle, so this
+              is decoration and never a second tab stop. */}
+          <DragIndicatorIcon fontSize="small" color="disabled" sx={{ mt: 0.25 }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
               {entry.label}

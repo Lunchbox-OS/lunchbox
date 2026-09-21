@@ -30,6 +30,9 @@ Four operations over paths like `entries[id=minecraft].limits.max_run_seconds`:
 | `insert` | append or splice a value into an array |
 | `move` | reorder within an array |
 
+`move`'s `to` is where the element lands once it has been lifted out, so the
+last slot is `len - 1`.
+
 Three rules make this preserve everything:
 
 - **Identity.** `[[entries]]` and `[[groups]]` are addressed by `id`
@@ -41,6 +44,29 @@ Three rules make this preserve everything:
   byte-identical.
 - **Decor carries over.** Replacing a value copies the old value's prefix and
   suffix decor, so `max_run_seconds = 3600  # one hour` keeps its comment.
+
+## What reordering has to do by hand
+
+`move` on `[[entries]]` or `[[groups]]` (issue #210) is the one operation where
+`toml_edit`'s model does not do the obvious thing, in two ways that are silent:
+
+- **Tables render by remembered position, not by vector order**, and the
+  sub-tables count. An entry is `[[entries]]` plus `[entries.kind]`,
+  `[entries.availability]` and so on; moving only the header leaves those
+  behind to be re-read as fields of whichever entry now sits above them. The
+  file still parses and still validates — it is simply a different config. So
+  every table in an entry's sub-tree is given the same position: the encoder's
+  sort is stable, so a tie falls back to structural order and the sub-tree
+  stays together.
+- **The text above a header belongs to the table**, section banners included,
+  so moving the first entry would drag `# --- Entries ---` down the file with
+  it. The trailing run of comment lines — the block touching the header —
+  travels with the entry; anything cut off by a blank line stays at the
+  position. That is the rule people already write by.
+
+An array whose tables are not written consecutively (something else is written
+in among them) has no honest answer for where the moved one goes, so it is
+refused rather than guessed at.
 
 ## Undo, redo, coalescing
 

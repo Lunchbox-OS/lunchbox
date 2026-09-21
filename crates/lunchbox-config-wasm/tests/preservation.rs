@@ -474,3 +474,177 @@ fn setting_a_whole_table_replaces_only_the_keys_it_names() {
     );
     assert!(text.contains("max_run_seconds = 900"), "got: {text}");
 }
+
+// --- reordering ------------------------------------------------------------
+
+fn mv(path: &str, from: usize, to: usize) -> Patch {
+    Patch::Move {
+        path: path.to_string(),
+        from,
+        to,
+    }
+}
+
+fn entry_ids(text: &str) -> Vec<String> {
+    let cfg: lunchbox_config::RawConfig = toml::from_str(text).expect("still parses");
+    cfg.entries.iter().map(|e| e.id.clone()).collect()
+}
+
+/// Moving an entry has to take its sub-tables with it.
+///
+/// This is the whole risk in reordering `[[entries]]`: an entry is a header
+/// plus `[entries.kind]`, `[entries.availability]` and friends, and a move that
+/// relocates only the header leaves those behind to be re-read as fields of
+/// whichever entry now sits above them. The file still parses and still
+/// validates, so the only way to see it is to read the values back.
+#[test]
+fn a_moved_entry_keeps_its_own_sub_tables() {
+    let src = example();
+    let before: lunchbox_config::RawConfig = toml::from_str(&src).unwrap();
+    let kinds: std::collections::HashMap<String, String> = before
+        .entries
+        .iter()
+        .map(|e| (e.id.clone(), format!("{:?}", e.kind)))
+        .collect();
+
+    let mut doc = ConfigDoc::open(&src).unwrap();
+    doc.apply(&mv("entries", 0, 2), None).unwrap();
+    let text = doc.text();
+
+    let after: lunchbox_config::RawConfig = toml::from_str(&text).expect("still parses");
+    for entry in &after.entries {
+        assert_eq!(
+            format!("{:?}", entry.kind),
+            kinds[&entry.id],
+            "'{}' came back with another entry's kind",
+            entry.id
+        );
+    }
+}
+
+#[test]
+fn moving_an_entry_reorders_it_and_nothing_else() {
+    let src = example();
+    let mut ids = entry_ids(&src);
+
+    let mut doc = ConfigDoc::open(&src).unwrap();
+    doc.apply(&mv("entries", 0, 2), None).unwrap();
+
+    let moved = ids.remove(0);
+    ids.insert(2, moved);
+    let after = doc.text();
+    assert_eq!(entry_ids(&after), ids);
+
+    let comments = |t: &str| {
+        let mut c: Vec<String> = t
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        c.sort();
+        c
+    };
+    assert_eq!(
+        comments(&after),
+        comments(&src),
+        "a reorder rearranges comments, it does not lose or invent any"
+    );
+}
+
+#[test]
+fn moving_a_group_reorders_the_categories() {
+    let src = example();
+    let mut doc = ConfigDoc::open(&src).unwrap();
+    doc.apply(&mv("groups", 0, 3), None).unwrap();
+
+    let before: lunchbox_config::RawConfig = toml::from_str(&src).unwrap();
+    let after: lunchbox_config::RawConfig = toml::from_str(&doc.text()).expect("still parses");
+    let mut expected: Vec<String> = before.groups.iter().map(|g| g.id.clone()).collect();
+    let moved = expected.remove(0);
+    expected.insert(3, moved);
+    assert_eq!(
+        after
+            .groups
+            .iter()
+            .map(|g| g.id.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+/// A comment written against an entry travels with it; a section banner does
+/// not. `config.example.toml` opens its entries with a banner and a "## ===
+/// Native Linux executables ===" heading above the first one, so moving that
+/// entry away is exactly the case that would drag the heading down the file.
+#[test]
+fn a_reorder_leaves_the_section_banner_behind() {
+    let src = example();
+    let mut doc = ConfigDoc::open(&src).unwrap();
+    doc.apply(&mv("entries", 0, 2), None).unwrap();
+    let after = doc.text();
+
+    let banner = "## === Native Linux executables ===";
+    let entry_comment = "# Tux Math - math games";
+    assert!(
+        after.find(banner).unwrap() < after.find(entry_comment).unwrap(),
+        "the banner stayed at the top of the section"
+    );
+    assert!(
+        after.find(banner).unwrap() < after.find("id = \"scummvm-putt-putt\"").unwrap(),
+        "the entry that took first place sits under the banner"
+    );
+    assert!(
+        after.find(entry_comment).unwrap() < after.find("id = \"tuxmath\"").unwrap()
+            && after.find("id = \"scummvm-monkey-island\"").unwrap()
+                < after.find(entry_comment).unwrap(),
+        "Tux Math's own comment came with it"
+    );
+}
+
+#[test]
+fn the_example_config_still_validates_after_a_reorder() {
+    let mut doc = ConfigDoc::open(&example()).unwrap();
+    doc.apply(&mv("entries", 0, 2), None).unwrap();
+    doc.apply(&mv("groups", 4, 0), None).unwrap();
+
+    let report: serde_json::Value = serde_json::from_str(&doc.validate()).unwrap();
+    assert_eq!(report["kind"], "semantic", "{report}");
+    assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
+}
+
+#[test]
+fn a_reorder_is_undone_exactly() {
+    let src = example();
+    let mut doc = ConfigDoc::open(&src).unwrap();
+    doc.apply(&mv("entries", 3, 0), None).unwrap();
+    assert!(doc.undo());
+    assert_eq!(doc.text(), src);
+}
+
+/// Refused rather than guessed at: with another table written in among the
+/// entries there is no position to give the one that moves.
+#[test]
+fn reordering_entries_another_table_is_written_among_is_refused() {
+    let mut doc = ConfigDoc::open(
+        r#"
+config_version = 1
+
+[[entries]]
+id = "a"
+label = "A"
+kind = { type = "process", command = "/bin/true" }
+
+[service.volume]
+max_volume = 80
+
+[[entries]]
+id = "b"
+label = "B"
+kind = { type = "process", command = "/bin/true" }
+"#,
+    )
+    .unwrap();
+    let before = doc.text();
+    assert!(doc.apply(&mv("entries", 0, 1), None).is_err());
+    assert_eq!(doc.text(), before, "a refused move changes nothing");
+}

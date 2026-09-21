@@ -398,6 +398,36 @@ m.cmd("WebDriver:NewSession", {
 Launch on `about:blank` and navigate *after* the session exists, for the same
 reason: a URL on the command line is loaded before any capability applies.
 
+### When you need a real pointer (drag, hover, press-and-hold)
+
+Marionette's `ExecuteScript` dispatches DOM events, which is enough for a
+click but not for anything that reads a *gesture* — a drag-and-drop built on
+pointer events, a hover, a long press. For those, give the session a pointer of
+its own.
+
+The seat has none because `dev headless` runs with `WLR_BACKENDS=headless` and
+`WLR_LIBINPUT_NO_DEVICES=1`; `swaymsg seat - cursor …` (which is what
+`dev click` sends) moves a cursor no client can see. But sway advertises
+`zwlr_virtual_pointer_manager_v1`, and a client that creates a virtual pointer
+**and keeps it open** gives the seat a pointer capability that Firefox — and
+GTK — then bind. This is also the root cause behind the `dev click` GTK gotcha
+at the top of this file, though fixing `dev click` itself would need a
+long-lived pointer process owned by `dev headless`, which it does not have.
+
+`wlrctl` (packaged in the Ubuntu archive) is *not* enough on its own: its pointer is relative
+only, and it exits immediately, destroying the device before the capability
+reaches anyone. Speak the protocol directly and hold one pointer open for the
+whole gesture — it is about 80 lines of `struct.pack` over the Wayland socket,
+using `motion_absolute` (opcode 1), `button` (2) and `frame` (4) on
+`zwlr_virtual_pointer_v1`, with a `frame` after every event. Worked example and
+the reasoning:
+`docs/ai/history/2026-09-21 001 reordering-in-the-config-editor (#210).md`.
+
+With that in place, screenshot *mid*-gesture by running the pointer script in
+the background with a long `sleep` between press and release, and firing `grim`
+while it waits — which is how a drop indicator or a hover state gets verified
+at all.
+
 **Signing in (issue #156).** The API no longer has an open mode, and the
 `localStorage` `apiToken` route is gone for browsers — a person logs in and
 gets an `HttpOnly` cookie. On a fresh dev stack:
