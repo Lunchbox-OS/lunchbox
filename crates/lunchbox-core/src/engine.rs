@@ -8,7 +8,9 @@ use lunchbox_api::{
 };
 use lunchbox_config::{Entry, Group, InternetCheckTarget, Policy, TokensPolicy};
 use lunchbox_host_api::{HostCapabilities, HostSessionHandle};
-use lunchbox_store::{AuditEvent, AuditEventType, Store, TokenState};
+use lunchbox_store::{
+    AuditEvent, AuditEventType, SessionSnapshot, StateSnapshot, Store, TokenState,
+};
 use lunchbox_util::{EntryId, LimitSubject, MonotonicInstant, SessionId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -39,6 +41,36 @@ pub enum BeginStopDecision {
         already_stopping: bool,
     },
     NoActiveSession,
+}
+
+/// How often a running session is checkpointed to the store (issue #201).
+///
+/// This is the whole tamper budget, and it is a straight trade. Usage is only
+/// settled when a session ends, so before this existed a child could hold the
+/// power button and have the entire session refunded; now they can have at most
+/// this much. Shortening it buys less free play per power cycle and costs an
+/// fsync (and, on a device, a round trip to the state custodian) more often;
+/// lengthening it does the reverse.
+///
+/// Thirty seconds is chosen against what the bypass actually costs to perform:
+/// a power cycle is tens of seconds of boot before the child can play again, so
+/// at this interval the attack does not come out ahead of simply waiting. It is
+/// deliberately far longer than the 100 ms tick that carries it — this is not a
+/// clock, it is a bound on loss.
+pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A session the previous run of the daemon never got to settle, recovered from
+/// the store's snapshot at startup (issue #201).
+#[derive(Debug, Clone)]
+pub struct RecoveredSession {
+    pub session_id: SessionId,
+    pub entry_id: EntryId,
+    /// When the session started, and so the day its time was billed to.
+    pub started_at: DateTime<Local>,
+    /// The last moment the daemon is known to have been alive.
+    pub last_seen: DateTime<Local>,
+    /// What was charged: the last checkpoint's billable duration.
+    pub billed: Duration,
 }
 
 /// Why a manual token adjustment couldn't be applied (issue #8).
@@ -120,6 +152,15 @@ pub struct CoreEngine {
     /// so the two cannot disagree — a locked device with no administrator mode
     /// behind it would have no button anywhere that could unlock it.
     locked: bool,
+
+    /// When the running session was last checkpointed to the store (issue
+    /// #201), or `None` if it has not been yet.
+    ///
+    /// Cleared whenever a session starts or ends, which is what makes the
+    /// first tick of a new session write a snapshot immediately rather than
+    /// [`SNAPSHOT_INTERVAL`] later: a power cut in the first half-minute
+    /// should still leave a record that a session was open.
+    last_snapshot_at: Option<MonotonicInstant>,
 }
 
 impl CoreEngine {
@@ -149,6 +190,7 @@ impl CoreEngine {
             diagnostics: DiagnosticSet::default(),
             firewall_enforceable: None,
             restarting: false,
+            last_snapshot_at: None,
         }
     }
 
@@ -1359,6 +1401,9 @@ impl CoreEngine {
         }
 
         self.current_session = Some(session);
+        // So the next tick checkpoints this session straight away rather than
+        // SNAPSHOT_INTERVAL into it (issue #201).
+        self.last_snapshot_at = None;
 
         event
     }
@@ -1459,9 +1504,159 @@ impl CoreEngine {
         self.restarting
     }
 
+    /// Write the running session to the store, at most every
+    /// [`SNAPSHOT_INTERVAL`] (issue #201).
+    ///
+    /// Hangs off the tick rather than a timer of its own for the same reason
+    /// the custodian's heartbeat does (issue #172): this is the loop that
+    /// decides whether a child's time is up, and a checkpoint that kept being
+    /// written while *it* had stopped would attest to nothing.
+    ///
+    /// Failing to write is logged and otherwise ignored. A store that cannot be
+    /// reached must not take the session down with it; the cost is that this
+    /// particular power cut would be settled from an older checkpoint.
+    fn checkpoint_session(&mut self, now: DateTime<Local>, now_mono: MonotonicInstant) {
+        let Some(session) = self.current_session.as_ref() else {
+            return;
+        };
+        if let Some(last) = self.last_snapshot_at
+            && now_mono.duration_since(last) < SNAPSHOT_INTERVAL
+        {
+            return;
+        }
+
+        let snapshot = StateSnapshot {
+            timestamp: now,
+            active_session: Some(SessionSnapshot {
+                session_id: session.plan.session_id.clone(),
+                entry_id: session.plan.entry_id.clone(),
+                started_at: session.started_at,
+                deadline: session.deadline,
+                warnings_issued: session.warnings_issued.clone(),
+                billable: session.billable_duration(now_mono),
+            }),
+        };
+
+        if let Err(e) = self.store.save_snapshot(&snapshot) {
+            warn!(error = %e, "Failed to checkpoint the running session");
+            return;
+        }
+        self.last_snapshot_at = Some(now_mono);
+    }
+
+    /// Drop the session checkpoint, because the session has been settled the
+    /// ordinary way and there is nothing left to recover (issue #201).
+    ///
+    /// Clearing is a *write*, not a delete: the snapshot is one row that is
+    /// overwritten in place, and what recovery looks for is an
+    /// `active_session`, not a row.
+    fn clear_session_snapshot(&mut self, now: DateTime<Local>) {
+        self.last_snapshot_at = None;
+        let cleared = StateSnapshot {
+            timestamp: now,
+            active_session: None,
+        };
+        if let Err(e) = self.store.save_snapshot(&cleared) {
+            // Left behind, the stale checkpoint would be recovered at the next
+            // startup and its time charged a second time. Loud, because the
+            // child pays for it.
+            warn!(error = %e, "Failed to clear the session checkpoint; its usage may be billed twice");
+        }
+    }
+
+    /// Settle a session the previous run of the daemon was killed in the middle
+    /// of (issue #201), and return what was recovered.
+    ///
+    /// Usage is only written when a session ends, so a daemon that dies with one
+    /// running — a held power button, a crash, an OOM kill — used to refund the
+    /// whole session. This charges what the last checkpoint saw instead, and
+    /// leaves a `SessionEnded { reason: Interrupted }` behind so the event is
+    /// visible rather than silent.
+    ///
+    /// Must run before anything can launch: it settles tokens and cooldowns
+    /// too, and a new session starting first would checkpoint over the very
+    /// snapshot this reads.
+    ///
+    /// ## What it charges, and why not more
+    ///
+    /// The last checkpoint's `billable`, and nothing after it. That is a lower
+    /// bound — up to [`SNAPSHOT_INTERVAL`] of real play is not in it — and it
+    /// is deliberately the only honest number available. The wall clock could
+    /// be asked how long ago the checkpoint was, but the answer is chosen by
+    /// whoever decided when to switch the device back on, and it counts the
+    /// time the device spent off as play. Charging a bound the child controls
+    /// is worse than charging slightly too little.
+    ///
+    /// One case is charged where a live session would not be: a launch that was
+    /// still failing when the power went. `end_current_session` exempts
+    /// `LaunchFailed` (issue #135), and a snapshot cannot know that is what it
+    /// was about to be. The exposure is bounded by the launch itself and errs
+    /// toward charging, which is the right direction for a supervision device.
+    pub fn recover_interrupted_session(
+        &mut self,
+        now: DateTime<Local>,
+    ) -> Option<RecoveredSession> {
+        let snapshot = match self.store.load_snapshot() {
+            Ok(snapshot) => snapshot?,
+            Err(e) => {
+                warn!(error = %e, "Could not read the session checkpoint; an interrupted session may go unbilled");
+                return None;
+            }
+        };
+        let session = snapshot.active_session?;
+
+        // The day the session started, exactly as a normal end would bill it
+        // (issue #170) — a session that began at 23:50 and was cut short at
+        // 00:10 is still yesterday's play.
+        let billed_day = session.started_at.date_naive();
+        if let Err(e) = self
+            .store
+            .add_usage(&session.entry_id, billed_day, session.billable)
+        {
+            warn!(entry_id = %session.entry_id, error = %e, "Failed to bill a recovered session");
+        }
+        self.settle_session_end(&session.entry_id, session.billable, now, billed_day);
+
+        // Stamped when the session was last seen alive, not now. A device that
+        // was off overnight would otherwise record the session as ending at
+        // breakfast.
+        let _ = self.store.append_audit(AuditEvent {
+            id: 0,
+            timestamp: snapshot.timestamp,
+            event: AuditEventType::SessionEnded {
+                session_id: session.session_id.clone(),
+                entry_id: session.entry_id.clone(),
+                reason: SessionEndReason::Interrupted,
+                duration: session.billable,
+            },
+        });
+
+        self.clear_session_snapshot(now);
+
+        warn!(
+            session_id = %session.session_id,
+            entry_id = %session.entry_id,
+            billed_secs = session.billable.as_secs(),
+            last_seen = %snapshot.timestamp,
+            "Recovered a session the last run never settled; charging what the last checkpoint saw"
+        );
+
+        Some(RecoveredSession {
+            session_id: session.session_id,
+            entry_id: session.entry_id,
+            started_at: session.started_at,
+            last_seen: snapshot.timestamp,
+            billed: session.billable,
+        })
+    }
+
     /// Tick the engine - check for warnings, expiry, and availability changes
     pub fn tick(&mut self, now_mono: MonotonicInstant, now: DateTime<Local>) -> Vec<CoreEvent> {
         let mut events = Vec::new();
+
+        // Before the session borrow below, which runs to the end of this
+        // function.
+        self.checkpoint_session(now, now_mono);
 
         // Check if the set of available entries has changed
         let current_availability: HashSet<EntryId> = self
@@ -1820,6 +2015,12 @@ impl CoreEngine {
             reason = ?reason,
             "Session ended"
         );
+
+        // This session is settled, so its checkpoint must not outlive it —
+        // startup would otherwise recover it and bill the time again (issue
+        // #201). After the usage write above, so a crash *between* the two
+        // leaves a checkpoint to recover from rather than nothing.
+        self.clear_session_snapshot(now);
 
         Some(CoreEvent::SessionEnded {
             session_id: session.plan.session_id,
@@ -5245,6 +5446,324 @@ mod tests {
         );
     }
 
+    // ---- Surviving a power cut mid-session (issue #201) --------------------
+
+    /// Run `entry_id` from `start` for `played`, then drop the engine the way a
+    /// power cut does: no end, no settlement, nothing but whatever reached the
+    /// store. Hands back a fresh engine on the same store, as the next boot
+    /// would see it.
+    fn power_cut_after(
+        store: Arc<SqliteStore>,
+        policy: Policy,
+        entry_id: &str,
+        start: DateTime<Local>,
+        played: Duration,
+    ) -> CoreEngine {
+        let mut engine =
+            CoreEngine::new(policy.clone(), store.clone(), HostCapabilities::minimal());
+        let started = launch_at(&mut engine, entry_id, start);
+
+        // Tick the way lunchboxd does, so the checkpoint lands exactly when it
+        // would in production rather than because the test asked for it.
+        let mut elapsed = Duration::ZERO;
+        while elapsed <= played {
+            engine.tick(
+                started + elapsed,
+                start + chrono::Duration::from_std(elapsed).unwrap(),
+            );
+            elapsed += Duration::from_secs(1);
+        }
+
+        drop(engine);
+        CoreEngine::new(policy, store, HostCapabilities::minimal())
+    }
+
+    /// The bypass in issue #201: hold the power button and the whole session is
+    /// refunded. What survives is the last checkpoint, not nothing.
+    #[test]
+    fn a_session_cut_short_by_a_power_cut_is_still_billed() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+        let mut next_boot = power_cut_after(
+            store.clone(),
+            make_test_policy(),
+            "test-game",
+            start,
+            // Two checkpoints in, plus change that is lost with the power.
+            SNAPSHOT_INTERVAL * 2 + Duration::from_secs(7),
+        );
+
+        let entry_id = EntryId::new("test-game");
+        assert_eq!(
+            store.get_usage(&entry_id, start.date_naive()).unwrap(),
+            Duration::ZERO,
+            "nothing is billed until the next start reconciles it"
+        );
+
+        let recovered = next_boot
+            .recover_interrupted_session(on_day(27, 16, 5))
+            .expect("the interrupted session is found at startup");
+
+        assert_eq!(recovered.entry_id, entry_id);
+        assert_eq!(
+            recovered.billed,
+            SNAPSHOT_INTERVAL * 2,
+            "charged to the last checkpoint, and no further"
+        );
+        assert_eq!(
+            store.get_usage(&entry_id, start.date_naive()).unwrap(),
+            SNAPSHOT_INTERVAL * 2,
+            "and that is what the ledger holds"
+        );
+    }
+
+    /// The quota is what the child actually feels, so assert it directly: a
+    /// power cycle must not hand the day's budget back.
+    #[test]
+    fn a_power_cut_does_not_refund_the_days_quota() {
+        let quota = Duration::from_secs(30 * 60);
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+        let mut next_boot = power_cut_after(
+            store,
+            make_quota_policy(quota),
+            "test-game",
+            start,
+            Duration::from_secs(10 * 60),
+        );
+        next_boot.recover_interrupted_session(on_day(27, 16, 20));
+
+        assert_eq!(
+            next_boot.list_entries(on_day(27, 16, 20))[0].max_run_if_started_now,
+            Some(quota - Duration::from_secs(10 * 60)),
+            "the ten minutes played before the power cut are gone from today"
+        );
+    }
+
+    /// Recovery runs once. A second startup — the child power-cycling again,
+    /// hoping the charge is re-applied to a session that no longer exists —
+    /// finds nothing, and the ledger does not move.
+    #[test]
+    fn a_recovered_session_is_not_recovered_twice() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+        let mut next_boot = power_cut_after(
+            store.clone(),
+            make_test_policy(),
+            "test-game",
+            start,
+            Duration::from_secs(90),
+        );
+        next_boot.recover_interrupted_session(on_day(27, 16, 5));
+        let billed = store
+            .get_usage(&EntryId::new("test-game"), start.date_naive())
+            .unwrap();
+
+        let mut third_boot = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+        assert!(
+            third_boot
+                .recover_interrupted_session(on_day(27, 16, 10))
+                .is_none(),
+            "the checkpoint was cleared when it was settled"
+        );
+        assert_eq!(
+            store
+                .get_usage(&EntryId::new("test-game"), start.date_naive())
+                .unwrap(),
+            billed,
+            "and nothing is billed a second time"
+        );
+    }
+
+    /// A session that ended properly leaves no checkpoint behind, so a later
+    /// start has nothing to recover and cannot double-bill it.
+    #[test]
+    fn a_session_that_ended_cleanly_leaves_nothing_to_recover() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+
+        let start = on_day(27, 16, 0);
+        let started = launch_at(&mut engine, "test-game", start);
+        engine.tick(started, start);
+        engine.end_current_session(
+            Some(0),
+            started + Duration::from_secs(60),
+            start + chrono::Duration::seconds(60),
+        );
+
+        assert!(
+            store
+                .load_snapshot()
+                .unwrap()
+                .unwrap()
+                .active_session
+                .is_none(),
+            "settling clears the checkpoint"
+        );
+
+        let mut next_boot = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+        assert!(
+            next_boot
+                .recover_interrupted_session(on_day(27, 16, 5))
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .get_usage(&EntryId::new("test-game"), start.date_naive())
+                .unwrap(),
+            Duration::from_secs(60),
+            "the clean end is billed exactly once"
+        );
+    }
+
+    /// A power cut in the first seconds — before any interval has elapsed —
+    /// still leaves a record that a session was open. Billing zero is the
+    /// honest answer; leaving no trace at all is not.
+    #[test]
+    fn a_power_cut_in_the_first_seconds_still_leaves_a_record() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+        let mut next_boot = power_cut_after(
+            store,
+            make_test_policy(),
+            "test-game",
+            start,
+            Duration::from_secs(2),
+        );
+
+        let recovered = next_boot
+            .recover_interrupted_session(on_day(27, 16, 1))
+            .expect("the session is recorded from its very first tick");
+        assert_eq!(recovered.billed, Duration::ZERO);
+    }
+
+    /// Recovery bills the *start* day, like every other settlement (issue
+    /// #170): a session cut off at 00:05 is still yesterday's play.
+    #[test]
+    fn a_recovered_session_is_billed_to_the_day_it_started() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 23, 50);
+        let mut next_boot = power_cut_after(
+            store.clone(),
+            make_test_policy(),
+            "test-game",
+            start,
+            SNAPSHOT_INTERVAL * 2,
+        );
+        // Booted after midnight, as it would be if the device stayed off.
+        next_boot.recover_interrupted_session(on_day(28, 8, 0));
+
+        let entry_id = EntryId::new("test-game");
+        assert_eq!(
+            store.get_usage(&entry_id, start.date_naive()).unwrap(),
+            SNAPSHOT_INTERVAL * 2,
+            "charged to the day the session started"
+        );
+        assert_eq!(
+            store
+                .get_usage(&entry_id, on_day(28, 8, 0).date_naive())
+                .unwrap(),
+            Duration::ZERO,
+            "and not to the day the device came back"
+        );
+    }
+
+    /// The recovery is visible, not silent: the audit log gets an end for the
+    /// session, stamped when it was last seen alive rather than at boot.
+    #[test]
+    fn a_recovered_session_is_written_to_the_audit_log() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let start = on_day(27, 16, 0);
+        let mut next_boot = power_cut_after(
+            store.clone(),
+            make_test_policy(),
+            "test-game",
+            start,
+            SNAPSHOT_INTERVAL,
+        );
+        next_boot.recover_interrupted_session(on_day(28, 8, 0));
+
+        let ended = store
+            .get_recent_audits(20)
+            .unwrap()
+            .into_iter()
+            .find_map(|e| match e.event {
+                AuditEventType::SessionEnded {
+                    reason, duration, ..
+                } => Some((reason, duration, e.timestamp)),
+                _ => None,
+            })
+            .expect("the recovered session is recorded as an end");
+
+        assert!(
+            matches!(ended.0, SessionEndReason::Interrupted),
+            "and as an interrupted one: {:?}",
+            ended.0
+        );
+        assert_eq!(ended.1, SNAPSHOT_INTERVAL);
+        assert!(
+            ended.2 < on_day(28, 8, 0),
+            "stamped when the session was last seen, not when the device came back"
+        );
+    }
+
+    /// Checkpointing is a bound on loss, not a clock: it writes on the
+    /// interval, not on every 100 ms tick.
+    #[test]
+    fn checkpoints_are_written_on_the_interval_not_every_tick() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(
+            make_test_policy(),
+            store.clone(),
+            HostCapabilities::minimal(),
+        );
+
+        let start = on_day(27, 16, 0);
+        let started = launch_at(&mut engine, "test-game", start);
+
+        engine.tick(started, start);
+        assert_eq!(
+            engine_billable(&store),
+            Some(Duration::ZERO),
+            "the first tick of a session checkpoints it immediately"
+        );
+
+        // Ten seconds of ticks, well inside the interval, change nothing.
+        for secs in 1..=10 {
+            engine.tick(
+                started + Duration::from_secs(secs),
+                start + chrono::Duration::seconds(secs as i64),
+            );
+        }
+        assert_eq!(
+            engine_billable(&store),
+            Some(Duration::ZERO),
+            "no write until the interval is up"
+        );
+
+        engine.tick(
+            started + SNAPSHOT_INTERVAL,
+            start + chrono::Duration::from_std(SNAPSHOT_INTERVAL).unwrap(),
+        );
+        assert_eq!(
+            engine_billable(&store),
+            Some(SNAPSHOT_INTERVAL),
+            "and one when it is"
+        );
+    }
+
     /// What lunchboxd's shutdown path now does with a live session (issue
     /// #201). It used to stop the activity and walk away, leaving the time
     /// unbilled — and since `Mod4+Shift+Escape` is `pkill -TERM lunchboxd` and
@@ -5281,5 +5800,23 @@ mod tests {
             Duration::from_secs(90),
             "a clean shutdown bills the time the child actually played"
         );
+        assert!(
+            store
+                .load_snapshot()
+                .unwrap()
+                .unwrap()
+                .active_session
+                .is_none(),
+            "and leaves no checkpoint for the next start to bill again"
+        );
+    }
+
+    /// What the store currently believes the running session has billed.
+    fn engine_billable(store: &SqliteStore) -> Option<Duration> {
+        store
+            .load_snapshot()
+            .unwrap()
+            .and_then(|s| s.active_session)
+            .map(|s| s.billable)
     }
 }

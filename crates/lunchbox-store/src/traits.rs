@@ -163,10 +163,16 @@ pub trait Store: Send + Sync {
     fn get_all_usage_for_date(&self, date: NaiveDate) -> StoreResult<Vec<(EntryId, Duration)>>;
 }
 
-/// State snapshot for crash recovery
+/// State snapshot for crash recovery (issue #201).
+///
+/// Written while a session runs and cleared when it settles, so the presence of
+/// an `active_session` at startup *is* the signal that the previous run never
+/// got to settle one — a power cut, a crash, or a kill.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateSnapshot {
-    /// Timestamp of snapshot
+    /// When this snapshot was taken. For a recovered session this is the last
+    /// moment the daemon is known to have been alive, and so the end of what
+    /// can honestly be charged.
     pub timestamp: DateTime<Local>,
 
     /// Active session info (if any)
@@ -179,6 +185,18 @@ pub struct SessionSnapshot {
     pub session_id: SessionId,
     pub entry_id: EntryId,
     pub started_at: DateTime<Local>,
-    pub deadline: DateTime<Local>,
+    /// Wall-clock deadline. `None` for an unlimited session.
+    pub deadline: Option<DateTime<Local>>,
     pub warnings_issued: Vec<u64>,
+
+    /// What this session had billed as of [`StateSnapshot::timestamp`].
+    ///
+    /// Carried rather than re-derived, because the clock that measures it does
+    /// not survive what this snapshot exists for. Billing runs on
+    /// `CLOCK_MONOTONIC` — it excludes suspend (issue #155) and the spinner
+    /// before the activity's window appears (issue #135) — and a reboot resets
+    /// it. The wall clock survives but answers a different question, and the
+    /// gap between the two is exactly the time a tamperer controls by choosing
+    /// how long to leave the device off.
+    pub billable: Duration,
 }

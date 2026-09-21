@@ -2371,6 +2371,20 @@ sealed interface SessionEndReason {
     data object ServiceShutdown : SessionEndReason
 
     /**
+     * The daemon stopped without settling this session — a power cut, a
+     * crash, or a kill — and it was recovered from the store's snapshot at
+     * the next startup (issue #201).
+     *
+     * Distinct from [`Self::ServiceShutdown`] on purpose: that one is an
+     * orderly exit that settled the session itself, and this one is the
+     * record that something took the daemon out from under a child mid-play.
+     * The duration is what the last checkpoint saw, so it is a lower bound.
+     */
+    @Serializable
+    @SerialName("interrupted")
+    data object Interrupted : SessionEndReason
+
+    /**
      * Launch failed
      */
     @Serializable

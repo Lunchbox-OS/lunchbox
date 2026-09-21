@@ -1048,7 +1048,21 @@ impl Service {
         let light_sensor = Arc::new(LinuxLightSensor::new());
 
         // Initialize core engine
-        let engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
+        let mut engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
+
+        // Settle anything the last run was killed in the middle of, before the
+        // socket exists and so before anything can launch (issue #201). A
+        // session that was running when the power went is billed from its last
+        // checkpoint here; without this the whole session is refunded, which is
+        // the bypass the issue is about.
+        if let Some(recovered) = engine.recover_interrupted_session(lunchbox_util::now()) {
+            warn!(
+                entry_id = %recovered.entry_id,
+                billed_secs = recovered.billed.as_secs(),
+                last_seen = %recovered.last_seen,
+                "The previous run did not shut down cleanly with an activity open"
+            );
+        }
 
         // Apply Steam config to the host before any preload so the CEF debug
         // flag is created (only) when interstitial auto-dismiss is enabled.

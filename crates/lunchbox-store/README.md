@@ -9,7 +9,8 @@ This crate provides durable storage for the Lunchbox service, including:
 - **Audit log** - Append-only record of all significant events
 - **Usage accounting** - Track time used per entry per day
 - **Cooldown tracking** - Remember when entries become available again
-- **State snapshots** - Enable crash recovery
+- **State snapshots** - The running session, checkpointed so a power cut does
+  not refund it (issue #201)
 
 ## Purpose
 
@@ -168,7 +169,9 @@ For crash recovery, the service can save state snapshots:
 ```rust
 use lunchbox_store::{StateSnapshot, SessionSnapshot};
 
-// Save current state
+// Checkpoint the running session (the engine does this on its tick, every
+// `SNAPSHOT_INTERVAL`). `billable` is carried rather than re-derived: it is
+// measured on a monotonic clock, which a reboot resets.
 let snapshot = StateSnapshot {
     timestamp: Local::now(),
     active_session: Some(SessionSnapshot {
@@ -177,17 +180,24 @@ let snapshot = StateSnapshot {
         started_at,
         deadline,
         warnings_issued: vec![300, 60],
+        billable: Duration::from_secs(90),
     }),
 };
 store.save_snapshot(&snapshot)?;
 
-// On startup, check for unfinished session
+// On startup, an `active_session` still here means the last run never got to
+// settle one — a power cut, a crash, a kill. `CoreEngine::recover_interrupted_
+// session` bills it and clears the checkpoint.
 if let Some(snapshot) = store.load_snapshot()? {
     if let Some(session) = snapshot.active_session {
-        // Potentially recover or clean up
+        // ...
     }
 }
 ```
+
+Clearing is a **write**, not a delete: the snapshot is a single row that is
+overwritten with `active_session: None` once the session settles. What recovery
+looks for is the session, not the row.
 
 ## Database Schema
 
