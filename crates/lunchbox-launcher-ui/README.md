@@ -87,10 +87,13 @@ mark live in `assets/branding`; `src/theme.rs` is their Rust half.
 
 Each compartment shows its category's name, at most one badge, its members in
 columns that spill *rightwards*, and — when the category is on a schedule —
-its closing time today on the floor, behind a little clock face
-whose hands point at that hour (`ClockFace`, from `lunchbox-widgets`, shared
-with the HUD's vertical bar). A child who cannot yet read "6:00 PM" can still
-see where the hand is going to be.
+its hours on the floor — "Until 6:00 PM" while it is open, "Opens 4:00 PM"
+while it is shut — behind a little clock face whose hands point at that hour
+(`ClockFace`, from `lunchbox-widgets`, shared with the HUD's vertical bar). A
+child who cannot yet read "6:00 PM" can still see where the hand is going to
+be. The shut half reads its hour out of the `OutsideTimeWindow` reason rather
+than off the view; a category shut for some other reason keeps its floor quiet
+rather than inventing an hour.
 
 Height never grows: a category with more members gets wider, and if the row
 overflows the screen the row scrolls **horizontally**. The field never scrolls
@@ -146,6 +149,12 @@ The D-pad model follows the *columns*, not the compartments: one navigable
 stack per x position, carrying the items of every compartment at that x, so
 Down runs off the end of the upper category straight into the start of the
 lower one.
+
+The field lays itself out again whenever its **allocation** changes, not only
+when the scale does (`WidgetImpl::size_allocate`). Everything below is an
+answer to "how much room is there", and two sizes can share a scale — so
+watching the scale alone left a window that grew without crossing a scale
+boundary showing a layout meant for the size before it.
 
 A compartment is never narrower than **two item columns**, whatever it holds.
 The header carries the category's name and a badge pushed to the far end of

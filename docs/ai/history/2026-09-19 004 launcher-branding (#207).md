@@ -850,6 +850,85 @@ obvious filter is wrong — a binary crate's root module is named after the
 `lunchbox_launcher_ui`, which matches nothing and looks broken rather than
 wrong. Both are now in `scripts/lib/headless.sh` and the `headless-dev` skill.
 
+## Review, sixth round: three from the device, and a stale rule
+
+### The first frame was laid out for a screen nobody had measured
+
+> on initial load, I'm seeing the compartments start out as full height, then
+> after a few seconds the compacted layout appears. I'm assuming this is
+> because it actually takes that long for the layout to be computed
+
+It was not the layout being slow — it is arithmetic over a handful of
+measurements. It was the *order*: the launcher is fullscreen on an output whose
+size it learns only after it is mapped, so the daemon's first snapshot gets
+laid out against a field of no height at all. Every category in a column of its
+own, each the full height of a screen that has not been measured. The seconds
+were the gap between the daemon's first snapshot and the compositor's first
+configure.
+
+Nothing asked again until the *scale* changed, and that was the real bug
+underneath. Watching the scale was enough when the layout was a straight
+scaling of one design; it stopped being enough three rounds ago. How tall a
+stack may be, how many categories share a column, whether the cells squish —
+all of them answer "how much room is there", and two sizes can share a scale.
+A window that grew without crossing a scale boundary kept a layout meant for
+the size before it, permanently. The field now lays itself out again on any
+change to its own allocation, from an idle callback so it is not rebuilding the
+tree GTK is in the middle of placing.
+
+### Two things driving one adjustment
+
+> if you tap the scroll arrows while an inertial scroll is going, the field
+> scrolls in response to the arrow but then restores to where the inertial
+> scroll would have gone afterwards resulting in flicker
+
+Exactly that: the field's own eased scroll and GTK's kinetic deceleration were
+both setting `hadjustment`, and the one with the longer run won. There is no
+call that says "stop decelerating" — but setting `kinetic-scrolling` to false
+cancels a deceleration in flight, so turning it off and straight back on is the
+cancel, and leaves the next swipe as it was.
+
+### "Opens 4:00 PM"
+
+> add the support for compartments outside of the time range to display when
+> they'll come back
+
+This one reached back through three crates. `ReasonCode::OutsideTimeWindow` has
+carried a `next_window_start` since it was written and nothing had ever filled
+it in — a `None` and a TODO at both sites — so a shut category could say it was
+shut and nothing else, which is the half of the answer a child does not need.
+
+`TimeWindow::next_start` searches a day at a time rather than reasoning about
+it, because the reasoning has three cases that look alike and one of them is
+wrong: later today, already past today, and a window crossing midnight whose
+*start* is still on the day its mask names. Eight days, so a single-day mask
+comes back round to itself; and a start that local time skips over — the hour a
+spring-forward swallows — is skipped with it.
+
+The floor reads its hour out of the reason rather than off the view, because
+that is where the engine puts it, and a category shut for some other reason
+keeps quiet rather than inventing one: a spent quota comes back at midnight,
+which is not a time to put in front of a child as something to wait for. Where
+a category carries both hours, opening wins — the useful half is the one that
+has not happened yet.
+
+That closes the last piece of the bedtime floor the brief left undesigned (§9).
+What the *screen* does when everything is shut at once is still a question for
+the design canvas.
+
+### And the rules had gone stale
+
+> nit: comment appears to be out of date
+
+Layout rule 2 in `assets/branding/README.md` still said a column holds three
+items and spills to the right. So did rule 1 about a column being a category,
+rule 5 about an overflowing row scrolling, and rule 4 about what a floor says.
+Three rounds of changes, each of which had added a line to the departures list
+at the end of the file and left the rules themselves alone — so the section
+read as a draft that the rest of the file quietly contradicted forty lines
+later. The rules now say what is built and say so at the top; the departures
+list keeps the reasoning.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here
