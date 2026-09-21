@@ -96,6 +96,14 @@ Height never grows: a category with more members gets wider, and if the row
 overflows the screen the row scrolls **horizontally**. The field never scrolls
 vertically.
 
+A compartment is never narrower than **two item columns**, whatever it holds.
+The header carries the category's name and a badge pushed to the far end of
+the same line; at one column wide there is not room for both, and since the
+name does not ellipsize it is the compartment that gives — stretching to
+whatever the words need, which puts every badge at a different offset again.
+The floor costs a half-empty tin for a category with one stack, and it buys a
+row of headers that all work.
+
 How tall a stack may be is **measured, not fixed**
 (`compartment::rows_that_fit`). The design hands down three (`space.rows`),
 which is what a 1280×720 screen has room for, but `scale_for` scales by the

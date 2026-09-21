@@ -35,6 +35,24 @@ const ROW_GAP: i32 = 8;
 /// Horizontal gap between the stacks inside one compartment, unscaled.
 const STACK_GAP: i32 = 16;
 
+/// The narrowest a compartment may be, counted in item columns.
+///
+/// A category holding one stack is otherwise exactly one item wide, and the
+/// header has to fit a name *and* a badge pushed to the far end of that same
+/// line. The label does not ellipsize, so it wins: the compartment stretches
+/// to whatever the words need, and a row of them ends up at as many different
+/// widths as there are category names — which is the thing pushing the badges
+/// to the far end was meant to fix in the first place. Two columns is the
+/// floor whatever the category holds, so the header always has somewhere to
+/// put both.
+const MIN_COLUMNS: i32 = 2;
+
+/// The narrowest the items area may be, unscaled: [`MIN_COLUMNS`] item
+/// columns with the stack gaps between them.
+const fn min_columns_width() -> i32 {
+    MIN_COLUMNS * theme::ITEM_W + (MIN_COLUMNS - 1) * STACK_GAP
+}
+
 /// A category on screen, and the items it holds in the order they are drawn.
 pub struct Compartment {
     /// The well itself, to put in the row.
@@ -79,6 +97,10 @@ pub fn build(
     let columns = gtk4::Box::new(gtk4::Orientation::Horizontal, theme::px(STACK_GAP, scale));
     columns.set_vexpand(true);
     columns.set_valign(gtk4::Align::Start);
+    // The floor on the compartment's width, set here rather than on the well
+    // so the compartment's own padding and border are still added on top of it
+    // — the stylesheet keeps those, and this keeps the item geometry.
+    columns.set_size_request(theme::px(min_columns_width(), scale), -1);
 
     let mut built: Vec<Vec<LauncherItem>> = Vec::new();
     let now = lunchbox_util::now();
@@ -473,6 +495,20 @@ mod tests {
             .map(|e| e.entry_id.as_str().to_string())
             .collect();
         assert_eq!(flat, ["first", "second", "third", "fourth"]);
+    }
+
+    /// The width floor is two item columns and the gap between them — the
+    /// same geometry the items themselves are laid out on, so a compartment
+    /// holding one stack is exactly as wide as one holding two.
+    #[test]
+    fn the_narrowest_compartment_is_two_columns_wide() {
+        assert_eq!(
+            min_columns_width(),
+            2 * theme::ITEM_W + STACK_GAP,
+            "a floor that is not a whole number of columns would leave a \
+             compartment wider than its items but narrower than the next stack"
+        );
+        assert!(min_columns_width() > theme::ITEM_W);
     }
 
     #[test]

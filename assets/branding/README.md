@@ -148,6 +148,11 @@ Each was asked for after seeing it running, and each is argued in
 - There is **no selection until the child makes one**. The rule here is exactly
   one focused item at all times, which assumes a cursor; a touchscreen has
   none, and a standing highlight there claims a choice nobody has made.
+- A compartment is never narrower than **two item columns**. The mockup's
+  one-stack categories are as wide as one item, which leaves the header no room
+  for a name and a badge at opposite ends of it — and since the name does not
+  ellipsize, it is the compartment that stretches, by a different amount for
+  every category.
 - A stack holds **as many items as the screen has room for**, not three. Three
   is right at 1280×720 and is still what `space.rows` says; but the field
   scales by its narrower axis so as never to reflow, and on a screen taller

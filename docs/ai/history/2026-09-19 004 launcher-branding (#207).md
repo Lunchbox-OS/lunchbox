@@ -668,6 +668,28 @@ and pulls the whole five-category row onto one screen; 1280×420 — where the
 0.75 scale floor means the design no longer fits at all — gives two, where the
 fixed three clipped.
 
+## A floor on the width, too
+
+The same question from the other side: a category with one stack is exactly one
+item wide, and the header has to fit a name *and* a badge pushed to the far end
+of that one line. The name label does not ellipsize, so at that width it is the
+*compartment* that gives — it stretches to whatever the words need, which puts
+every badge back at a different offset and undoes the reason for pushing them
+to the end in the first place.
+
+So the items area carries a floor of two columns and the gap between them —
+set on the box holding the stacks rather than on the well, so the compartment's
+own padding and border are still added on top of it by the stylesheet, and the
+floor stays expressed in the same geometry the items are laid out on. A whole
+number of columns matters: a floor of, say, 250px would leave a compartment
+wider than its items and narrower than the next stack, which reads as a
+mistake.
+
+It is not free. At 1280×720 three compartments fit across where four and a half
+did, and a category holding two books now shows an empty column beside them.
+That is the trade: a half-empty tin for a category with one stack, against a
+row of headers that all work.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here
