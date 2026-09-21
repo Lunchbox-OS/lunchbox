@@ -986,6 +986,24 @@ impl AvailabilityPolicy {
         self.windows.iter().any(|w| w.contains(dt))
     }
 
+    /// When this comes back, at or after `dt`.
+    ///
+    /// The earliest of the windows' own next starts — which is the right
+    /// answer whether `dt` is outside all of them (the usual case, and what a
+    /// shut compartment shows) or inside one that overlaps another.
+    ///
+    /// `None` when there is nothing to wait for: always available, or no
+    /// windows at all, which means the same thing.
+    pub fn next_start(
+        &self,
+        dt: &chrono::DateTime<chrono::Local>,
+    ) -> Option<chrono::DateTime<chrono::Local>> {
+        if self.always || self.windows.is_empty() {
+            return None;
+        }
+        self.windows.iter().filter_map(|w| w.next_start(dt)).min()
+    }
+
     /// Get remaining time in current window
     pub fn remaining_in_window(&self, dt: &chrono::DateTime<chrono::Local>) -> Option<Duration> {
         if self.always {

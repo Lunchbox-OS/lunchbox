@@ -598,7 +598,7 @@ impl CoreEngine {
         if !manually_enabled && !entry.availability.is_available(&now) {
             enabled = false;
             reasons.push(ReasonCode::OutsideTimeWindow {
-                next_window_start: None, // TODO: compute next window
+                next_window_start: entry.availability.next_start(&now),
             });
         }
 
@@ -861,7 +861,7 @@ impl CoreEngine {
 
         if !manually_enabled && !group.availability.is_available(&now) {
             reasons.push(ReasonCode::OutsideTimeWindow {
-                next_window_start: None,
+                next_window_start: group.availability.next_start(&now),
             });
         }
 
@@ -4839,6 +4839,45 @@ mod tests {
             session.time_remaining(resumed_at),
             Some(Duration::from_secs(55 * 60)),
             "the force-enabled session keeps its full remaining budget"
+        );
+    }
+
+    /// A shut activity says when it comes back, not merely that it is shut.
+    ///
+    /// The compartment floor in the launcher is the reader: "Opens 7:00 PM"
+    /// rather than a dimmed category with nothing to say for itself. It had
+    /// been a `None` and a TODO since the reason code was written.
+    #[test]
+    fn an_activity_outside_its_hours_says_when_it_opens() {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = CoreEngine::new(make_bedtime_policy(), store, HostCapabilities::minimal());
+
+        let view = |now| {
+            engine
+                .list_entries(now)
+                .into_iter()
+                .find(|e| e.entry_id.as_str() == "bedtime-game")
+                .unwrap()
+        };
+
+        // The window is 19:00-20:00 every day.
+        let morning = view(at(9, 0));
+        assert_eq!(
+            morning.reasons,
+            vec![ReasonCode::OutsideTimeWindow {
+                next_window_start: Some(at(19, 0)),
+            }],
+            "asked in the morning, it opens this evening"
+        );
+
+        let after = view(at(21, 0));
+        let tomorrow = at(19, 0) + chrono::Duration::days(1);
+        assert_eq!(
+            after.reasons,
+            vec![ReasonCode::OutsideTimeWindow {
+                next_window_start: Some(tomorrow),
+            }],
+            "asked after it shuts, it opens tomorrow"
         );
     }
 
