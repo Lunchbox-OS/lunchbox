@@ -176,6 +176,10 @@ and, on review of the PR:
 > it's probably fine to just drop the snapshot entirely rather than having to
 > maintain migration logic here.
 
+and, on the fix for that:
+
+> is there a test that enforces the shape at the current version
+
 ## What was implemented
 
 Three pieces, in the order they matter to a child's ledger. The investigation
@@ -330,6 +334,38 @@ cost is at most one interrupted session's time, once, on the boot after an
 upgrade, against permanently carrying migration code for a row whose normal
 lifetime is thirty seconds.
 
+#### Enforcing the bump
+
+"Bump `SNAPSHOT_FORMAT` when the shape changes" started as a convention with
+nothing behind it, and the reviewer asked the obvious next question. Measured
+rather than assumed: adding a plausible field to `SessionSnapshot`
+(`grace_used`, `#[serde(default)]`), filling it in at the one construction site,
+and leaving the format at 1 left **all 102 tests passing**. Every other test
+round-trips a snapshot through one build, so they agree with themselves whatever
+the shape is.
+
+`the_current_format_has_the_shape_it_has_always_had` (in `traits.rs`) pins
+format 1's on-disk shape against a literal. It compares a *shape* — every key,
+nested, with the kind of thing it holds — rather than serialized values, because
+`DateTime<Local>` serializes with the machine's UTC offset and a value-based
+golden would fail everywhere but the machine that wrote it. With the control
+field in place it fails, and says what to do:
+
+```
+The session checkpoint's on-disk shape changed.
+If that was deliberate: bump SNAPSHOT_FORMAT (currently 1) so a device reading a
+row written by the previous build drops it instead of billing a child from it,
+then update this literal.
+  left:  {...,grace_used:{nanos:number,secs:number},...}
+  right: {...}
+```
+
+It cannot catch a change of *meaning* that leaves the shape alone — `billable`
+starting to include the launch spinner, say. Nothing can, so that reminder is in
+the failure message rather than pretending to be an assertion. The test also
+pins `SNAPSHOT_FORMAT == 1`, so a bump made for a meaning-only change still has
+to be acknowledged in one place.
+
 ### Not changed
 
 - **No config surface.** `SNAPSHOT_INTERVAL` is a constant with its rationale
@@ -349,8 +385,8 @@ lifetime is thirty seconds.
 
 ## Tests
 
-Seventeen: eleven in `engine.rs`, four in `lunchboxd/src/main.rs`, and two more
-in `sqlite.rs`.
+Eighteen: eleven in `engine.rs`, four in `lunchboxd/src/main.rs`, two in
+`sqlite.rs`, and the format tripwire in `traits.rs`.
 
 Eight of the engine nine use a `power_cut_after` helper that runs a session
 through real 1 Hz ticks and then drops the engine with no end at all — no

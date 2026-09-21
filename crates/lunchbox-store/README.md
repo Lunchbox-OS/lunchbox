@@ -212,8 +212,16 @@ Dropping costs at most one interrupted session's time, once, on the boot after
 an upgrade. It buys never keeping migration code for a row whose normal lifetime
 is thirty seconds. Build one with `StateSnapshot::new`, which stamps the version
 for you; **bump `SNAPSHOT_FORMAT` whenever either struct changes shape or
-meaning** — a field added with `#[serde(default)]` deserializes happily out of
-an older row and bills whatever the default is.
+meaning**.
+
+Bumping it is a convention, so there is a test that enforces the half a test
+can: `the_current_format_has_the_shape_it_has_always_had` pins format 1's
+on-disk shape against a literal. Every other test round-trips a snapshot through
+one build and so agrees with itself whatever the shape is — change a field and
+forget the bump, and the suite stays green while a device bills a child from a
+row it no longer understands. A change of *meaning* that leaves the shape alone
+still cannot be caught by anything; the reminder lives in that test's failure
+message.
 
 ## Database Schema
 

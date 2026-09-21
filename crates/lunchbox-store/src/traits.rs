@@ -242,3 +242,89 @@ pub struct SessionSnapshot {
     /// how long to leave the device off.
     pub billable: Duration,
 }
+
+#[cfg(test)]
+mod snapshot_format_tests {
+    use super::*;
+
+    /// A timezone- and value-independent description of a JSON document:
+    /// every key, nested, with what kind of thing it holds.
+    ///
+    /// Comparing serialized *values* would pin the local timezone offset into
+    /// the expectation and fail on any machine that is not this one. What has
+    /// to be pinned is the shape, which is exactly what a reader of an older
+    /// row depends on.
+    fn shape(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Null => "null".into(),
+            serde_json::Value::Bool(_) => "bool".into(),
+            serde_json::Value::Number(_) => "number".into(),
+            serde_json::Value::String(_) => "string".into(),
+            serde_json::Value::Array(items) => match items.first() {
+                Some(first) => format!("[{}]", shape(first)),
+                None => "[]".into(),
+            },
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<_> = map.iter().collect();
+                keys.sort_by_key(|(k, _)| k.as_str());
+                let inner: Vec<String> = keys
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}:{}", shape(v)))
+                    .collect();
+                format!("{{{}}}", inner.join(","))
+            }
+        }
+    }
+
+    /// The tripwire for [`SNAPSHOT_FORMAT`].
+    ///
+    /// Every other test round-trips a snapshot through one build, so they all
+    /// agree with themselves no matter what the shape is — change a field and
+    /// forget to bump the format, and the whole suite still passes while a
+    /// device silently bills a child from a row it no longer understands.
+    ///
+    /// This pins the on-disk shape of format 1 against a literal, so the
+    /// forgetting is what fails. It cannot catch a change of *meaning* that
+    /// leaves the shape alone (`billable` starting to include the launch
+    /// spinner, say) — nothing can — so the reminder to think about that is in
+    /// the failure message rather than in the assertion.
+    #[test]
+    fn the_current_format_has_the_shape_it_has_always_had() {
+        // Every field populated: a `None` or an empty `Vec` would hide the
+        // shape of what it holds, which is the half most likely to change.
+        let snapshot = StateSnapshot::new(
+            lunchbox_util::now(),
+            Some(SessionSnapshot {
+                session_id: SessionId::new(),
+                entry_id: EntryId::new("an-entry"),
+                started_at: lunchbox_util::now(),
+                deadline: Some(lunchbox_util::now()),
+                warnings_issued: vec![300, 60],
+                billable: Duration::from_secs(90),
+            }),
+        );
+
+        let expected = "{active_session:{billable:{nanos:number,secs:number},\
+                        deadline:string,entry_id:string,session_id:string,\
+                        started_at:string,warnings_issued:[number]},\
+                        timestamp:string,version:number}";
+        let actual = shape(&serde_json::to_value(&snapshot).expect("serializes"));
+
+        assert_eq!(
+            actual, expected,
+            "\n\nThe session checkpoint's on-disk shape changed.\n\
+             If that was deliberate: bump SNAPSHOT_FORMAT (currently {SNAPSHOT_FORMAT}) so a \
+             device reading a row written by the previous build drops it instead of billing a \
+             child from it, then update this literal.\n\
+             Bump it for a change of *meaning* too — a field whose type is unchanged but whose \
+             value now means something else will not trip this test.\n"
+        );
+
+        assert_eq!(
+            SNAPSHOT_FORMAT, 1,
+            "SNAPSHOT_FORMAT moved but the shape above did not. If the format was bumped for a \
+             change of meaning, update this number and say so; if it was bumped by accident, put \
+             it back."
+        );
+    }
+}
