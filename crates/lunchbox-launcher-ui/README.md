@@ -107,6 +107,22 @@ activity is worse than one with a gap in it. Everything in a column is as wide
 as the widest of them, and the column fills the field's height, so the row
 still reads as one tin.
 
+When the row misses fitting the screen by **less than half a cell**, the cells
+give up the difference instead of the field scrolling
+(`LauncherField::squish_to_fit`). Scrolling is the right answer for a row that
+genuinely does not fit; it is a poor one for a row forty pixels too wide, where
+the child gets a chevron, a fade and a gesture to learn in order to reach a
+strip of screen narrower than an icon. Above half a cell the row really is too
+big and scrolling is what it is for.
+
+Squishing a cell takes three things, because a GTK minimum is the largest of
+everything that asks for one: a **ceiling** on the natural width (a size
+request is a floor, and the name's own `NAME_MAX_CHARS` is what makes a cell as
+wide as it is), the cell's own request, and the name's request — the floor
+*inside* the cell, and the one that actually bites. It is safe to do after the
+fact because a cell's width feeds nothing decided earlier: the rows, the
+columns and the pairing all came from the height budget.
+
 The D-pad model follows the *columns*, not the compartments: one navigable
 stack per x position, carrying the items of every compartment at that x, so
 Down runs off the end of the upper category straight into the start of the

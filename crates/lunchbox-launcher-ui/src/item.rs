@@ -177,6 +177,9 @@ mod imp {
         /// read off `is_sensitive`, because a locked item stays *focusable* —
         /// the child has to be able to reach it to read its badge.
         pub launchable: Cell<bool>,
+        /// A ceiling on the cell's natural width, or 0 for none. See
+        /// `LauncherItem::set_width_cap`.
+        pub width_cap: Cell<i32>,
     }
 
     impl Default for LauncherItem {
@@ -187,6 +190,7 @@ mod imp {
                 label: gtk4::Label::new(None),
                 badge_slot: crate::offset::OffsetBin::new(),
                 launchable: Cell::new(false),
+                width_cap: Cell::new(0),
             }
         }
     }
@@ -257,7 +261,25 @@ mod imp {
         }
     }
 
-    impl WidgetImpl for LauncherItem {}
+    impl WidgetImpl for LauncherItem {
+        /// A *ceiling* on the natural width, which no size request can express
+        /// — GTK treats a request as a floor, and takes the larger of it and
+        /// what the widget asks for. The name inside is what makes the cell as
+        /// wide as it is (capped at `NAME_MAX_CHARS` of its own), so without a
+        /// ceiling here a narrower cell is simply ignored.
+        ///
+        /// Minimum untouched, deliberately: GTK raises the natural back to the
+        /// minimum, so an item can never be squished below the icon and
+        /// padding it actually needs, however small a cap it is given.
+        fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let (min, natural, min_base, nat_base) = self.parent_measure(orientation, for_size);
+            let cap = self.width_cap.get();
+            if orientation == gtk4::Orientation::Horizontal && cap > 0 {
+                return (min, natural.min(cap), min_base, nat_base);
+            }
+            (min, natural, min_base, nat_base)
+        }
+    }
     impl ButtonImpl for LauncherItem {}
 }
 
@@ -270,6 +292,42 @@ glib::wrapper! {
 impl LauncherItem {
     pub fn new() -> Self {
         glib::Object::builder().build()
+    }
+
+    /// Narrow this cell to `width` px.
+    ///
+    /// The last resort against a row that overflows its screen by a sliver —
+    /// see `LauncherField::squish_to_fit`. One way only: a rebuild is what
+    /// gives a cell its full width back, and a rebuild is what runs the
+    /// squish, so the two never fight.
+    ///
+    /// Three things have to give, because GTK's minimum is the largest of
+    /// everything that asks:
+    ///
+    /// * the **cap**, which `measure` above applies to the natural width —
+    ///   without it the name's own ceiling (`NAME_MAX_CHARS`) is what the cell
+    ///   is as wide as, whatever it is asked for;
+    /// * the cell's own **size request**, which is a floor GTK would otherwise
+    ///   hold it open with;
+    /// * the name's size request, which is a floor *inside* the cell — and the
+    ///   one that actually bit. A cell can never be narrower than the box its
+    ///   name asks for, so the name's floor comes down by the same amount,
+    ///   keeping whatever the cell's own chrome is not using. Dropping it
+    ///   altogether instead is tempting and wrong: the name is centred, so
+    ///   with no floor it shrinks to the width of its own text and a two-word
+    ///   title breaks mid-word.
+    pub fn set_width_cap(&self, width: i32) {
+        let imp = self.imp();
+        // What the cell needs around the name, measured rather than assumed:
+        // its padding, its focus border, and whatever GTK's button adds.
+        let (needed, ..) = self.measure(gtk4::Orientation::Horizontal, -1);
+        let chrome = needed - imp.label.width_request();
+
+        imp.width_cap.set(width);
+        imp.label
+            .set_size_request((width - chrome).max(0), imp.label.height_request());
+        self.set_size_request(width, self.height_request());
+        self.queue_resize();
     }
 
     /// Fill the item in from an entry, laid out for `scale`.

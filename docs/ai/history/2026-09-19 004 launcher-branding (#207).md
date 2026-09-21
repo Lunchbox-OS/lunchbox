@@ -762,6 +762,61 @@ screen, still shows the tail of its name.
 needs, the others take, or a column of the tin reads as two tins that happen to
 be above each other.
 
+## Forty pixels is not worth a gesture
+
+The row scrolls when it has to, and that is right for a row that genuinely does
+not fit. It is a poor answer for a row that is forty pixels too wide: the child
+gets a chevron, a fade and a whole gesture to learn, in order to reach a strip
+of screen narrower than an icon. So under **half a cell** of overflow, the
+cells give it up instead; above that the row really is too big for the screen,
+and squishing that far would shrink every name on the field to buy a
+compartment that was never going to fit anyway.
+
+This is safe to do after everything else because a cell's width feeds nothing
+that was decided earlier — the rows a column holds, the columns a category
+needs, the pairing of compartments into fields all came from the *height*
+budget, and none of them changes when a name wraps a character sooner.
+
+### Three floors, and the one that mattered
+
+A GTK minimum is the largest of everything that asks for one, and that took
+three goes to get right.
+
+1. **A size request is a floor, not a ceiling.** Asking a cell to be 140px wide
+   changes nothing when its name already wants 157. That needed a `measure`
+   override on `LauncherItem` capping the natural width — the same trick
+   `NAME_MAX_CHARS` plays on the label, one level up. The *minimum* is left
+   alone on purpose: GTK raises natural back to minimum, so a cell can never be
+   squished below the icon and padding it actually needs, however small a cap
+   it is handed.
+2. **The name has a floor of its own, inside the cell.** With the cap in place
+   and the name still asking for its 139px box, the cell's minimum stayed at
+   154 and the cap never bit. Nothing moved, four passes in a row, and the
+   measurements said so: `now=1399` after every pass.
+3. **Dropping that floor altogether is tempting and wrong.** The name is
+   centred, so with no floor it shrinks to the width of its own text and the
+   wrap point comes with it: "Krita" rendered as "Kr-" over "ita", and
+   "GCompris" as "GCo-" over "mpris". The floor comes *down* by what the cell
+   gave up instead, measured rather than assumed — the chrome is whatever the
+   cell's minimum exceeds the name's request by.
+
+With the example configuration on a 1342×720 screen: overflow 57, cell 149,
+squished to 140, four pixels to spare. At 1280×720 the overflow is 119 against
+a 74-pixel budget, so nothing is squished and the row scrolls, exactly as
+before.
+
+### A note on seeing any of this
+
+None of it was visible from a screenshot — the row looked identical whether the
+squish had run and done nothing or never run at all. The `debug!` lines that
+settled it were not reaching anywhere either, and for two reasons worth writing
+down: `RUST_LOG` was not passed into the headless session (sway and lunchboxd
+start these binaries, so there is no command line to add a flag to), and the
+obvious filter is wrong — a binary crate's root module is named after the
+*binary*, so it is `lunchbox_launcher`, never the package's
+`lunchbox_launcher_ui`, which matches nothing and looks broken rather than
+wrong. Both are now in `scripts/lib/headless.sh` and the `headless-dev` skill.
+
 ## Two places the implementation departs from the mockup
 
 Both asked for after seeing it running, both deliberate, and recorded here

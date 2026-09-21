@@ -148,6 +148,10 @@ Each was asked for after seeing it running, and each is argued in
 - There is **no selection until the child makes one**. The rule here is exactly
   one focused item at all times, which assumes a cursor; a touchscreen has
   none, and a standing highlight there claims a choice nobody has made.
+- A row that misses fitting the screen by **less than half a cell** squishes
+  its cells rather than scrolling. Rule 5 below is right about a row that does
+  not fit; it is wrong about one that is forty pixels too wide, where the
+  chevron and the fade buy a strip of screen narrower than an icon.
 - Two short categories **share a column** of the field, one above the other,
   rather than each taking a compartment the full height of the screen. Rule 1
   below makes a category a column; this makes a column hold more than one when

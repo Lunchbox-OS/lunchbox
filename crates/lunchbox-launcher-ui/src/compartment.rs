@@ -48,10 +48,15 @@ const STACK_GAP: i32 = 16;
 /// put both.
 const MIN_COLUMNS: i32 = 2;
 
-/// The narrowest the items area may be, unscaled: [`MIN_COLUMNS`] item
-/// columns with the stack gaps between them.
-const fn min_columns_width() -> i32 {
-    MIN_COLUMNS * theme::ITEM_W + (MIN_COLUMNS - 1) * STACK_GAP
+/// The narrowest the items area may be, in real pixels: [`MIN_COLUMNS`] cells
+/// of `item_w` with the stack gaps between them.
+///
+/// Takes the cell width rather than reading it off the tokens, because a row
+/// that overflows its screen by a sliver squishes its cells to fit
+/// (`LauncherField::squish_to_fit`) and this floor has to squish with them, or
+/// a one-stack category would hold the row open on its own.
+fn columns_floor(item_w: i32, scale: f64) -> i32 {
+    MIN_COLUMNS * item_w + (MIN_COLUMNS - 1) * theme::px(STACK_GAP, scale)
 }
 
 /// A category on screen, and the items it holds in the order they are drawn.
@@ -69,6 +74,25 @@ pub struct Compartment {
     /// stacks, up/down within one. Note that the *filling* runs the other way
     /// — see `split_into_stacks`.
     pub stacks: Vec<Vec<LauncherItem>>,
+    /// The box the stacks sit in, kept only so that [`Compartment::squish`]
+    /// can bring its two-column floor down with the cells.
+    columns: gtk4::Box,
+}
+
+impl Compartment {
+    /// Narrow every cell in this compartment to `item_w`, floor included.
+    ///
+    /// Only ever called to rescue a row that misses fitting its screen by less
+    /// than half a cell — see `LauncherField::squish_to_fit`.
+    pub fn squish(&self, item_w: i32, scale: f64) {
+        for column in &self.stacks {
+            for item in column {
+                item.set_width_cap(item_w);
+            }
+        }
+        self.columns
+            .set_size_request(columns_floor(item_w, scale), -1);
+    }
 }
 
 /// Build the compartment for a category.
@@ -102,7 +126,7 @@ pub fn build(
     // The floor on the compartment's width, set here rather than on the well
     // so the compartment's own padding and border are still added on top of it
     // — the stylesheet keeps those, and this keeps the item geometry.
-    columns.set_size_request(theme::px(min_columns_width(), scale), -1);
+    columns.set_size_request(columns_floor(theme::px(theme::ITEM_W, scale), scale), -1);
 
     let mut built: Vec<Vec<LauncherItem>> = Vec::new();
     let now = lunchbox_util::now();
@@ -133,6 +157,7 @@ pub fn build(
         name: name_bin,
         badge: badge_bin,
         stacks: built,
+        columns,
     }
 }
 
@@ -696,12 +721,14 @@ mod tests {
     #[test]
     fn the_narrowest_compartment_is_two_columns_wide() {
         assert_eq!(
-            min_columns_width(),
+            columns_floor(theme::ITEM_W, 1.0),
             2 * theme::ITEM_W + STACK_GAP,
             "a floor that is not a whole number of columns would leave a \
              compartment wider than its items but narrower than the next stack"
         );
-        assert!(min_columns_width() > theme::ITEM_W);
+        assert!(columns_floor(theme::ITEM_W, 1.0) > theme::ITEM_W);
+        // And it comes down with the cells when the row has to squish.
+        assert!(columns_floor(theme::ITEM_W - 10, 1.0) < columns_floor(theme::ITEM_W, 1.0));
     }
 
     #[test]

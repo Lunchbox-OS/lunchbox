@@ -462,6 +462,17 @@ headless_start() {
     # flags, and `env -i` in the `--user` path would drop anything not listed
     # here.
     [[ -n "${LUNCHBOX_HUD_ANCHOR:-}" ]] && sway_env+=("LUNCHBOX_HUD_ANCHOR=$LUNCHBOX_HUD_ANCHOR")
+    # Log filter, forwarded for the same reason and because `env -i` below
+    # would otherwise drop it: the binaries in here are started by sway and by
+    # lunchboxd, so there is no other way to turn their `debug!` lines on. They
+    # are the only way to see a layout decision -- what the launcher measured
+    # and what it did about it -- since a screenshot shows only the outcome.
+    #   RUST_LOG=lunchbox_launcher=debug lunchbox dev headless
+    # Output lands in dev-runtime/headless/sway.log. Note the target: a binary
+    # crate's root module is named after the *binary*, so it is
+    # `lunchbox_launcher`, not `lunchbox_launcher_ui` after the package. The
+    # package name silently matches nothing and the filter looks broken.
+    [[ -n "${RUST_LOG:-}" ]] && sway_env+=("RUST_LOG=$RUST_LOG")
     # The HUD's debug-build hooks, forwarded for the same reason: they are the
     # only way to drive HUD-only UI here (the synthetic pointer does not fire
     # GTK `clicked`), and the reading layout has no reader to start.
@@ -770,6 +781,12 @@ Start options:
                    0700 \$HOME is not). shot/tree/key/... reattach automatically.
     --size WxH     Virtual output resolution (default $HEADLESS_SIZE_DEFAULT)
     --time "..."   LUNCHBOX_MOCK_TIME for the session (e.g. "2025-12-25 21:00:00")
+
+  RUST_LOG is passed through when set, which is the only way to turn the
+  binaries' debug logging on (sway and lunchboxd start them, so there is no
+  command line to add a flag to). Output goes to dev-runtime/headless/sway.log.
+  The target is the *binary* name: RUST_LOG=lunchbox_launcher=debug, not the
+  package name lunchbox_launcher_ui, which matches nothing.
     --gpu          Use the GL renderer against a DRM node instead of pixman
     --no-build     Skip the cargo build; use existing target/debug binaries
     --harden-ipc   Exercise the production sway-IPC hardening (issue #144):

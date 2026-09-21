@@ -57,6 +57,10 @@ const EDGE_MARGIN: i32 = 56;
 /// tracks this itself instead of leaning on `:focus`.
 const SELECTED_CLASS: &str = "lb-item--selected";
 
+/// How many times `squish_to_fit` measures and narrows before giving up and
+/// letting the row scroll.
+const SQUISH_PASSES: usize = 4;
+
 /// One navigable column of items, and the column of the field it sits in.
 pub struct Stack {
     /// The field column this stack belongs to, held so scrolling can bring the
@@ -468,6 +472,7 @@ impl LauncherField {
 
         let mut stacks: Vec<Stack> = Vec::new();
         let mut headers: Vec<Header> = Vec::new();
+        let mut slot_columns: Vec<i32> = Vec::new();
         for range in slots {
             let slot = gtk4::Box::new(gtk4::Orientation::Vertical, gap);
             slot.set_valign(gtk4::Align::Fill);
@@ -499,6 +504,7 @@ impl LauncherField {
                 .map(|c| c.stacks.len())
                 .max()
                 .unwrap_or(0);
+            slot_columns.push(i32::try_from(widest).unwrap_or(i32::MAX));
             let slot_widget: gtk4::Widget = slot.clone().upcast();
             for column in 0..widest {
                 let items: Vec<LauncherItem> = built[range.clone()]
@@ -514,6 +520,11 @@ impl LauncherField {
             }
         }
         *imp.headers.borrow_mut() = headers;
+
+        // How many cells wide the row is, counting each field column once:
+        // the places the overflow below can be shared between.
+        let columns_across: i32 = slot_columns.iter().sum();
+        self.squish_to_fit(&built, columns_across, scale);
 
         for (s, stack) in stacks.iter().enumerate() {
             for (r, item) in stack.items.iter().enumerate() {
@@ -531,6 +542,70 @@ impl LauncherField {
         // once the adjustment knows its real size.
         imp.pending_scroll.set(true);
         self.update_scroll_chips();
+    }
+
+    /// Narrow the cells, just enough, when the row misses fitting by a sliver.
+    ///
+    /// The field scrolls when it has to, and that is the right answer for a
+    /// row that genuinely does not fit. It is a poor one for a row that is
+    /// forty pixels too wide: the child gets a chevron, a fade and a whole
+    /// gesture to learn, to reach a strip of screen narrower than an icon.
+    ///
+    /// So if the overflow is under **half a cell**, the cells give it up
+    /// instead. Above that, the row really is too big for the screen and
+    /// scrolling is what it is for — squishing that far would shrink every
+    /// name on the field to buy a compartment that was never going to fit.
+    ///
+    /// The cells are narrowed and nothing else is, which is what makes this
+    /// safe to do after the fact: a cell's width feeds nothing that was
+    /// decided earlier. The height it can hold, the number of columns, the
+    /// pairing of compartments into fields — all of those came from the
+    /// *height* budget, and none of them changes when a name wraps a character
+    /// sooner.
+    fn squish_to_fit(&self, built: &[compartment::Compartment], columns: i32, scale: f64) {
+        let imp = self.imp();
+        let available = self.width();
+        let full = theme::px(theme::ITEM_W, scale);
+        // Before the window knows its size there is nothing to fit against;
+        // the re-layout that follows will do this properly.
+        if available <= 0 || full <= 0 {
+            return;
+        }
+
+        let natural = || imp.row.measure(gtk4::Orientation::Horizontal, -1).1;
+        let overflow = natural() - available;
+        if overflow <= 0 || overflow >= full / 2 {
+            return;
+        }
+
+        let columns = columns.max(1);
+
+        // Squish, measure, squish again. One division would do it if every
+        // compartment were as wide as its cells, but some are held open by
+        // their own header instead and give back nothing — so take what the
+        // first pass actually bought and go round again for the rest.
+        let mut item_w = full;
+        for _ in 0..SQUISH_PASSES {
+            let short = natural() - available;
+            if short <= 0 {
+                break;
+            }
+            let step = (short + columns - 1) / columns;
+            item_w -= step;
+            if item_w <= full / 2 {
+                break;
+            }
+            for compartment in built {
+                compartment.squish(item_w, scale);
+            }
+        }
+        tracing::debug!(
+            overflow,
+            cell = full,
+            squished_to = item_w,
+            left = natural() - available,
+            "the row missed fitting by less than half a cell"
+        );
     }
 
     /// Hook one item up to the pointer and to the launch path.

@@ -42,6 +42,21 @@ can screenshot and drive.
 `dev-runtime/headless/session.env`, so every later `dev` subcommand reattaches
 automatically. Always `dev stop` when finished (or before starting a fresh one).
 
+**To see why the UI did what it did, not just what it did**, set `RUST_LOG`
+when booting — it is passed through to the session, and there is no other way
+in, since sway and lunchboxd start these binaries with no command line you
+control:
+
+```sh
+RUST_LOG=lunchbox_launcher=debug ./scripts/lunchbox dev headless   # then:
+grep 'laying the field out' dev-runtime/headless/sway.log
+```
+
+The target is the **binary** name, because a binary crate's root module is
+named after the binary: `lunchbox_launcher`, not the package's
+`lunchbox_launcher_ui`. The package name matches nothing and the filter looks
+broken rather than wrong.
+
 **`SWAYSOCK` is not the socket sway made.** lunchboxd hard-links the compositor
 socket to `$XDG_RUNTIME_DIR/lunchbox-dev-sway.<n>.sock` and `session.env` records
 *that* — because in production lunchboxd unlinks the original so no activity can
