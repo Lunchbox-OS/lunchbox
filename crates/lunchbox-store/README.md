@@ -30,8 +30,21 @@ let store = SqliteStore::open("/var/lib/lunchboxd/lunchboxd.db")?;
 
 SQLite provides:
 - ACID transactions for usage accounting
-- Automatic crash recovery via WAL mode
 - Single-file database, easy to backup
+
+### Durability
+
+The connection is left on SQLite's **defaults** — a rollback journal at
+`synchronous=FULL` — and no `PRAGMA journal_mode` is set anywhere. A committed
+write is therefore fsynced before it returns and survives a power cut, which is
+the property this database exists for. (An earlier version of this README
+claimed WAL mode. It was never enabled, and it should not be: WAL trades exactly
+the durability that matters here for write throughput this workload does not
+need.)
+
+What durability cannot do on its own is make a write *happen*. Usage is settled
+when a session ends, so a daemon that dies mid-session has nothing to commit —
+see `StateSnapshot` and issue #201 for the checkpoint that bounds that loss.
 
 ## Store Trait
 
