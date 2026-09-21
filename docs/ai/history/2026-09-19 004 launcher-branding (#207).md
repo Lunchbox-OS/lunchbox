@@ -685,10 +685,33 @@ number of columns matters: a floor of, say, 250px would leave a compartment
 wider than its items and narrower than the next stack, which reads as a
 mistake.
 
-It is not free. At 1280×720 three compartments fit across where four and a half
-did, and a category holding two books now shows an empty column beside them.
-That is the trade: a half-empty tin for a category with one stack, against a
-row of headers that all work.
+It is not free: at 1280×720 three compartments fit across where four and a half
+did.
+
+### And the gap goes to the bottom
+
+The first cut of the floor left a category holding two books showing them in a
+column with an empty column beside them, which does not read as "this category
+has two books" — it reads as a section of the lunchbox somebody forgot to pack.
+So the members are now dealt *across* the columns in reading order, the top row
+left to right and then the row under it, and the gap falls along the bottom
+where an unfilled compartment is simply unfilled.
+
+The geometry does not change at all: a category with seven members and room for
+three rows is three columns wide either way, and what `split_into_stacks`
+returns is still the columns, because that is the shape the D-pad model is
+built on — left and right move between them, up and down inside one. Only the
+dealing turned ninety degrees. Two things had to be said out loud in the
+arithmetic: never more columns than the two-column floor asks for, and never
+more columns than there are members to put in them — one member and a floor of
+two would otherwise conjure a column with nothing in it, which is a dead stop
+for the selection.
+
+The tests changed shape with it. They used to name the members and check the
+order survived; now they mostly check the *shape* — `[2, 1]` for three members
+with room for three rows, `[3, 2, 2]` for seven — and one of them reads the
+members back in screen order to check that config order really is reading
+order.
 
 ## Two places the implementation departs from the mockup
 

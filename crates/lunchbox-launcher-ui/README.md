@@ -86,8 +86,8 @@ mark live in `assets/branding`; `src/theme.rs` is their Rust half.
 ### Compartments
 
 Each compartment shows its category's name, at most one badge, its members in
-stacks that spill *rightwards*, and — when the category is on a
-schedule — its closing time today on the floor, behind a little clock face
+columns that spill *rightwards*, and — when the category is on a schedule —
+its closing time today on the floor, behind a little clock face
 whose hands point at that hour (`ClockFace`, from `lunchbox-widgets`, shared
 with the HUD's vertical bar). A child who cannot yet read "6:00 PM" can still
 see where the hand is going to be.
@@ -101,8 +101,15 @@ The header carries the category's name and a badge pushed to the far end of
 the same line; at one column wide there is not room for both, and since the
 name does not ellipsize it is the compartment that gives — stretching to
 whatever the words need, which puts every badge at a different offset again.
-The floor costs a half-empty tin for a category with one stack, and it buys a
-row of headers that all work.
+It buys a row of headers that all work.
+
+The members are **dealt across** into those columns in reading order — the top
+row left to right, then the row under it — so a category that does not fill its
+compartment leaves the gap along the bottom rather than down the right-hand
+side, where the two-column floor would otherwise leave an empty column standing
+in the tin. The *columns* are what `Compartment::stacks` returns, because that
+is what the D-pad moves between; only the dealing runs the other way, and the
+compartment is the same width either way.
 
 How tall a stack may be is **measured, not fixed**
 (`compartment::rows_that_fit`). The design hands down three (`space.rows`),

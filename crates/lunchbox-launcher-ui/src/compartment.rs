@@ -5,8 +5,9 @@
 //! CSS in `theme.rs` does the drawing; this file decides what goes in it.
 //!
 //! Its contents, top to bottom: the category's name and (at most) one badge,
-//! then the items in stacks that spill to the right, then — only when the
-//! category actually shuts today — a hairline floor and the closing time.
+//! then the items — dealt across in reading order into columns that spill to
+//! the right — then, only when the category actually shuts today, a hairline
+//! floor and the closing time.
 //!
 //! How tall a stack may be is [`rows_that_fit`], and it is *measured* rather
 //! than decided here. See that function for why.
@@ -63,9 +64,10 @@ pub struct Compartment {
     /// The category's badge, if it has one, in a bin of its own — it anchors
     /// to the opposite edge from the name.
     pub badge: Option<crate::offset::OffsetBin>,
-    /// The items, grouped into the stacks they were laid out in. The field's
+    /// The items, grouped into the columns they were laid out in. The field's
     /// D-pad model is built on exactly this shape: left/right move between
-    /// stacks, up/down within one.
+    /// stacks, up/down within one. Note that the *filling* runs the other way
+    /// — see `split_into_stacks`.
     pub stacks: Vec<Vec<LauncherItem>>,
 }
 
@@ -285,16 +287,41 @@ fn schedule_line(closes: chrono::DateTime<chrono::Local>) -> String {
     format!("Until {}", format_clock(closes))
 }
 
-/// Break a category's members into stacks `rows` tall, in config order.
-/// Width grows; height never does.
+/// Lay a category's members out in columns at most `rows` tall, in config
+/// order. Width grows; height never does.
+///
+/// **Filled across, returned down.** The members are dealt into the columns in
+/// reading order — the top row left to right, then the row under it — so a
+/// category that does not fill its compartment leaves the gap along the
+/// *bottom* rather than down the right-hand side. A compartment is never
+/// narrower than [`MIN_COLUMNS`], so the alternative is a tin with an empty
+/// column standing in it, which reads as a section of the lunchbox somebody
+/// forgot to pack.
+///
+/// What comes back is still the *columns*, because that is the shape the
+/// field's D-pad model is built on: left and right move between them, up and
+/// down inside one. Only the dealing changed, not the geometry — a category
+/// with seven members and room for three rows is three columns wide either
+/// way.
 fn split_into_stacks(entries: Vec<EntryView>, rows: usize) -> Vec<Vec<EntryView>> {
     if entries.is_empty() {
         return Vec::new();
     }
-    entries
-        .chunks(rows.max(1))
-        .map(<[EntryView]>::to_vec)
-        .collect()
+    let rows = rows.max(1);
+    // Wide enough to hold them all, but never wider than the compartment's own
+    // floor — and never wider than there are members to put in it, or the row
+    // would carry a column with nothing in it for the selection to land on.
+    let columns = entries
+        .len()
+        .div_ceil(rows)
+        .max(MIN_COLUMNS as usize)
+        .min(entries.len());
+
+    let mut stacks = vec![Vec::new(); columns];
+    for (i, entry) in entries.into_iter().enumerate() {
+        stacks[i % columns].push(entry);
+    }
+    stacks
 }
 
 /// How many items one stack can hold on a field `field_height` px tall.
@@ -440,42 +467,65 @@ mod tests {
     /// unless they are about some other screen.
     const THREE: usize = 3;
 
+    /// The columns, as lengths — the shape of the compartment, without the
+    /// names getting in the way.
+    fn shape(entries: usize, rows: usize) -> Vec<usize> {
+        let members = (0..entries).map(|i| entry(&i.to_string())).collect();
+        split_into_stacks(members, rows)
+            .iter()
+            .map(Vec::len)
+            .collect()
+    }
+
+    /// The members in the order they are read off the screen: across the top
+    /// row, then the row under it.
+    fn reading_order(stacks: &[Vec<EntryView>]) -> Vec<String> {
+        let rows = stacks.iter().map(Vec::len).max().unwrap_or(0);
+        (0..rows)
+            .flat_map(|r| {
+                stacks
+                    .iter()
+                    .filter_map(move |column| column.get(r))
+                    .map(|e| e.entry_id.as_str().to_string())
+            })
+            .collect()
+    }
+
+    /// A category that does not fill its compartment leaves the gap along the
+    /// bottom, not down the right-hand side: the compartment is two columns
+    /// wide whatever it holds, and an empty column standing in it reads as a
+    /// section somebody forgot to pack.
     #[test]
-    fn a_full_stack_is_one_stack() {
-        let stacks = split_into_stacks(vec![entry("a"), entry("b"), entry("c")], THREE);
-        assert_eq!(stacks.len(), 1);
-        assert_eq!(stacks[0].len(), 3);
+    fn a_short_category_is_dealt_across_the_columns() {
+        assert_eq!(shape(3, THREE), [2, 1], "two on the top row, one under");
+        assert_eq!(shape(2, THREE), [1, 1], "side by side, not stacked");
+    }
+
+    /// Two columns is the compartment's floor, but a column with nothing in it
+    /// would be a dead stop for the D-pad, so one member still makes one.
+    #[test]
+    fn a_single_member_does_not_conjure_an_empty_column() {
+        assert_eq!(shape(1, THREE), [1]);
     }
 
     #[test]
-    fn one_member_too_many_spills_into_a_second_stack_beside_it() {
+    fn a_full_row_of_columns_spills_downwards() {
         // The acceptance checklist: 4-6 members render double-wide, 7-9 triple.
-        let four = split_into_stacks((0..4).map(|i| entry(&i.to_string())).collect(), THREE);
-        assert_eq!(four.len(), 2, "4 members are double-wide");
-        assert_eq!(four[0].len(), 3);
-        assert_eq!(four[1].len(), 1);
-
-        let seven = split_into_stacks((0..7).map(|i| entry(&i.to_string())).collect(), THREE);
-        assert_eq!(seven.len(), 3, "7 members are triple-wide");
+        assert_eq!(shape(4, THREE), [2, 2], "4 members are double-wide");
+        assert_eq!(shape(6, THREE), [3, 3]);
+        assert_eq!(shape(7, THREE), [3, 2, 2], "7 members are triple-wide");
+        assert_eq!(shape(9, THREE), [3, 3, 3]);
     }
 
-    /// The same members, on a screen with room for a taller stack: fewer,
-    /// fuller columns rather than the same columns further apart.
+    /// A screen with room for a taller stack makes the compartment narrower,
+    /// down to the two-column floor — the same widths as before this was dealt
+    /// across; only which member lands where changed.
     #[test]
-    fn a_taller_screen_spills_later() {
-        let six: Vec<_> = (0..6).map(|i| entry(&i.to_string())).collect();
-        assert_eq!(split_into_stacks(six.clone(), 3).len(), 2);
-        assert_eq!(split_into_stacks(six.clone(), 4).len(), 2);
-        assert_eq!(split_into_stacks(six.clone(), 5).len(), 2);
-        assert_eq!(split_into_stacks(six, 6).len(), 1, "all six in one column");
-    }
-
-    /// `rows_that_fit` never answers zero, but the split must survive one
-    /// anyway rather than dividing by it.
-    #[test]
-    fn a_stack_always_holds_something() {
-        let stacks = split_into_stacks(vec![entry("a"), entry("b")], 0);
-        assert_eq!(stacks.len(), 2, "one item each, not a panic");
+    fn a_taller_screen_needs_fewer_columns() {
+        assert_eq!(shape(12, 3).len(), 4);
+        assert_eq!(shape(12, 4).len(), 3);
+        assert_eq!(shape(12, 6).len(), 2);
+        assert_eq!(shape(12, 12).len(), 2, "never narrower than the floor");
     }
 
     #[test]
@@ -489,12 +539,18 @@ mod tests {
             ],
             THREE,
         );
-        let flat: Vec<_> = stacks
-            .iter()
-            .flatten()
-            .map(|e| e.entry_id.as_str().to_string())
-            .collect();
-        assert_eq!(flat, ["first", "second", "third", "fourth"]);
+        assert_eq!(
+            reading_order(&stacks),
+            ["first", "second", "third", "fourth"],
+            "config order is reading order: across, then down"
+        );
+    }
+
+    /// `rows_that_fit` never answers zero, but the split must survive one
+    /// anyway rather than dividing by it.
+    #[test]
+    fn a_stack_always_holds_something() {
+        assert_eq!(shape(2, 0), [1, 1], "one item each, not a panic");
     }
 
     /// The width floor is two item columns and the gap between them — the

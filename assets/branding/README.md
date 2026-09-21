@@ -148,6 +148,10 @@ Each was asked for after seeing it running, and each is argued in
 - There is **no selection until the child makes one**. The rule here is exactly
   one focused item at all times, which assumes a cursor; a touchscreen has
   none, and a standing highlight there claims a choice nobody has made.
+- Members are **dealt across** the columns in reading order rather than filling
+  one column before starting the next, so a part-full category leaves its gap
+  along the bottom instead of standing an empty column in the tin. Rule 2 below
+  describes the filling; the widths it produces are unchanged.
 - A compartment is never narrower than **two item columns**. The mockup's
   one-stack categories are as wide as one item, which leaves the header no room
   for a name and a badge at opposite ends of it — and since the name does not
