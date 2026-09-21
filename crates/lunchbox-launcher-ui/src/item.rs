@@ -361,6 +361,15 @@ impl LauncherItem {
             theme::px(theme::ITEM_W, scale),
             theme::px(theme::ITEM_H, scale),
         );
+        // And exactly that wide, not merely at least. A size request is a
+        // floor, so without this a cell is as wide as its own name wants —
+        // `NAME_MAX_CHARS` of it, which is 157px at this scale against the
+        // cell's 149 — and a name shorter than the cap leaves the cell at the
+        // floor. Cells then come out at every width between the two, and the
+        // columns of the field stop being a grid: the branding is explicit
+        // that an item cell is one size (§3), and the row's own arithmetic
+        // (`LauncherField::squish_to_fit`) needs it to be true.
+        self.set_width_cap(theme::px(theme::ITEM_W, scale));
 
         // Available means enabled with nothing blocking; everything else is
         // locked, whether or not it is drawn at all.

@@ -107,6 +107,18 @@ activity is worse than one with a gap in it. Everything in a column is as wide
 as the widest of them, and the column fills the field's height, so the row
 still reads as one tin.
 
+The row is **centred** in the field, so the margin past the last compartment
+matches the one before the first. It carries the design's 40px side margins
+itself; centring is about the slack beyond them, which would otherwise all
+land at the right-hand end. When the row is wider than the screen this does
+nothing at all — it takes its natural width and scrolls.
+
+An item cell is **exactly** `space.item-w` wide, not merely at least. A size
+request is a floor in GTK, so without a ceiling to match it a cell is as wide
+as its own name wants, and cells come out at every width between the floor and
+`NAME_MAX_CHARS`. The branding is explicit that a cell is one size (§3), and
+the row's arithmetic below needs it to be true.
+
 When the row misses fitting the screen by **less than half a cell**, the cells
 give up the difference instead of the field scrolling
 (`LauncherField::squish_to_fit`). Scrolling is the right answer for a row that
@@ -122,6 +134,13 @@ wide as it is), the cell's own request, and the name's request — the floor
 *inside* the cell, and the one that actually bites. It is safe to do after the
 fact because a cell's width feeds nothing decided earlier: the rows, the
 columns and the pairing all came from the height budget.
+
+It measures, narrows and measures again rather than dividing once, because a
+`measure` taken in the same turn as the size request that provoked it does not
+reliably agree with the allocation that follows. The loop converges on a row
+that fits; it can overshoot by a few pixels, which the centring above turns
+into a slightly wider margin at both ends rather than a ragged one at a
+single end.
 
 The D-pad model follows the *columns*, not the compartments: one navigable
 stack per x position, carrying the items of every compartment at that x, so

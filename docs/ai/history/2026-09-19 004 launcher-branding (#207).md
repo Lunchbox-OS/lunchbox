@@ -805,6 +805,39 @@ squished to 140, four pixels to spare. At 1280×720 the overflow is 119 against
 a 74-pixel budget, so nothing is squished and the row scrolls, exactly as
 before.
 
+### Reported from the device: the two ends did not match
+
+> it doesn't scroll now with the config I'm testing with, yes, but the spacing
+> on the left of the field is not the same as the spacing on the right
+
+Two separate things, and the squish only made the first one visible.
+
+**The row packs from the left.** It carries the field's 40px side margins
+itself, and any slack beyond them — from the squish, or simply from three
+compartments not adding up to the width of the screen — fell entirely at the
+right-hand end. 40 on the left, 90 on the right. The row is now centred, which
+costs nothing when it is wider than the screen (it takes its natural width and
+scrolls, and `halign` has no say) and squares the two ends when it is not. At
+1280×1024, where nothing is squished at all, the margins went from ragged to
+48 and 48.
+
+**A cell was not one width.** `space.item-w` was a size request, which in GTK
+is a floor: a cell ended up as wide as the greater of it and the cell's own
+name, so a long name made a 157px cell and a short one left it at the 149px
+floor. Cells at every width between the two, which is not a grid, and it broke
+the squish's arithmetic outright — stepping down from the token's 149 took
+17px off a 157px cell while believing it had taken 9. Cells are now capped at
+exactly the token width, using the same ceiling the squish uses.
+
+**And the squish measures more than once.** A `measure` taken in the same turn
+as the size request that provoked it does not reliably agree with the
+allocation that follows — before the squish it read 32px of overflow where
+there were 63, and after it read a row 43px wider than the one that was drawn.
+Dividing once and trusting it left the row three pixels over and still
+scrolling. So it narrows, asks again, and stops when the row fits; it can
+overshoot slightly, and the centring turns that into a slightly wider margin at
+both ends rather than a visibly wrong one at a single end.
+
 ### A note on seeing any of this
 
 None of it was visible from a screenshot — the row looked identical whether the

@@ -61,6 +61,16 @@ const SELECTED_CLASS: &str = "lb-item--selected";
 /// letting the row scroll.
 const SQUISH_PASSES: usize = 4;
 
+/// How much narrower every cell has to be for the row to give up `overflow`
+/// pixels, when it carries `columns` of them across.
+///
+/// Rounded up, so the row loses at least what it is over by rather than
+/// stopping a pixel short and scrolling anyway.
+fn squish_step(overflow: i32, columns: i32) -> i32 {
+    let columns = columns.max(1);
+    (overflow + columns - 1) / columns
+}
+
 /// One navigable column of items, and the column of the field it sits in.
 pub struct Stack {
     /// The field column this stack belongs to, held so scrolling can bring the
@@ -270,6 +280,15 @@ mod imp {
             obj.set_vexpand(true);
 
             self.row.set_valign(gtk4::Align::Fill);
+            // Centred, so the two ends of the field match. The row carries the
+            // field's side margins itself, and when it is wider than the
+            // screen this does nothing at all — it takes its natural width and
+            // scrolls. It is the other case this is for: a row that fits with
+            // room to spare would otherwise pack from the left and leave every
+            // pixel of the slack at the right-hand end, so the margin the
+            // child sees past the last compartment is the design's 40 plus
+            // whatever happened to be left over.
+            self.row.set_halign(gtk4::Align::Center);
             self.row.add_css_class("lb-field__row");
 
             // Horizontal only, and with no visible scrollbar: the row is driven
@@ -565,33 +584,44 @@ impl LauncherField {
     fn squish_to_fit(&self, built: &[compartment::Compartment], columns: i32, scale: f64) {
         let imp = self.imp();
         let available = self.width();
-        let full = theme::px(theme::ITEM_W, scale);
+        // The cell's *measured* width, not `space.item-w` from the tokens. The
+        // two are not the same and the difference is not small: the token is a
+        // size request, and a cell ends up as wide as the greater of that and
+        // the name's own ceiling — 157px against the token's 149 at this
+        // scale. Stepping down from the token would take 17px off a cell while
+        // believing it had taken 9, and the row would come out 50px narrower
+        // than the screen it was being fitted to.
+        let full = built
+            .iter()
+            .flat_map(|c| c.stacks.iter())
+            .flatten()
+            .next()
+            .map(|item| item.measure(gtk4::Orientation::Horizontal, -1).1)
+            .unwrap_or(0);
         // Before the window knows its size there is nothing to fit against;
         // the re-layout that follows will do this properly.
         if available <= 0 || full <= 0 {
             return;
         }
 
-        let natural = || imp.row.measure(gtk4::Orientation::Horizontal, -1).1;
-        let overflow = natural() - available;
+        let overflow = imp.row.measure(gtk4::Orientation::Horizontal, -1).1 - available;
         if overflow <= 0 || overflow >= full / 2 {
             return;
         }
 
-        let columns = columns.max(1);
-
-        // Squish, measure, squish again. One division would do it if every
-        // compartment were as wide as its cells, but some are held open by
-        // their own header instead and give back nothing — so take what the
-        // first pass actually bought and go round again for the rest.
+        // Measure, narrow, measure again, rather than dividing once and
+        // trusting it. One division would be exact if the row's width were
+        // simply its cells — but a compartment can be held open by its own
+        // header instead, and a `measure` taken in the same turn as the size
+        // request that provoked it does not always agree with the allocation
+        // that follows. Both are cured by asking again.
         let mut item_w = full;
         for _ in 0..SQUISH_PASSES {
-            let short = natural() - available;
+            let short = imp.row.measure(gtk4::Orientation::Horizontal, -1).1 - available;
             if short <= 0 {
                 break;
             }
-            let step = (short + columns - 1) / columns;
-            item_w -= step;
+            item_w -= squish_step(short, columns);
             if item_w <= full / 2 {
                 break;
             }
@@ -602,8 +632,8 @@ impl LauncherField {
         tracing::debug!(
             overflow,
             cell = full,
+            columns,
             squished_to = item_w,
-            left = natural() - available,
             "the row missed fitting by less than half a cell"
         );
     }
@@ -1152,6 +1182,22 @@ mod tests {
     const INSET: f64 = 56.0;
     const NAME_X: f64 = 60.0;
     const NAME_W: f64 = 120.0;
+
+    /// The overflow is shared out across the columns the row carries, rounded
+    /// up so the row loses at least what it was over by.
+    #[test]
+    fn the_squish_is_shared_between_the_columns() {
+        assert_eq!(squish_step(63, 7), 9);
+        assert_eq!(squish_step(57, 7), 9, "rounded up, not down");
+        assert_eq!(squish_step(1, 7), 1, "never nothing, or it would not move");
+    }
+
+    /// A row with no columns in it cannot overflow, but the arithmetic still
+    /// has to survive being asked.
+    #[test]
+    fn the_squish_does_not_divide_by_no_columns() {
+        assert_eq!(squish_step(40, 0), 40);
+    }
 
     /// A compartment fully on screen keeps its name where it was laid out.
     #[test]
