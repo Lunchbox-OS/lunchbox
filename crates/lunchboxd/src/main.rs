@@ -1050,6 +1050,11 @@ impl Service {
         // Initialize core engine
         let mut engine = CoreEngine::new(policy, store.clone(), host.capabilities().clone());
 
+        // The diagnostic registry, early: startup recovery below is the one
+        // condition that is known before anything else is built, and an
+        // administrator has to be told about it.
+        let diagnostics = Arc::new(diagnostics::DiagnosticRegistry::new());
+
         // Settle anything the last run was killed in the middle of, before the
         // socket exists and so before anything can launch (issue #201). A
         // session that was running when the power went is billed from its last
@@ -1062,6 +1067,17 @@ impl Service {
                 last_seen = %recovered.last_seen,
                 "The previous run did not shut down cleanly with an activity open"
             );
+            // A log line is the wrong place for this: it is on a device nobody
+            // can log into, and the whole point is that the *parent* should
+            // know. Nothing else on screen would show it — the launcher comes
+            // up normally and the only trace is a quota that is slightly too
+            // generous.
+            let label = engine
+                .policy()
+                .get_entry(&recovered.entry_id)
+                .map(|e| e.label.clone())
+                .unwrap_or_else(|| recovered.entry_id.to_string());
+            diagnostics.raise(Self::interrupted_session_diagnostic(&recovered, &label));
         }
 
         // Apply Steam config to the host before any preload so the CEF debug
@@ -1107,7 +1123,7 @@ impl Service {
             internet_monitor,
             input_monitor,
             media_prefetcher,
-            diagnostics: Arc::new(diagnostics::DiagnosticRegistry::new()),
+            diagnostics,
             sway_ipc_alias: args.sway_ipc_alias.clone(),
             harden_sway_ipc: !args.no_harden_sway_ipc,
             ipc_peer_hardening,
@@ -2463,6 +2479,36 @@ impl Service {
         Self::publish_diagnostics(engine, diagnostics, ipc, event_tx).await;
     }
 
+    /// Tell an administrator that the last run was killed with an activity
+    /// open, and what that cost in accuracy (issue #201).
+    ///
+    /// `since` is when the session was last *seen*, not when this daemon
+    /// started, so "since" reads as when the device actually went down — which
+    /// for a device switched back on the next morning is a different day.
+    fn interrupted_session_diagnostic(
+        recovered: &lunchbox_core::RecoveredSession,
+        label: &str,
+    ) -> Diagnostic {
+        let billed_mins = recovered.billed.as_secs() / 60;
+        let uncounted = lunchbox_core::SNAPSHOT_INTERVAL.as_secs();
+        Diagnostic {
+            code: DiagnosticCode::SessionInterrupted,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "The device stopped without closing \"{label}\". {billed_mins} min of that \
+                 session was recovered and charged; up to {uncounted}s of it could not be counted."
+            ),
+            remedy: Some(
+                "A power cut or crash does this. If it keeps happening while an activity is \
+                 open, check whether the device is being switched off to win time back — the \
+                 audit log lists these as `interrupted`."
+                    .into(),
+            ),
+            since: recovered.last_seen,
+        }
+    }
+
     /// Push the current diagnostic set onto the snapshot and out to clients.
     ///
     /// Shared by the probed sweep and the observed-change path, so the two
@@ -3429,3 +3475,74 @@ mod harden_diagnostic_tests {
     }
 }
 
+#[cfg(test)]
+mod interrupted_session_diagnostic_tests {
+    use super::*;
+    use lunchbox_core::RecoveredSession;
+    use lunchbox_util::{EntryId, SessionId};
+
+    fn recovered(billed: Duration) -> RecoveredSession {
+        let last_seen = lunchbox_util::now() - chrono::Duration::hours(9);
+        RecoveredSession {
+            session_id: SessionId::new(),
+            entry_id: EntryId::new("monkey-island"),
+            started_at: last_seen - chrono::Duration::minutes(12),
+            last_seen,
+            billed,
+        }
+    }
+
+    /// The whole reason this diagnostic exists: a power cut reaches exactly one
+    /// log line, on a device nobody can log into, and the parent sees a
+    /// launcher that looks entirely normal.
+    #[test]
+    fn it_names_the_activity_and_what_was_recovered() {
+        let d = Service::interrupted_session_diagnostic(
+            &recovered(Duration::from_secs(11 * 60 + 30)),
+            "Secret of Monkey Island",
+        );
+
+        assert_eq!(d.code, DiagnosticCode::SessionInterrupted);
+        assert_eq!(d.subject, DiagnosticSubject::Service);
+        assert!(
+            d.message.contains("Secret of Monkey Island"),
+            "the parent knows the label, not the entry id: {}",
+            d.message
+        );
+        assert!(d.message.contains("11 min"), "{}", d.message);
+    }
+
+    /// It has to say that the recovery is approximate. A number presented as
+    /// exact is worse than one presented as a floor, because the gap is
+    /// precisely what a child can work with.
+    #[test]
+    fn it_admits_what_could_not_be_counted() {
+        let d = Service::interrupted_session_diagnostic(&recovered(Duration::ZERO), "Anything");
+        let bound = format!("{}s", lunchbox_core::SNAPSHOT_INTERVAL.as_secs());
+        assert!(
+            d.message.contains(&bound),
+            "expected the uncounted bound {bound} in: {}",
+            d.message
+        );
+        assert!(d.remedy.is_some(), "and something for the parent to do");
+    }
+
+    /// `since` is when the device went down, not when it came back. A device
+    /// switched on the next morning would otherwise date last night's power cut
+    /// to breakfast.
+    #[test]
+    fn it_is_dated_when_the_session_was_last_seen() {
+        let r = recovered(Duration::from_secs(60));
+        let d = Service::interrupted_session_diagnostic(&r, "Anything");
+        assert_eq!(d.since, r.last_seen);
+        assert!(d.since < lunchbox_util::now() - chrono::Duration::hours(8));
+    }
+
+    /// Warning, not Critical: the time *was* recovered and the supervision
+    /// held. What is degraded is how exact the accounting is.
+    #[test]
+    fn it_is_a_warning() {
+        let d = Service::interrupted_session_diagnostic(&recovered(Duration::ZERO), "Anything");
+        assert_eq!(d.severity, DiagnosticSeverity::Warning);
+    }
+}
