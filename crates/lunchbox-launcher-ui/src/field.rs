@@ -1054,11 +1054,11 @@ impl LauncherField {
 
     /// Move the row to `target`, easing unless told not to.
     fn scroll_to(&self, target: f64, animate: bool) {
-        self.stop_kinetic();
         if animate {
             self.animate_scroll_to(target);
             return;
         }
+        self.stop_kinetic();
         let adj = self.imp().scroller.hadjustment();
         let upper = (adj.upper() - adj.page_size()).max(0.0);
         adj.set_value(target.clamp(0.0, upper));
@@ -1093,6 +1093,13 @@ impl LauncherField {
     /// holding a direction runs the row along smoothly rather than stuttering
     /// between finished animations.
     fn animate_scroll_to(&self, target: f64) {
+        // Whatever asked for this scroll has replaced any coast still running,
+        // so the coast stops here rather than in `scroll_to`: `nudge` — the
+        // chevron chips, and the D-pad running off the end of the row — does
+        // not go through `scroll_to`, and a chip is exactly what gets tapped
+        // while the row is still moving. Cancelling in the one place every
+        // eased scroll passes through is what makes that impossible to miss.
+        self.stop_kinetic();
         let adj = self.imp().scroller.hadjustment();
         let upper = (adj.upper() - adj.page_size()).max(0.0);
         let target = target.clamp(0.0, upper);
