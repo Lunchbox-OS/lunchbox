@@ -235,6 +235,50 @@ settle as normal. The store is only ever told about the *current* day, so a past
 date can never rewind the stamp over a balance a caregiver granted after
 midnight.
 
+## Surviving a power cut mid-session
+
+Usage is settled when a session *ends*, which leaves a hole if nothing ever gets
+to end it: holding the power button used to refund the entire session, and so
+did any other way of taking the daemon out — a crash, an OOM kill, or (before
+issue #201) a plain `SIGTERM`. Three things close it.
+
+**The session is checkpointed while it runs.** `tick` writes a `StateSnapshot`
+every `SNAPSHOT_INTERVAL` (30s), carrying the session's `billable` duration.
+Carried, not re-derived: billing runs on `CLOCK_MONOTONIC` — which excludes
+suspend (issue #155) and the spinner before the activity's window appears (issue
+#135) — and a reboot resets it. The interval is the whole tamper budget, and it
+is a straight trade: it bounds how much a power cycle can win, and costs an
+fsync that often. Thirty seconds is set against what the bypass costs to
+perform, since a reboot is tens of seconds before the child can play again.
+
+The checkpoint is versioned, and a version this build does not recognise — or a
+row it cannot parse — is **dropped unbilled** rather than migrated. `billable`
+means what one version's billing rules made it mean, and an upgrade is exactly
+the moment a reader would otherwise charge a child for a number it no longer
+understands.
+
+**Startup settles whatever the last run did not.**
+`recover_interrupted_session` runs before the socket exists, so nothing can
+launch ahead of it. It charges the last checkpoint's `billable` to the session's
+start day, settles tokens and cooldowns, and writes a `SessionEnded` with
+`reason: Interrupted` — stamped when the session was last *seen*, not at boot,
+so a device that was off overnight does not record breakfast as the end of last
+night's session.
+
+It deliberately charges no more than the checkpoint saw. The wall clock could be
+asked how long ago that was, but the answer is chosen by whoever decided when to
+switch the device back on, and it counts time the device spent off as play.
+Charging a bound the child controls is worse than charging slightly too little.
+
+**A clean shutdown settles the session itself.** lunchboxd's shutdown path runs
+`begin_stop(ServiceShutdown)` / `finish_stop` around its teardown. Every other
+end funnels through the daemon's event loop, which that path has already left —
+so without this, an orderly exit lost the session exactly like a power cut.
+
+Settling clears the checkpoint, which is what keeps a session from being billed
+twice. Recovery clears it too, so power-cycling repeatedly cannot re-apply a
+charge.
+
 ## Groups
 
 A group (issue #5) carries the same limits an entry does — window, quota,

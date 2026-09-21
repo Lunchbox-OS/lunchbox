@@ -9,7 +9,8 @@ This crate provides durable storage for the Lunchbox service, including:
 - **Audit log** - Append-only record of all significant events
 - **Usage accounting** - Track time used per entry per day
 - **Cooldown tracking** - Remember when entries become available again
-- **State snapshots** - Enable crash recovery
+- **State snapshots** - The running session, checkpointed so a power cut does
+  not refund it (issue #201)
 
 ## Purpose
 
@@ -30,8 +31,21 @@ let store = SqliteStore::open("/var/lib/lunchboxd/lunchboxd.db")?;
 
 SQLite provides:
 - ACID transactions for usage accounting
-- Automatic crash recovery via WAL mode
 - Single-file database, easy to backup
+
+### Durability
+
+The connection is left on SQLite's **defaults** — a rollback journal at
+`synchronous=FULL` — and no `PRAGMA journal_mode` is set anywhere. A committed
+write is therefore fsynced before it returns and survives a power cut, which is
+the property this database exists for. (An earlier version of this README
+claimed WAL mode. It was never enabled, and it should not be: WAL trades exactly
+the durability that matters here for write throughput this workload does not
+need.)
+
+What durability cannot do on its own is make a write *happen*. Usage is settled
+when a session ends, so a daemon that dies mid-session has nothing to commit —
+see `StateSnapshot` and issue #201 for the checkpoint that bounds that loss.
 
 ## Store Trait
 
@@ -155,7 +169,9 @@ For crash recovery, the service can save state snapshots:
 ```rust
 use lunchbox_store::{StateSnapshot, SessionSnapshot};
 
-// Save current state
+// Checkpoint the running session (the engine does this on its tick, every
+// `SNAPSHOT_INTERVAL`). `billable` is carried rather than re-derived: it is
+// measured on a monotonic clock, which a reboot resets.
 let snapshot = StateSnapshot {
     timestamp: Local::now(),
     active_session: Some(SessionSnapshot {
@@ -164,17 +180,48 @@ let snapshot = StateSnapshot {
         started_at,
         deadline,
         warnings_issued: vec![300, 60],
+        billable: Duration::from_secs(90),
     }),
 };
 store.save_snapshot(&snapshot)?;
 
-// On startup, check for unfinished session
+// On startup, an `active_session` still here means the last run never got to
+// settle one — a power cut, a crash, a kill. `CoreEngine::recover_interrupted_
+// session` bills it and clears the checkpoint.
 if let Some(snapshot) = store.load_snapshot()? {
     if let Some(session) = snapshot.active_session {
-        // Potentially recover or clean up
+        // ...
     }
 }
 ```
+
+Clearing is a **write**, not a delete: the snapshot is a single row that is
+overwritten with `active_session: None` once the session settles. What recovery
+looks for is the session, not the row.
+
+### The checkpoint is versioned
+
+`StateSnapshot::version` carries `SNAPSHOT_FORMAT`, and a reader that does not
+recognise it **drops the row unbilled** rather than migrating it. A checkpoint
+is written by one build and read by the next one to start, which across an
+upgrade is a different build — and `billable` is a number produced by a
+particular version's billing rules. Charging a child for one produced by rules
+the reader no longer runs would be wrong in a way nothing can see.
+
+Dropping costs at most one interrupted session's time, once, on the boot after
+an upgrade. It buys never keeping migration code for a row whose normal lifetime
+is thirty seconds. Build one with `StateSnapshot::new`, which stamps the version
+for you; **bump `SNAPSHOT_FORMAT` whenever either struct changes shape or
+meaning**.
+
+Bumping it is a convention, so there is a test that enforces the half a test
+can: `the_current_format_has_the_shape_it_has_always_had` pins format 1's
+on-disk shape against a literal. Every other test round-trips a snapshot through
+one build and so agrees with itself whatever the shape is — change a field and
+forget the bump, and the suite stays green while a device bills a child from a
+row it no longer understands. A change of *meaning* that leaves the shape alone
+still cannot be caught by anything; the reminder lives in that test's failure
+message.
 
 ## Database Schema
 

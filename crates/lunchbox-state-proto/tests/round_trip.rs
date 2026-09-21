@@ -201,10 +201,7 @@ fn audit_settings_and_snapshots_survive_the_wire() {
 
     assert!(f.remote.load_snapshot().expect("load").is_none());
     f.remote
-        .save_snapshot(&StateSnapshot {
-            timestamp: lunchbox_util::now(),
-            active_session: None,
-        })
+        .save_snapshot(&StateSnapshot::new(lunchbox_util::now(), None))
         .expect("save");
     assert!(f.remote.load_snapshot().expect("load").is_some());
 

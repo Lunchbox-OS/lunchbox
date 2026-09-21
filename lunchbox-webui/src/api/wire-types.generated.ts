@@ -583,7 +583,30 @@ export type DiagnosticCode =
    * ZeroTier interface coming up at login would otherwise raise an alarm
    * every boot and clear it seconds later.
    */
-  | "management_api_unavailable";
+  | "management_api_unavailable"
+  /**
+   * The last run of the daemon was killed with an activity open — a held
+   * power button, a crash, an OOM kill — and the session was settled from
+   * its checkpoint at this startup instead (issue #201).
+   *
+   * Raised because the recovery is *not* exact. Usage is checkpointed on an
+   * interval, so up to one interval of real play is not in what was
+   * charged, and a child who discovers this has found a way to buy time back
+   * a little at a time. One power cut is a power cut; the same one every
+   * evening is the bypass the issue is about, and nothing else on the device
+   * would say so — the launcher looks normal and the quota is merely a
+   * little generous.
+   *
+   * `Warning`, not `Critical`: the protection held, and the time was
+   * recovered. What is degraded is the accuracy of the accounting, which is
+   * exactly what a supervision device is for.
+   *
+   * Raised only at startup, and it lives for that boot. The condition is
+   * "the previous run ended badly", which stays true for as long as it is
+   * the most recent thing that happened; a clean boot starts an empty
+   * registry and so clears it without anything having to remember to.
+   */
+  | "session_interrupted";
 
 /**
  * The current set, as clients see it.
@@ -2028,6 +2051,17 @@ export type SessionEndReason =
    * Service shutdown
    */
   | { type: "service_shutdown" }
+  /**
+   * The daemon stopped without settling this session — a power cut, a
+   * crash, or a kill — and it was recovered from the store's snapshot at
+   * the next startup (issue #201).
+   *
+   * Distinct from [`Self::ServiceShutdown`] on purpose: that one is an
+   * orderly exit that settled the session itself, and this one is the
+   * record that something took the daemon out from under a child mid-play.
+   * The duration is what the last checkpoint saw, so it is a lower bound.
+   */
+  | { type: "interrupted" }
   /**
    * Launch failed
    */

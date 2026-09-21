@@ -163,14 +163,62 @@ pub trait Store: Send + Sync {
     fn get_all_usage_for_date(&self, date: NaiveDate) -> StoreResult<Vec<(EntryId, Duration)>>;
 }
 
-/// State snapshot for crash recovery
+/// The checkpoint format this build writes and understands (issue #201).
+///
+/// **Bump this whenever [`StateSnapshot`] or [`SessionSnapshot`] changes shape
+/// *or meaning*.** A checkpoint is written by one build and read by the next
+/// one to start, which across an upgrade is a different build — and the reader
+/// has no other way to tell that the `billable` it is about to charge a child
+/// for was measured by rules it no longer uses.
+///
+/// Meaning matters as much as shape here, and is the easier one to miss: a
+/// field added with `#[serde(default)]` deserializes happily out of an older
+/// row and bills whatever the default happens to be.
+///
+/// A mismatch is **dropped, not migrated** — see
+/// `CoreEngine::recover_interrupted_session`. That costs at most one
+/// interrupted session's time, once, on the boot after an upgrade, and buys
+/// never having to keep migration code for a row whose whole lifetime is
+/// measured in seconds.
+pub const SNAPSHOT_FORMAT: u32 = 1;
+
+/// State snapshot for crash recovery (issue #201).
+///
+/// Written while a session runs and cleared when it settles, so the presence of
+/// an `active_session` at startup *is* the signal that the previous run never
+/// got to settle one — a power cut, a crash, or a kill.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateSnapshot {
-    /// Timestamp of snapshot
+    /// The [`SNAPSHOT_FORMAT`] the writer was built with.
+    ///
+    /// `#[serde(default)]` so a row from before this field existed reads as 0,
+    /// which matches no format and is therefore dropped — which is the wanted
+    /// behaviour, not a special case.
+    #[serde(default)]
+    pub version: u32,
+
+    /// When this snapshot was taken. For a recovered session this is the last
+    /// moment the daemon is known to have been alive, and so the end of what
+    /// can honestly be charged.
     pub timestamp: DateTime<Local>,
 
     /// Active session info (if any)
     pub active_session: Option<SessionSnapshot>,
+}
+
+impl StateSnapshot {
+    /// Stamp a snapshot with the format this build writes.
+    ///
+    /// The only way a writer should build one: a struct literal would let a
+    /// caller spell `version` themselves, and the one thing that field must
+    /// never be is whatever someone typed.
+    pub fn new(timestamp: DateTime<Local>, active_session: Option<SessionSnapshot>) -> Self {
+        Self {
+            version: SNAPSHOT_FORMAT,
+            timestamp,
+            active_session,
+        }
+    }
 }
 
 /// Snapshot of an active session
@@ -179,6 +227,104 @@ pub struct SessionSnapshot {
     pub session_id: SessionId,
     pub entry_id: EntryId,
     pub started_at: DateTime<Local>,
-    pub deadline: DateTime<Local>,
+    /// Wall-clock deadline. `None` for an unlimited session.
+    pub deadline: Option<DateTime<Local>>,
     pub warnings_issued: Vec<u64>,
+
+    /// What this session had billed as of [`StateSnapshot::timestamp`].
+    ///
+    /// Carried rather than re-derived, because the clock that measures it does
+    /// not survive what this snapshot exists for. Billing runs on
+    /// `CLOCK_MONOTONIC` — it excludes suspend (issue #155) and the spinner
+    /// before the activity's window appears (issue #135) — and a reboot resets
+    /// it. The wall clock survives but answers a different question, and the
+    /// gap between the two is exactly the time a tamperer controls by choosing
+    /// how long to leave the device off.
+    pub billable: Duration,
+}
+
+#[cfg(test)]
+mod snapshot_format_tests {
+    use super::*;
+
+    /// A timezone- and value-independent description of a JSON document:
+    /// every key, nested, with what kind of thing it holds.
+    ///
+    /// Comparing serialized *values* would pin the local timezone offset into
+    /// the expectation and fail on any machine that is not this one. What has
+    /// to be pinned is the shape, which is exactly what a reader of an older
+    /// row depends on.
+    fn shape(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Null => "null".into(),
+            serde_json::Value::Bool(_) => "bool".into(),
+            serde_json::Value::Number(_) => "number".into(),
+            serde_json::Value::String(_) => "string".into(),
+            serde_json::Value::Array(items) => match items.first() {
+                Some(first) => format!("[{}]", shape(first)),
+                None => "[]".into(),
+            },
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<_> = map.iter().collect();
+                keys.sort_by_key(|(k, _)| k.as_str());
+                let inner: Vec<String> = keys
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}:{}", shape(v)))
+                    .collect();
+                format!("{{{}}}", inner.join(","))
+            }
+        }
+    }
+
+    /// The tripwire for [`SNAPSHOT_FORMAT`].
+    ///
+    /// Every other test round-trips a snapshot through one build, so they all
+    /// agree with themselves no matter what the shape is — change a field and
+    /// forget to bump the format, and the whole suite still passes while a
+    /// device silently bills a child from a row it no longer understands.
+    ///
+    /// This pins the on-disk shape of format 1 against a literal, so the
+    /// forgetting is what fails. It cannot catch a change of *meaning* that
+    /// leaves the shape alone (`billable` starting to include the launch
+    /// spinner, say) — nothing can — so the reminder to think about that is in
+    /// the failure message rather than in the assertion.
+    #[test]
+    fn the_current_format_has_the_shape_it_has_always_had() {
+        // Every field populated: a `None` or an empty `Vec` would hide the
+        // shape of what it holds, which is the half most likely to change.
+        let snapshot = StateSnapshot::new(
+            lunchbox_util::now(),
+            Some(SessionSnapshot {
+                session_id: SessionId::new(),
+                entry_id: EntryId::new("an-entry"),
+                started_at: lunchbox_util::now(),
+                deadline: Some(lunchbox_util::now()),
+                warnings_issued: vec![300, 60],
+                billable: Duration::from_secs(90),
+            }),
+        );
+
+        let expected = "{active_session:{billable:{nanos:number,secs:number},\
+                        deadline:string,entry_id:string,session_id:string,\
+                        started_at:string,warnings_issued:[number]},\
+                        timestamp:string,version:number}";
+        let actual = shape(&serde_json::to_value(&snapshot).expect("serializes"));
+
+        assert_eq!(
+            actual, expected,
+            "\n\nThe session checkpoint's on-disk shape changed.\n\
+             If that was deliberate: bump SNAPSHOT_FORMAT (currently {SNAPSHOT_FORMAT}) so a \
+             device reading a row written by the previous build drops it instead of billing a \
+             child from it, then update this literal.\n\
+             Bump it for a change of *meaning* too — a field whose type is unchanged but whose \
+             value now means something else will not trip this test.\n"
+        );
+
+        assert_eq!(
+            SNAPSHOT_FORMAT, 1,
+            "SNAPSHOT_FORMAT moved but the shape above did not. If the format was bumped for a \
+             change of meaning, update this number and say so; if it was bumped by accident, put \
+             it back."
+        );
+    }
 }
