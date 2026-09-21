@@ -965,6 +965,7 @@ impl LauncherField {
 
     /// Move the row to `target`, easing unless told not to.
     fn scroll_to(&self, target: f64, animate: bool) {
+        self.stop_kinetic();
         if animate {
             self.animate_scroll_to(target);
             return;
@@ -972,6 +973,26 @@ impl LauncherField {
         let adj = self.imp().scroller.hadjustment();
         let upper = (adj.upper() - adj.page_size()).max(0.0);
         adj.set_value(target.clamp(0.0, upper));
+    }
+
+    /// Cut short any inertial scroll still running under a touch drag.
+    ///
+    /// Reported from the device: tap a chevron while the row is still coasting
+    /// from a swipe and it goes where the chevron asked, then snaps back to
+    /// wherever the coast was headed. Two things were driving the same
+    /// adjustment — this widget's own eased scroll, and GTK's deceleration —
+    /// and the one with the longer run won.
+    ///
+    /// Turning kinetic scrolling off is how a `GtkScrolledWindow` is asked to
+    /// abandon a deceleration in flight; turning it straight back on leaves
+    /// the next swipe exactly as it was. There is no call that says only
+    /// "stop".
+    fn stop_kinetic(&self) {
+        let scroller = &self.imp().scroller;
+        if scroller.is_kinetic_scrolling() {
+            scroller.set_kinetic_scrolling(false);
+            scroller.set_kinetic_scrolling(true);
+        }
     }
 
     /// Ease the row to `target` instead of teleporting there (#208 review).
