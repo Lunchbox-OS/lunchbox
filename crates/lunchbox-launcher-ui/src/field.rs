@@ -230,6 +230,11 @@ mod imp {
         /// size it has not seen means the layout on screen is for some other
         /// screen. See `size_allocate`.
         pub laid_out: Cell<(i32, i32)>,
+        /// Set when a snapshot arrived before the field had been given any
+        /// room, so the layout it wants has not been worked out yet. The next
+        /// allocation builds it, whether or not the size has changed since.
+        /// See `rebuild`.
+        pub pending_layout: Cell<bool>,
         /// The snapshot the field is currently drawing, kept so a change of
         /// scale can redraw it without waiting for the daemon to say anything
         /// new. The launcher is fullscreen on an output whose size it learns
@@ -259,6 +264,7 @@ mod imp {
                 selection_active: Cell::new(false),
                 scroll_generation: Cell::new(0),
                 laid_out: Cell::new((0, 0)),
+                pending_layout: Cell::new(false),
                 last_state: RefCell::new((Vec::new(), Vec::new())),
             }
         }
@@ -466,7 +472,12 @@ mod imp {
                 child = widget.next_sibling();
             }
 
-            if self.laid_out.replace((width, height)) == (width, height) {
+            let resized = self.laid_out.replace((width, height)) != (width, height);
+            // The pending flag matters on its own: a field that was handed a
+            // snapshot while it had no room comes back to the *same* size it
+            // was allocated before it was hidden, and a size that has not
+            // changed would otherwise be taken as a layout that is still good.
+            if !resized && !self.pending_layout.get() {
                 return;
             }
             // Not from inside an allocation: rebuilding here would be changing
@@ -541,6 +552,25 @@ impl LauncherField {
 
     fn rebuild(&self, entries: Vec<EntryView>, groups: Vec<GroupView>) {
         let imp = self.imp();
+
+        // A layout is the answer to "how much room is there", so there is no
+        // answer at all until the field has been given some. The launcher is
+        // fullscreen on an output whose size arrives from the compositor after
+        // the window is mapped, and the daemon's first snapshot can easily
+        // beat it — laid out against nothing, every category takes a column of
+        // its own and each is stretched the full height of a screen nobody has
+        // measured. That is the "compartments start out at full height" the
+        // device keeps reporting: not a slow layout, a layout for no screen.
+        //
+        // So hold the snapshot instead of drawing that. `last_state` already
+        // has it, and the first allocation builds it — showing nothing for the
+        // frame before is honest, where showing the wrong shape is not.
+        if self.width() <= 0 || self.height() <= 0 {
+            imp.pending_layout.set(true);
+            return;
+        }
+        imp.pending_layout.set(false);
+
         let scale = theme::scale_for(self.width(), self.height());
         imp.scale.set(scale);
 

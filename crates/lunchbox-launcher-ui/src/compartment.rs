@@ -415,9 +415,12 @@ pub struct Budget {
 /// floor, which not every category has — so one row count fits every
 /// compartment in the field and they all agree on where their items start.
 pub fn budget(field_height: i32, scale: f64) -> Budget {
-    // Before the window knows its size there is nothing to measure against.
-    // The first layout after startup is always a re-layout (see the field's
-    // `last_state`), so this is the value for one frame at most.
+    // Before the window knows its size there is nothing to measure against,
+    // and the answer below — every category in a column of its own, each
+    // stretched the full height of the screen — is the one thing this must not
+    // be allowed to draw. The field no longer asks: `rebuild` holds the
+    // snapshot until it has been given room. This stays as the guard for a
+    // caller that forgets.
     if field_height <= 0 {
         return Budget {
             height: 0,
