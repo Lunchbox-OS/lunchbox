@@ -12,6 +12,8 @@ use gtk4::subclass::prelude::*;
 use lunchbox_api::{EntryView, ReasonCode};
 use std::cell::{Cell, RefCell};
 
+use lunchbox_widgets::{IconArt, resolve_icon};
+
 use crate::badge::Badge;
 use crate::theme;
 
@@ -33,7 +35,7 @@ fn name_leading(scale: f64) -> gtk4::pango::AttrList {
     //
     // It reaches Pango rather than the stylesheet because GTK4 CSS has no
     // `line-height`; it is the same token either way.
-    let px = theme::ITEM_FONT_PX as f64 * scale * theme::tokens::ITEM_LINE_HEIGHT;
+    let px = theme::ITEM_FONT_PX as f64 * scale * theme::tokens::TYPE_ITEM_LINE_HEIGHT;
     let attrs = gtk4::pango::AttrList::new();
     attrs.insert(gtk4::pango::AttrInt::new_line_height_absolute(
         (px * gtk4::pango::SCALE as f64).round() as i32,
@@ -170,7 +172,7 @@ mod imp {
 
     pub struct LauncherItem {
         pub entry: RefCell<Option<EntryView>>,
-        pub art: super::IconArt,
+        pub art: IconArt,
         pub label: gtk4::Label,
         pub badge_slot: crate::offset::OffsetBin,
         /// Whether a press should launch. Kept beside the entry rather than
@@ -186,7 +188,7 @@ mod imp {
         fn default() -> Self {
             Self {
                 entry: RefCell::new(None),
-                art: super::IconArt::new(),
+                art: IconArt::new(),
                 label: gtk4::Label::new(None),
                 badge_slot: crate::offset::OffsetBin::new(),
                 launchable: Cell::new(false),
@@ -353,8 +355,10 @@ impl LauncherItem {
 
         let slot = theme::px(theme::ART_SLOT, scale);
         imp.art.set_size_request(slot, slot);
-        imp.art
-            .set_icon(resolve_icon(&entry), theme::px(theme::ICON_PX, scale));
+        imp.art.set_icon(
+            resolve_icon(&entry, theme::ICON_PX),
+            theme::px(theme::ICON_PX, scale),
+        );
         imp.art.set_keyline(theme::KEYLINE * scale, scale);
 
         self.set_size_request(
@@ -431,231 +435,6 @@ impl LauncherItem {
 }
 
 impl Default for LauncherItem {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Work out what to draw for an entry: a file on disk, a theme icon, or the
-/// fallback for its kind.
-fn resolve_icon(entry: &EntryView) -> Option<gtk4::gdk::Paintable> {
-    let fallback = match entry.kind_tag {
-        lunchbox_api::EntryKindTag::Vm => "computer",
-        lunchbox_api::EntryKindTag::Media => "video-x-generic",
-        lunchbox_api::EntryKindTag::Retroarch => "applications-games",
-        lunchbox_api::EntryKindTag::Ebook => "application-epub+zip",
-        lunchbox_api::EntryKindTag::Custom => "applications-other",
-        _ => "application-x-executable",
-    };
-
-    let display = gtk4::gdk::Display::default()?;
-
-    if let Some(icon_ref) = &entry.icon_ref {
-        let expanded = if let Some(rest) = icon_ref.strip_prefix("~/") {
-            dirs::home_dir()
-                .map(|h| h.join(rest).to_string_lossy().into_owned())
-                .unwrap_or_else(|| icon_ref.clone())
-        } else {
-            icon_ref.clone()
-        };
-
-        let path = std::path::Path::new(&expanded);
-        if path.is_file()
-            && let Ok(texture) = gtk4::gdk::Texture::from_filename(path)
-        {
-            return Some(texture.upcast());
-        }
-
-        let theme = gtk4::IconTheme::for_display(&display);
-        if theme.has_icon(icon_ref) {
-            return Some(lookup(&theme, icon_ref).upcast());
-        }
-    }
-
-    Some(lookup(&gtk4::IconTheme::for_display(&display), fallback).upcast())
-}
-
-fn lookup(theme: &gtk4::IconTheme, name: &str) -> gtk4::IconPaintable {
-    theme.lookup_icon(
-        name,
-        &[],
-        theme::ICON_PX,
-        1,
-        gtk4::TextDirection::None,
-        gtk4::IconLookupFlags::empty(),
-    )
-}
-
-// ---------------------------------------------------------------- the art
-
-mod art_imp {
-    use super::*;
-
-    #[derive(Default)]
-    pub struct IconArt {
-        pub paintable: RefCell<Option<gtk4::gdk::Paintable>>,
-        pub icon_px: Cell<i32>,
-        pub keyline: Cell<f64>,
-        /// The UI scale, so the rise and the offset shadow grow with
-        /// everything else rather than shrinking on a large output.
-        pub ui_scale: Cell<f64>,
-        /// 0.0 at rest, 1.0 at the top of the press. Drives scale, rise and
-        /// the offset ink shadow together.
-        pub lift: Cell<f64>,
-    }
-
-    #[glib::object_subclass]
-    impl ObjectSubclass for IconArt {
-        const NAME: &'static str = "LunchboxIconArt";
-        type Type = super::IconArt;
-        type ParentType = gtk4::Widget;
-    }
-
-    impl ObjectImpl for IconArt {}
-
-    impl WidgetImpl for IconArt {
-        /// The icon with an ink keyline traced around its silhouette.
-        ///
-        /// The keyline is the icon drawn eight times in solid ink on a ring
-        /// around the real position, with the icon itself on top — a dilation
-        /// of the alpha channel, done with GSK colour-matrix nodes so it works
-        /// on any paintable (theme SVG, PNG on disk, pixel art) without
-        /// touching pixels. The branding brief offers four `drop-shadow`
-        /// filters instead; eight offsets are used because four give a
-        /// plus-shaped keyline that visibly corners on round icons, and the
-        /// cost — nine draws of a 64 px icon on a screen that only redraws when
-        /// the policy changes — is not worth saving.
-        ///
-        /// An opaque icon (a JPEG, a baked background) traces its own
-        /// rectangle, which is fine: it reads as a framed tile.
-        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
-            let obj = self.obj();
-            let borrowed = self.paintable.borrow();
-            let Some(paintable) = borrowed.as_ref() else {
-                return;
-            };
-
-            let w = obj.width() as f32;
-            let h = obj.height() as f32;
-            let size = self.icon_px.get() as f32;
-            if w <= 0.0 || h <= 0.0 || size <= 0.0 {
-                return;
-            }
-
-            let lift = self.lift.get() as f32;
-            let ui = self.ui_scale.get().max(0.01) as f32;
-            // Scale about the centre, then rise. Both peak at the top of the
-            // press and are zero at rest, so the resting path is unchanged.
-            let scale = 1.0 + 0.12 * lift;
-            let rise = 4.0 * ui * lift;
-
-            let drawn = size * scale;
-            let x = (w - drawn) / 2.0;
-            let y = (h - drawn) / 2.0 - rise;
-
-            let ink = gtk4::graphene::Vec4::new(
-                theme::INK_RGB.0 as f32,
-                theme::INK_RGB.1 as f32,
-                theme::INK_RGB.2 as f32,
-                0.0,
-            );
-            // All zeros but the alpha passthrough: every pixel becomes ink at
-            // its own alpha, i.e. a solid silhouette.
-            let mut m = [0.0f32; 16];
-            m[15] = 1.0;
-            let silhouette = gtk4::graphene::Matrix::from_float(m);
-
-            // The offset ink shadow under a pressed icon (5 x 6 px).
-            if lift > 0.0 {
-                snapshot.save();
-                snapshot.translate(&gtk4::graphene::Point::new(
-                    x + 5.0 * ui * lift,
-                    y + 6.0 * ui * lift,
-                ));
-                snapshot.push_color_matrix(&silhouette, &ink);
-                paintable.snapshot(snapshot, drawn as f64, drawn as f64);
-                snapshot.pop();
-                snapshot.restore();
-            }
-
-            let r = self.keyline.get() as f32;
-            if r > 0.0 {
-                // Eight unit vectors: the four axes and the four diagonals,
-                // the latter at 1/sqrt(2) so every offset is the same distance
-                // from the centre and the keyline comes out round.
-                const D: f32 = std::f32::consts::FRAC_1_SQRT_2;
-                const DIRS: [(f32, f32); 8] = [
-                    (1.0, 0.0),
-                    (-1.0, 0.0),
-                    (0.0, 1.0),
-                    (0.0, -1.0),
-                    (D, D),
-                    (-D, D),
-                    (D, -D),
-                    (-D, -D),
-                ];
-                for (dx, dy) in DIRS {
-                    snapshot.save();
-                    snapshot.translate(&gtk4::graphene::Point::new(x + dx * r, y + dy * r));
-                    snapshot.push_color_matrix(&silhouette, &ink);
-                    paintable.snapshot(snapshot, drawn as f64, drawn as f64);
-                    snapshot.pop();
-                    snapshot.restore();
-                }
-            }
-
-            snapshot.save();
-            snapshot.translate(&gtk4::graphene::Point::new(x, y));
-            paintable.snapshot(snapshot, drawn as f64, drawn as f64);
-            snapshot.restore();
-        }
-    }
-}
-
-glib::wrapper! {
-    /// The icon slot: paints the icon and the ink keyline around it.
-    pub struct IconArt(ObjectSubclass<art_imp::IconArt>)
-        @extends gtk4::Widget,
-        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
-}
-
-impl IconArt {
-    pub fn new() -> Self {
-        glib::Object::builder().build()
-    }
-
-    pub fn set_icon(&self, paintable: Option<gtk4::gdk::Paintable>, icon_px: i32) {
-        *self.imp().paintable.borrow_mut() = paintable;
-        self.imp().icon_px.set(icon_px);
-        self.queue_draw();
-    }
-
-    pub fn set_keyline(&self, radius: f64, ui_scale: f64) {
-        self.imp().keyline.set(radius);
-        self.imp().ui_scale.set(ui_scale);
-        self.queue_draw();
-    }
-
-    /// Run the press animation once: out to the top of the lift, then back.
-    fn lift(&self) {
-        let start = std::time::Instant::now();
-        self.add_tick_callback(move |art, _| {
-            let t = start.elapsed().as_millis() as f64 / PRESS_MS as f64;
-            if t >= 1.0 {
-                art.imp().lift.set(0.0);
-                art.queue_draw();
-                return glib::ControlFlow::Break;
-            }
-            // Out and back within the 120 ms, so the icon is home again by the
-            // time the activity's own window takes the screen.
-            art.imp().lift.set((t * std::f64::consts::PI).sin());
-            art.queue_draw();
-            glib::ControlFlow::Continue
-        });
-    }
-}
-
-impl Default for IconArt {
     fn default() -> Self {
         Self::new()
     }

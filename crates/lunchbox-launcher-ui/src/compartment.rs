@@ -24,7 +24,7 @@ use crate::theme;
 /// The concept draws it a shade larger than the type beside it, so it reads as
 /// a picture rather than as one more glyph in the line. Derived from the
 /// footer's own size rather than written down, so the two move together.
-const FLOOR_CLOCK_PX: i32 = theme::tokens::FOOTER_FONT_PX + 2;
+const FLOOR_CLOCK_PX: i32 = theme::tokens::TYPE_FOOTER_SIZE + 2;
 
 /// Vertical gap between items in a stack, unscaled.
 ///

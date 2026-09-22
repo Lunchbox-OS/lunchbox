@@ -380,11 +380,13 @@ If connection to service is lost:
 ## Styling
 
 Everything visual comes from `assets/branding/tokens.json`, the hand-off from
-the design canvas. `build.rs` turns it into constants that `src/theme.rs`
-includes, and the stylesheet reaches the same table through `@name@`
-placeholders. **There is no second copy to keep in step**: change a colour, a
-radius or a type size in the token file and it changes here, or the build fails
-saying which token the stylesheet wanted and the design file does not define.
+the design canvas. [`lunchbox-branding`](../lunchbox-branding/README.md) turns
+it into constants that `src/theme.rs` names, and the stylesheet reaches the same
+table through `@name@` placeholders. **There is no second copy to keep in
+step**: change a colour, a radius or a type size in the token file and it
+changes here, or the build fails saying which token the stylesheet wanted and
+the design file does not define. The HUD wears the same tokens through the same
+crate (issue #209), which is why the codegen is not in this one.
 
 Generated at build time rather than committed, unlike the wire codegen: nothing
 here leaves Rust, so there is no artifact to go stale and no drift test to need.
