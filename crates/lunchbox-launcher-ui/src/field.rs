@@ -230,6 +230,11 @@ mod imp {
         /// size it has not seen means the layout on screen is for some other
         /// screen. See `size_allocate`.
         pub laid_out: Cell<(i32, i32)>,
+        /// Set when a snapshot arrived before the field had been given any
+        /// room, so the layout it wants has not been worked out yet. The next
+        /// allocation builds it, whether or not the size has changed since.
+        /// See `rebuild`.
+        pub pending_layout: Cell<bool>,
         /// The snapshot the field is currently drawing, kept so a change of
         /// scale can redraw it without waiting for the daemon to say anything
         /// new. The launcher is fullscreen on an output whose size it learns
@@ -259,6 +264,7 @@ mod imp {
                 selection_active: Cell::new(false),
                 scroll_generation: Cell::new(0),
                 laid_out: Cell::new((0, 0)),
+                pending_layout: Cell::new(false),
                 last_state: RefCell::new((Vec::new(), Vec::new())),
             }
         }
@@ -275,7 +281,8 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
-            obj.set_layout_manager(Some(gtk4::BinLayout::new()));
+            // No layout manager: the field lays its own children out. See
+            // `WidgetImpl::measure` for why it has to, and what it costs.
             obj.add_css_class("lb-field");
             // Claim the space wherever it is put. In the child's shell the
             // field is a stack page and gets the window either way; in
@@ -385,6 +392,50 @@ mod imp {
     }
 
     impl WidgetImpl for LauncherField {
+        /// Measure as a `GtkBinLayout` would: the largest of the children.
+        ///
+        /// The field used to *be* a `GtkBinLayout` and does this by hand now,
+        /// for one reason. A widget that has a layout manager never has its
+        /// `size_allocate` called — `gtk_widget_allocate` hands the allocation
+        /// to the manager *instead of* the vfunc — so the override below,
+        /// which is the only place the field can learn how much room it has,
+        /// was dead code from the day it was written. It was reported fixed
+        /// and the compartments went on coming up full height, because
+        /// nothing had ever run.
+        ///
+        /// Nothing else can stand in for it. GTK4 has no `size-allocate`
+        /// signal, and a widget has no `width`/`height` property to watch; the
+        /// allocation is delivered to the layout manager or to this vfunc, and
+        /// to nowhere else. Fifteen lines of bin layout is the price of being
+        /// told.
+        fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let mut minimum = 0;
+            let mut natural = 0;
+            // Carried through the way the bin layout carries them, even though
+            // nothing in the field is baseline-aligned today: a measure that
+            // quietly answers "no baseline" is the kind of difference that
+            // turns up later as a widget sitting a pixel out of line.
+            let mut minimum_baseline = -1;
+            let mut natural_baseline = -1;
+            let mut child = self.obj().first_child();
+            while let Some(widget) = child {
+                if widget.should_layout() {
+                    let (min, nat, min_baseline, nat_baseline) =
+                        widget.measure(orientation, for_size);
+                    minimum = minimum.max(min);
+                    natural = natural.max(nat);
+                    if min_baseline > -1 {
+                        minimum_baseline = minimum_baseline.max(min_baseline);
+                    }
+                    if nat_baseline > -1 {
+                        natural_baseline = natural_baseline.max(nat_baseline);
+                    }
+                }
+                child = widget.next_sibling();
+            }
+            (minimum, natural, minimum_baseline, natural_baseline)
+        }
+
         /// Lay the field out again whenever the room it has changes.
         ///
         /// It used to be enough to watch the *scale* (`App::track_scale`),
@@ -405,9 +456,28 @@ mod imp {
         /// seconds the compacted layout appears" — the seconds were not the
         /// layout being slow, they were the daemon's first snapshot arriving
         /// before the compositor's first configure.
+        ///
+        /// This shipped once already and did nothing at all, because the field
+        /// had a `GtkBinLayout` — see `measure`.
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            self.parent_size_allocate(width, height, baseline);
-            if self.laid_out.replace((width, height)) == (width, height) {
+            // What the `GtkBinLayout` did: every child gets the whole
+            // allocation, and `allocate` applies its own alignment and margins
+            // within it. The children here are overlaid by design — the row's
+            // viewport, the two fades, the two chevron chips.
+            let mut child = self.obj().first_child();
+            while let Some(widget) = child {
+                if widget.should_layout() {
+                    widget.allocate(width, height, baseline, None);
+                }
+                child = widget.next_sibling();
+            }
+
+            let resized = self.laid_out.replace((width, height)) != (width, height);
+            // The pending flag matters on its own: a field that was handed a
+            // snapshot while it had no room comes back to the *same* size it
+            // was allocated before it was hidden, and a size that has not
+            // changed would otherwise be taken as a layout that is still good.
+            if !resized && !self.pending_layout.get() {
                 return;
             }
             // Not from inside an allocation: rebuilding here would be changing
@@ -482,6 +552,25 @@ impl LauncherField {
 
     fn rebuild(&self, entries: Vec<EntryView>, groups: Vec<GroupView>) {
         let imp = self.imp();
+
+        // A layout is the answer to "how much room is there", so there is no
+        // answer at all until the field has been given some. The launcher is
+        // fullscreen on an output whose size arrives from the compositor after
+        // the window is mapped, and the daemon's first snapshot can easily
+        // beat it — laid out against nothing, every category takes a column of
+        // its own and each is stretched the full height of a screen nobody has
+        // measured. That is the "compartments start out at full height" the
+        // device keeps reporting: not a slow layout, a layout for no screen.
+        //
+        // So hold the snapshot instead of drawing that. `last_state` already
+        // has it, and the first allocation builds it — showing nothing for the
+        // frame before is honest, where showing the wrong shape is not.
+        if self.width() <= 0 || self.height() <= 0 {
+            imp.pending_layout.set(true);
+            return;
+        }
+        imp.pending_layout.set(false);
+
         let scale = theme::scale_for(self.width(), self.height());
         imp.scale.set(scale);
 
@@ -965,11 +1054,11 @@ impl LauncherField {
 
     /// Move the row to `target`, easing unless told not to.
     fn scroll_to(&self, target: f64, animate: bool) {
-        self.stop_kinetic();
         if animate {
             self.animate_scroll_to(target);
             return;
         }
+        self.stop_kinetic();
         let adj = self.imp().scroller.hadjustment();
         let upper = (adj.upper() - adj.page_size()).max(0.0);
         adj.set_value(target.clamp(0.0, upper));
@@ -1004,6 +1093,13 @@ impl LauncherField {
     /// holding a direction runs the row along smoothly rather than stuttering
     /// between finished animations.
     fn animate_scroll_to(&self, target: f64) {
+        // Whatever asked for this scroll has replaced any coast still running,
+        // so the coast stops here rather than in `scroll_to`: `nudge` — the
+        // chevron chips, and the D-pad running off the end of the row — does
+        // not go through `scroll_to`, and a chip is exactly what gets tapped
+        // while the row is still moving. Cancelling in the one place every
+        // eased scroll passes through is what makes that impossible to miss.
+        self.stop_kinetic();
         let adj = self.imp().scroller.hadjustment();
         let upper = (adj.upper() - adj.page_size()).max(0.0);
         let target = target.clamp(0.0, upper);

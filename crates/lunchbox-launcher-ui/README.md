@@ -249,6 +249,23 @@ reflowing. **A size that should scale has to be written in `px` in that
 stylesheet** — anything left to the GTK theme keeps its logical value and so
 shrinks on screen as everything around it grows.
 
+The shape of the field is not a scaling, though: how tall a stack may be, how
+many categories share a column of the field and whether the cells squish are
+all answers to "how much room is there". So the field lays itself out again
+whenever its own allocation changes — on the compositor's first configure,
+when the HUD claims its strip, and when the device is docked to another
+display (issue #87).
+
+**A widget that has a layout manager never has its `size_allocate` called.**
+GTK4's `gtk_widget_allocate` hands the allocation to the manager *instead of*
+the vfunc, so `LauncherField` gave up its `GtkBinLayout` and lays its own
+children out (`imp::LauncherField::measure` / `size_allocate`) purely so that
+it is told. There is nothing to use in its place: GTK4 has no `size-allocate`
+signal and a widget has no `width`/`height` property to watch. This is worth
+knowing before adding a layout manager to any widget here that cares what size
+it is — the override goes quiet rather than failing, and no test without a
+display can tell.
+
 ### Launch Flow
 
 ```

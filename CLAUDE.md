@@ -26,6 +26,16 @@ Each of the Rust crates in <crates> contains a README.md that describes each at 
 
 <.github/workflows/ci.yml> and <docs/INSTALL.md> describes exact environment setup, especially if coming from Ubuntu 24.04 (lunchbox-launcher requires 26.04).
 
+Split your work into commits that can be reviewed one at a time. A commit
+should be one decision: it builds, it passes tests and lint on its own, and its
+message says what was wrong and why this is the fix, not what the diff already
+shows. A mechanical change that makes a later one possible belongs in its own
+commit, ahead of it, saying so — a reviewer should never have to separate a
+rename from a behaviour change by eye. One commit holding several unrelated
+fixes is the thing to avoid, however small each one is; the history note
+(below) is where they get told as one story. If you have already committed and
+the split is clearer in hindsight, rebuild the commits before you push.
+
 Historical prompts and design docs provided to agents are placed in <docs/ai/history>. Please refer there for history, and if this prompt is substantial, write it along with any relevant context (like the GitHub issue) to that directory as well.
 
 This project was called **Shepherd** until 2026-09-19. Notes in <docs/ai/history>

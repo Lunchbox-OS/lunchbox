@@ -634,19 +634,30 @@ impl LauncherApp {
         };
 
         let apply = Rc::new(apply);
-        for property in ["default-width", "default-height"] {
-            let apply = apply.clone();
-            window.connect_notify_local(Some(property), move |win, _| {
-                apply(win.width(), win.height());
-            });
-        }
-        let apply_on_map = apply.clone();
-        window.connect_map(move |win| {
-            // The size is still the pre-fullscreen default at map time on some
-            // compositors, so ask again once the frame has settled.
-            let win = win.clone();
-            let apply = apply_on_map.clone();
-            glib::idle_add_local_once(move || apply(win.width(), win.height()));
+
+        // The compositor's size arrives on the *surface*, which is the only
+        // thing that reliably reports it. `default-width` and `default-height`
+        // are what the window would be if it were not fullscreen, so they do
+        // not follow the screen and never notify; asking once from an idle
+        // after `map` is a race, and losing it was visible here — the
+        // stylesheet was built for a window of 0x0 and, with nothing left to
+        // notify it, stayed that way for the rest of the session.
+        //
+        // The size is read off the window rather than the surface so the value
+        // is the one the widgets are laid out in. Docking to another display
+        // (issue #87) comes through the same notification.
+        window.connect_realize(move |win| {
+            let Some(surface) = win.surface() else {
+                return;
+            };
+            apply(win.width(), win.height());
+            for property in ["width", "height"] {
+                let apply = apply.clone();
+                let win = win.clone();
+                surface.connect_notify_local(Some(property), move |_, _| {
+                    apply(win.width(), win.height());
+                });
+            }
         });
     }
 
