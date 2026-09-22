@@ -17,6 +17,7 @@ members = [
     "crates/lunchboxd",
     "crates/lunchbox-state-proto",
     "crates/lunchbox-stated",
+    "crates/lunchbox-branding",
     "crates/lunchbox-widgets",
     "crates/lunchbox-launcher-ui",
     "crates/lunchbox-hud",
@@ -59,6 +60,7 @@ default-members = [
     "crates/lunchboxd",
     "crates/lunchbox-state-proto",
     "crates/lunchbox-stated",
+    "crates/lunchbox-branding",
     "crates/lunchbox-widgets",
     "crates/lunchbox-launcher-ui",
     "crates/lunchbox-hud",
@@ -111,6 +113,7 @@ lunchbox-bridge = { path = "crates/lunchbox-bridge" }
 lunchbox-wire-codegen = { path = "crates/lunchbox-wire-codegen" }
 lunchbox-config-wasm = { path = "crates/lunchbox-config-wasm" }
 lunchbox-lock = { path = "crates/lunchbox-lock" }
+lunchbox-branding = { path = "crates/lunchbox-branding" }
 lunchbox-widgets = { path = "crates/lunchbox-widgets" }
 
 # Serialization
