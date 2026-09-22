@@ -75,7 +75,15 @@ export function TransferTray() {
   );
 }
 
-function TransferRow({
+/**
+ * One transfer, with whatever it is waiting for somebody to do about it.
+ *
+ * Exported because the config editor's file picker shows the transfers it
+ * started itself (issue #186): a modal covers the tray, and a conflict that
+ * only the tray can answer would be a transfer that stops for no visible
+ * reason.
+ */
+export function TransferRow({
   transfer,
   onCancel,
   onReplace,

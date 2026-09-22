@@ -22,6 +22,7 @@ import type {
 } from "../model/config.generated";
 import { DraftTextField } from "./DraftTextField";
 import { KeyValueEditor } from "./KeyValueEditor";
+import { PathField } from "./PathField";
 import { StringListEditor } from "./StringListEditor";
 import { KIND_FIELD_DEFAULTS } from "../model/field-defaults.generated";
 import { KIND_HINTS, KIND_LABELS, blankKind, type KindTag } from "../model/kinds";
@@ -110,11 +111,11 @@ export function KindEditor({ kind, onChange }: Props) {
             onChange={(v) => patch({ command: v })}
             placeholder="/usr/bin/tuxmath"
           />
-          <DraftTextField
-            size="small"
+          <PathField
             label="Working directory (optional)"
             value={kind.cwd ?? ""}
             onChange={(v) => patch({ cwd: v || null })}
+            picks={{ kind: "directory", what: "a folder" }}
           />
         </>
       )}
@@ -173,14 +174,16 @@ export function KindEditor({ kind, onChange }: Props) {
 
       {kind.type === "media" && (
         <>
-          <DraftTextField
-            size="small"
+          <PathField
             label="Library"
             required
             value={kind.library}
             onChange={(v) => patch({ library: v })}
             placeholder="~/Media/films.toml"
             helperText="A library .toml, .m3u/.m3u8, or a YouTube playlist URL."
+            // Hidden shown from the start: the stock library lives at
+            // `~/.config/lunchbox/movies.toml`.
+            picks={{ kind: "file", what: "a library file", showHidden: true }}
           />
           <TextField
             select
@@ -312,14 +315,16 @@ export function KindEditor({ kind, onChange }: Props) {
 
       {kind.type === "retroarch" && (
         <>
-          <DraftTextField
-            size="small"
+          <PathField
             label="Content"
             required
             value={kind.content}
             onChange={(v) => patch({ content: v })}
             placeholder="~/Games/pokemon-firered.gba"
             helperText="The ROM or disc image. Absolute, or starting with ~/."
+            // "either", because a few cores load a directory rather than a
+            // file, and the device's own check agrees: `exists`, not `is_file`.
+            picks={{ kind: "either", what: "a ROM or disc image" }}
           />
           {/* Exactly one of core / core_path is required, so this is one
               choice with two spellings rather than two independent fields. */}
@@ -340,13 +345,16 @@ export function KindEditor({ kind, onChange }: Props) {
             <MenuItem value="path">By path</MenuItem>
           </TextField>
           {kind.core_path != null ? (
-            <DraftTextField
-              size="small"
+            <PathField
               label="Core path"
               required
               value={kind.core_path}
               onChange={(v) => patch({ core_path: v })}
               placeholder="/usr/lib/libretro/mgba_libretro.so"
+              // A downloaded core lives in `~/.config/retroarch/cores`; the
+              // packaged ones are outside the browsable roots entirely, which
+              // is what the field is still for.
+              picks={{ kind: "file", what: "a core", showHidden: true }}
             />
           ) : (
             <DraftTextField
@@ -405,14 +413,14 @@ export function KindEditor({ kind, onChange }: Props) {
 
       {kind.type === "ebook" && (
         <>
-          <DraftTextField
-            size="small"
+          <PathField
             label="Book"
             required
             value={kind.book}
             onChange={(v) => patch({ book: v })}
             placeholder="~/Books/the-hobbit.epub"
             helperText="EPUB, PDF, CBZ or DjVu. Absolute, or starting with ~/."
+            picks={{ kind: "file", what: "a book" }}
           />
           <TextField
             select

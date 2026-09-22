@@ -8,6 +8,7 @@ import DialogContent from "@mui/material/DialogContent";
 import DialogContentText from "@mui/material/DialogContentText";
 import DialogTitle from "@mui/material/DialogTitle";
 import TextField from "@mui/material/TextField";
+import type { SxProps, Theme } from "@mui/material/styles";
 
 /** Characters a name cannot contain, checked before the device says so. */
 const ILLEGAL = /[/\u0000]/;
@@ -19,6 +20,7 @@ export function NewFolderDialog({
   error,
   onCancel,
   onCreate,
+  sx,
 }: {
   open: boolean;
   /** Where it will be created, for the sentence. */
@@ -27,6 +29,13 @@ export function NewFolderDialog({
   error: string | null;
   onCancel: () => void;
   onCreate: (name: string) => void;
+  /**
+   * Passed to the dialog. Only the config editor's file picker needs it
+   * (issue #186): that dialog raises itself above the transfer tray, and a
+   * plain modal opened from inside it would otherwise be drawn underneath the
+   * thing that opened it.
+   */
+  sx?: SxProps<Theme>;
 }) {
   const [name, setName] = useState("");
   useEffect(() => {
@@ -37,7 +46,7 @@ export function NewFolderDialog({
   const ready = name.trim().length > 0 && !illegal && !busy;
 
   return (
-    <Dialog open={open} onClose={onCancel} fullWidth maxWidth="xs">
+    <Dialog open={open} onClose={onCancel} fullWidth maxWidth="xs" sx={sx}>
       <form
         onSubmit={(e) => {
           e.preventDefault();

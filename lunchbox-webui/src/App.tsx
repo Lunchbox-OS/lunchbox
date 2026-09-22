@@ -33,6 +33,7 @@ import { FilesPage } from "./pages/FilesPage";
 import { TransferTray } from "./files/TransferTray";
 import { UploadsProvider } from "./files/useUploads";
 import { DeviceConfigSource } from "./sources/DeviceConfigSource";
+import { DeviceFilePicker } from "./sources/DeviceFilePicker";
 
 // The config editor (src/config/), routed here since issue #185.
 //
@@ -127,11 +128,20 @@ function AppShell() {
           </Box>
         }
       >
-        <ConfigApp
-          source={deviceConfig}
-          autoOpen
-          onClose={() => setPage("dashboard")}
-        />
+        {/* The picker is the Files tab's tree in a dialog (issue #186), so it
+            is wired in out here where importing it is allowed. It is null on
+            a device serving no file routes, and the path fields then stay the
+            text fields they have always been. */}
+        <DeviceFilePicker>
+          {(picker) => (
+            <ConfigApp
+              source={deviceConfig}
+              autoOpen
+              onClose={() => setPage("dashboard")}
+              filePicker={picker ?? undefined}
+            />
+          )}
+        </DeviceFilePicker>
       </Suspense>
     );
   }
