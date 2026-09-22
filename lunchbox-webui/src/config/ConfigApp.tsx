@@ -41,6 +41,7 @@ import RedoIcon from "@mui/icons-material/Redo";
 import SaveIcon from "@mui/icons-material/Save";
 import UndoIcon from "@mui/icons-material/Undo";
 import { ConfigDocProvider, useConfigDoc } from "./doc/ConfigDocProvider";
+import { FilePickerProvider, type FilePicker } from "./pick/FilePicker";
 import type { Subject } from "./doc/patches";
 import { focusFor, type FocusRequest } from "./navigation";
 import type { ConfigSource } from "./sources/ConfigSource";
@@ -77,12 +78,20 @@ export interface ConfigAppProps {
    * the management UI, which mounts this over its own navigation.
    */
   onClose?: () => void;
+  /**
+   * How to choose a path that exists on the device (issue #186). Absent
+   * everywhere there is no device to browse — the standalone bundle, and every
+   * existing test — where the path fields stay plain text fields.
+   */
+  filePicker?: FilePicker;
 }
 
-export function ConfigApp(props: ConfigAppProps = {}) {
+export function ConfigApp({ filePicker, ...props }: ConfigAppProps = {}) {
   return (
     <ConfigDocProvider>
-      <ConfigShell {...props} />
+      <FilePickerProvider picker={filePicker ?? null}>
+        <ConfigShell {...props} />
+      </FilePickerProvider>
     </ConfigDocProvider>
   );
 }
