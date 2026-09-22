@@ -3,8 +3,11 @@
 **Date:** 2026-09-21
 **Issue:** <https://github.com/aarmea/lunchbox/issues/186>
 
-> Status: **investigated, not built.** This is the survey and the design
-> argument. Nothing in `lunchbox-webui` changed for it.
+> Status: **built**, on the same day. This is the survey and the design
+> argument, kept as it was written so a later reader can see what was weighed
+> and what was ruled out; what shipped, and the one thing the headless session
+> found that this did not anticipate, is
+> `2026-09-21 005 the-file-picker-as-built (#186).md`.
 
 ## The prompt
 
