@@ -11,6 +11,7 @@ mod mock;
 mod network;
 mod traits;
 mod volume;
+mod wifi;
 
 pub use brightness::*;
 pub use capabilities::*;
@@ -20,3 +21,4 @@ pub use mock::*;
 pub use network::*;
 pub use traits::*;
 pub use volume::*;
+pub use wifi::*;
