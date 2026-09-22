@@ -19,6 +19,7 @@ import type { PickRequest } from "../config/pick/FilePicker";
 const getFileRoots = vi.fn();
 const listDirectory = vi.fn();
 const uploadFile = vi.fn();
+const createDirectory = vi.fn();
 
 vi.mock("../api/files", async () => {
   const actual = await vi.importActual<typeof import("../api/files")>("../api/files");
@@ -28,6 +29,7 @@ vi.mock("../api/files", async () => {
     listDirectory: (root: string, path: string, maxPages?: number) =>
       listDirectory(root, path, maxPages),
     uploadFile: (...args: unknown[]) => uploadFile(...args),
+    createDirectory: (...args: unknown[]) => createDirectory(...args),
   };
 });
 
@@ -305,5 +307,74 @@ describe("putting the file there first", () => {
 
     await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(2));
     expect(uploadFile.mock.calls[1][3]).toEqual({ kind: "force" });
+  });
+});
+
+/**
+ * Making the folder the file is going into (issue #186).
+ *
+ * The same "somewhere that does not exist yet" problem as the upload: a ROM
+ * set with no `Roms` folder, save data with nowhere to live. Leaving the
+ * editor for the Files tab to make one, then coming back, is the round trip
+ * this picker exists to remove.
+ */
+describe("making a folder", () => {
+  const newFolder = () =>
+    screen.getByRole("button", { name: "New folder" }) as HTMLButtonElement;
+
+  it("needs somewhere to put it", async () => {
+    getFileRoots.mockResolvedValue(ROOTS);
+    library();
+    show({ kind: "directory", what: "a folder" });
+
+    expect(await screen.findByText("Books")).toBeTruthy();
+    expect(newFolder().disabled).toBe(true);
+
+    await userEvent.click(screen.getByText("Books"));
+    expect(newFolder().disabled).toBe(false);
+  });
+
+  it("creates it where the selection says, and selects it", async () => {
+    getFileRoots.mockResolvedValue(ROOTS);
+    library();
+    createDirectory.mockResolvedValue({});
+    const { onChoose } = show({ kind: "directory", what: "a folder" });
+
+    await userEvent.click(await screen.findByText("Books"));
+    await userEvent.click(newFolder());
+    await userEvent.type(await screen.findByRole("textbox", { name: "Name" }), "Comics");
+    // The listing the refresh will read back.
+    listDirectory.mockImplementation(async (root: string, path: string) =>
+      path === "Books"
+        ? listing(root, path, [folder("Comics"), file("the-hobbit.epub")])
+        : listing(root, path, [folder("Books")]),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(createDirectory).toHaveBeenCalledWith("home", "Books/Comics"));
+
+    // Selected rather than merely shown: for a field that wants a folder this
+    // is the answer, and one press finishes the job.
+    await waitFor(() => expect(useThis().disabled).toBe(false));
+    await userEvent.click(useThis());
+    expect(onChoose).toHaveBeenCalledWith("~/Books/Comics");
+  });
+
+  it("says what the device said when it refuses", async () => {
+    getFileRoots.mockResolvedValue(ROOTS);
+    library();
+    createDirectory.mockRejectedValue(
+      new ApiError(409, "conflict", "Something is already there"),
+    );
+    show({ kind: "directory", what: "a folder" });
+
+    await userEvent.click(await screen.findByText("Books"));
+    await userEvent.click(newFolder());
+    await userEvent.type(await screen.findByRole("textbox", { name: "Name" }), "Comics");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(
+      await screen.findByText("Something called that folder is already there."),
+    ).toBeTruthy();
   });
 });

@@ -65,6 +65,27 @@ one move.
 
 ![The uploaded book, selected, with its transfer in the dialog](2026-09-21-005-file-picker/uploaded-and-selected.png)
 
+## Making the folder it goes in
+
+Asked for right after the first round, and the same shape of problem as the
+upload: the place a file belongs does not exist yet — a `Roms` folder beside
+the books, somewhere for a game's save data. Leaving the editor for the Files
+tab to make one and coming back is the round trip this picker exists to
+remove.
+
+![A folder made from inside the picker, and selected](2026-09-21-005-file-picker/a-folder-made-on-the-spot.png)
+
+It reuses the Files tab's `NewFolderDialog` — the illegal-name check and the
+wording are already there — and aims at the same target the upload does. The
+new folder is *selected*, not merely shown: for a field that wants a folder
+that is the answer in one more press, and for one that wants a file it is
+where the upload now aims.
+
+The only new thing it needed was a way through the z-index: this dialog raises
+itself above the transfer tray, so a plain modal opened from inside it would be
+drawn underneath the thing that opened it. `NewFolderDialog` takes an `sx`, and
+the picker hands it one step higher again.
+
 ## What the headless session found that the tests could not
 
 The tray is fixed to the bottom-right corner at `theme.zIndex.snackbar`, which
@@ -86,6 +107,9 @@ the web UI"). The whole loop:
 4. **Save**, then `GET /api/v1/config` → `book = "~/Books/the-hobbit.epub"`.
 5. Reopen, **Upload** a file from the browsing computer → it appears in the
    tree, the transfer row says "Sent", and it is what is selected.
+6. On a `process` activity's **Working directory**, **New folder** inside
+   `Games` → `~/Games/Emerald saves` is created, selected, and **Use this**
+   puts exactly that in the field.
 
 One gotcha worth writing down: **`dev headless` boots
 `./config.example.toml`, so pressing Save in the dev editor edits the file in

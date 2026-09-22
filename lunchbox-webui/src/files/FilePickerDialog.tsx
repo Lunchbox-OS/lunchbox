@@ -37,12 +37,14 @@ import FolderIcon from "@mui/icons-material/Folder";
 import HomeIcon from "@mui/icons-material/Home";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import PlaceIcon from "@mui/icons-material/Place";
+import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import UsbIcon from "@mui/icons-material/Usb";
 import type { PickRequest } from "../config/pick/FilePicker";
 import { DEFAULT_MAX_PAGES } from "../api/files";
+import { NewFolderDialog } from "./dialogs";
 import { canWriteInto } from "./permissions";
-import { basename } from "./useFileActions";
+import { basename, describeWriteFailure, useFileActions } from "./useFileActions";
 import { ancestorKeys, configPathOf, locate, pickRefusal } from "./pick";
 import {
   buildRows,
@@ -91,6 +93,8 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
   // visible reason. A ref rather than state — `uploads.transfers` is what
   // changes, and it re-renders on its own.
   const mine = useRef<Set<string>>(new Set());
+  const actions = useFileActions(tree.forgetSubtree);
+  const [naming, setNaming] = useState(false);
 
   const rootList = useMemo(() => roots.data?.roots ?? [], [roots.data]);
 
@@ -232,6 +236,28 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
     mine.current.has(transferKey(t.rootId, t.dir, t.name)),
   );
 
+  // Somewhere to put it that does not exist yet — a `Roms` folder beside the
+  // books, an `Emerald` folder for a game's save data. Without this the only
+  // way to make one is to leave the editor for the Files tab and come back.
+  const create = (name: string) => {
+    if (!target) return;
+    const { rootId, dir } = target;
+    actions.newFolder.mutate(
+      { rootId, parent: dir, name },
+      {
+        onSuccess: () => {
+          setNaming(false);
+          actions.newFolder.reset();
+          tree.expand(nodeKey(rootId, dir));
+          // Selected, not just shown: for a field that wants a folder this is
+          // the answer, and for one that wants a file it is where the upload
+          // now aims.
+          tree.select(nodeKey(rootId, joinPath(dir, name)));
+        },
+      },
+    );
+  };
+
   return (
     <Dialog
       open
@@ -318,6 +344,24 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
           ))}
         </Box>
       )}
+      <NewFolderDialog
+        open={naming}
+        where={target?.label ?? ""}
+        busy={actions.newFolder.isPending}
+        error={
+          actions.newFolder.error
+            ? describeWriteFailure(actions.newFolder.error, "that folder")
+            : null
+        }
+        onCancel={() => {
+          setNaming(false);
+          actions.newFolder.reset();
+        }}
+        onCreate={create}
+        // Above this dialog, which is itself above the tray.
+        sx={{ zIndex: (theme) => theme.zIndex.snackbar + 2 }}
+      />
+
       {/* The file may not be on the device yet, which is the other half of
           why a policy points at something that is not there. The queue is the
           Files tab's — the editor renders inside `UploadsProvider` — so this
@@ -361,6 +405,22 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
                 onClick={() => fileInput.current?.click()}
               >
                 Upload
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip
+            title={
+              target ? `Make a folder inside ${target.label}` : "Choose where it goes first"
+            }
+          >
+            <span>
+              <Button
+                size="small"
+                startIcon={<CreateNewFolderIcon />}
+                disabled={!target}
+                onClick={() => setNaming(true)}
+              >
+                New folder
               </Button>
             </span>
           </Tooltip>
