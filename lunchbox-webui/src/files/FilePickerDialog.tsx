@@ -54,6 +54,7 @@ import {
   type Row,
 } from "./tree";
 import { describe, useDirectories, useFileRoots, useFilesRefresh } from "./useDirectories";
+import { TransferRow } from "./TransferTray";
 import { useFileTree } from "./useFileTree";
 import { useUploads } from "./useUploads";
 
@@ -61,6 +62,11 @@ export interface FilePickerDialogProps {
   request: PickRequest;
   onCancel: () => void;
   onChoose: (value: string) => void;
+}
+
+/** Identifies one of this dialog's own transfers among everybody's. */
+function transferKey(rootId: string, dir: string, name: string): string {
+  return `${nodeKey(rootId, dir)}\u0000${name}`;
 }
 
 /** Where an upload started from here would land. */
@@ -80,6 +86,11 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
   const [refused, setRefused] = useState<string | null>(null);
   // A single uploaded file to select once the device has it, or null.
   const arrival = useRef<{ rootId: string; dir: string; name: string } | null>(null);
+  // The transfers started from here, so the dialog can show them: it covers
+  // the tray, and a conflict nobody can answer is an upload that stops for no
+  // visible reason. A ref rather than state — `uploads.transfers` is what
+  // changes, and it re-renders on its own.
+  const mine = useRef<Set<string>>(new Set());
 
   const rootList = useMemo(() => roots.data?.roots ?? [], [roots.data]);
 
@@ -177,6 +188,9 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
 
   const send = (files: File[]) => {
     if (!target || files.length === 0) return;
+    for (const file of files) {
+      mine.current.add(transferKey(target.rootId, target.dir, file.name));
+    }
     const refused = uploads.start({
       rootId: target.rootId,
       dir: target.dir,
@@ -214,8 +228,21 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
     tree.select(nodeKey(waiting.rootId, joinPath(waiting.dir, waiting.name)));
   }, [uploads.transfers, tree]);
 
+  const ours = uploads.transfers.filter((t) =>
+    mine.current.has(transferKey(t.rootId, t.dir, t.name)),
+  );
+
   return (
-    <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
+    <Dialog
+      open
+      onClose={onCancel}
+      fullWidth
+      maxWidth="sm"
+      // Above the transfer tray, which is fixed to the same corner as this
+      // dialog's buttons and would otherwise cover "Use this" on a small
+      // screen. The transfers started here are shown inside instead.
+      sx={{ zIndex: (theme) => theme.zIndex.snackbar + 1 }}
+    >
       <DialogTitle>Choose {request.what}</DialogTitle>
       <DialogContent dividers sx={{ minHeight: 320 }}>
         {refused && (
@@ -277,6 +304,20 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
           </Box>
         )}
       </DialogContent>
+      {ours.length > 0 && (
+        <Box sx={{ borderTop: 1, borderColor: "divider", maxHeight: 160, overflow: "auto" }}>
+          {ours.map((transfer) => (
+            <TransferRow
+              key={transfer.id}
+              transfer={transfer}
+              onCancel={() => uploads.cancel(transfer.id)}
+              onReplace={() => uploads.replace(transfer.id)}
+              onRetry={() => uploads.retry(transfer.id)}
+              onDismiss={() => uploads.dismiss(transfer.id)}
+            />
+          ))}
+        </Box>
+      )}
       {/* The file may not be on the device yet, which is the other half of
           why a policy points at something that is not there. The queue is the
           Files tab's — the editor renders inside `UploadsProvider` — so this

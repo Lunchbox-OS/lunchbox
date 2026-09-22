@@ -10,7 +10,7 @@
  * tree.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { DirEntryInfo, Listing, RootsResponse } from "./types";
@@ -276,9 +276,34 @@ describe("putting the file there first", () => {
     finish({ path: "Books/redwall.epub", size: 4, etag: "4-1" });
 
     await waitFor(() => expect(uploadFile).toHaveBeenCalled());
-    expect(await screen.findByText("redwall.epub")).toBeTruthy();
+    // Scoped to the tree: the transfer's own row names it too.
+    expect(await within(screen.getByRole("tree")).findByText("redwall.epub")).toBeTruthy();
     await waitFor(() => expect(useThis().disabled).toBe(false));
     await userEvent.click(useThis());
     expect(onChoose).toHaveBeenLastCalledWith("~/Books/redwall.epub");
+  });
+
+  // The dialog sits above the tray, so a transfer that stops to ask a
+  // question has to ask it here or not at all.
+  it("asks about a clash inside the dialog, where the tray cannot be seen", async () => {
+    getFileRoots.mockResolvedValue(ROOTS);
+    library();
+    uploadFile.mockRejectedValueOnce(
+      new ApiError(412, "precondition_failed", "Something is already there"),
+    );
+    show({ kind: "file", what: "a book", start: "~/Books/the-hobbit.epub" });
+
+    expect(await screen.findByText("the-hobbit.epub")).toBeTruthy();
+    await userEvent.upload(
+      document.querySelector("input[type=file]") as HTMLInputElement,
+      new File(["abcd"], "the-hobbit.epub"),
+    );
+
+    const replace = await screen.findByRole("button", { name: "Replace" });
+    uploadFile.mockResolvedValueOnce({ path: "Books/the-hobbit.epub", size: 4, etag: "4-1" });
+    await userEvent.click(replace);
+
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(2));
+    expect(uploadFile.mock.calls[1][3]).toEqual({ kind: "force" });
   });
 });
