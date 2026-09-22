@@ -183,6 +183,7 @@ fn harness() -> Harness {
         last_audio_state: Arc::new(Mutex::new(None)),
         diagnostics: None,
         network: None,
+        wifi: None,
         web_listener: WebListenerHandle::default(),
         web_auth: None,
         admins: Default::default(),

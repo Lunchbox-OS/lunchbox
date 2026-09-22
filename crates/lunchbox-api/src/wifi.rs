@@ -244,10 +244,10 @@ pub struct WifiScanView {
 /// reason to distinguish them. Measured against NetworkManager 1.54.3 —
 /// association failures surface on the device's `StateChanged`, never on the
 /// active connection, which reports a generic disconnect for all of these.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum WifiJoinFailure {
+pub enum WifiJoinFailureKind {
     /// The key was refused. NetworkManager reason 7, `no-secrets`.
     ///
     /// With no secret agent in the kiosk session there is nothing to re-prompt,
@@ -268,11 +268,45 @@ pub enum WifiJoinFailure {
     /// The device may not write a profile: no polkit grant, and no custodian
     /// to borrow one from.
     NotAuthorized,
-    /// It was refused before NetworkManager saw it. Carries the reason.
-    Rejected(String),
-    /// Anything else, named as NetworkManager named it, so a log is useful
-    /// even for a case nobody anticipated.
-    Other(String),
+    /// It was refused before NetworkManager saw it.
+    Rejected,
+    /// Anything else. `detail` names it as NetworkManager named it, so a log
+    /// is useful even for a case nobody anticipated.
+    Other,
+}
+
+/// Why a join ended without a network, and — where there is one — the
+/// backend's own word for it.
+///
+/// A kind plus an optional detail rather than an enum carrying payloads. The
+/// payload-carrying shape has no Kotlin equivalent the generator can render,
+/// and this one is easier to switch on in both UIs anyway: a UI maps `kind` to
+/// a sentence a parent can act on, and shows `detail` only where it has
+/// nothing better to say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WifiJoinFailure {
+    pub kind: WifiJoinFailureKind,
+    /// The backend's own description, for
+    /// [`WifiJoinFailureKind::Rejected`] and
+    /// [`WifiJoinFailureKind::Other`]. `None` for the kinds whose meaning is
+    /// already in the kind.
+    pub detail: Option<String>,
+}
+
+impl WifiJoinFailure {
+    /// A failure whose kind says everything.
+    pub fn of(kind: WifiJoinFailureKind) -> Self {
+        Self { kind, detail: None }
+    }
+
+    /// A failure that needs the backend's own words.
+    pub fn detailed(kind: WifiJoinFailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: Some(detail.into()),
+        }
+    }
 }
 
 /// What the most recent join is doing.
@@ -773,7 +807,10 @@ mod tests {
             last_scan_age_s: Some(12),
             join: WifiJoinState::Failed {
                 ssid: "a network with a fairly long name".into(),
-                reason: WifiJoinFailure::Other("an unusually wordy reason".into()),
+                reason: WifiJoinFailure::detailed(
+                    WifiJoinFailureKind::Other,
+                    "an unusually wordy reason",
+                ),
             },
             can_configure: true,
         };

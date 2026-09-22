@@ -1959,6 +1959,40 @@ export type RetroarchSaveState =
   | "off";
 
 /**
+ * A saved profile, as a list of known networks shows it.
+ *
+ * **Never carries a secret.** There is no field for one, and no method
+ * returns one: a stored password is write-only from every management UI. A
+ * parent who has forgotten theirs re-types it; the device will not read it
+ * back to them, because the same call would read it back to anything else
+ * that could reach the API.
+ */
+export interface SavedWifiNetwork {
+  /**
+   * Whether this profile is the active one.
+   */
+  active: boolean;
+  /**
+   * Whether NetworkManager may join this on its own.
+   */
+  autoconnect: boolean;
+  /**
+   * Saved for a network that does not broadcast its name.
+   */
+  hidden: boolean;
+  /**
+   * Stable handle for [`connect`](WifiJoinRequest) and forget.
+   *
+   * NetworkManager's connection UUID, and not the SSID, because an SSID is
+   * not unique: this dev device carries two profiles for one printer's
+   * network, written by GNOME months apart with different security.
+   */
+  id: string;
+  security: WifiSecurity;
+  ssid: string;
+}
+
+/**
  * Full service state snapshot
  */
 export interface ServiceStateSnapshot {
@@ -2379,6 +2413,260 @@ export interface WebSessionInfo {
    */
   peer: string;
 }
+
+/**
+ * Why a join ended without a network, and — where there is one — the
+ * backend's own word for it.
+ *
+ * A kind plus an optional detail rather than an enum carrying payloads. The
+ * payload-carrying shape has no Kotlin equivalent the generator can render,
+ * and this one is easier to switch on in both UIs anyway: a UI maps `kind` to
+ * a sentence a parent can act on, and shows `detail` only where it has
+ * nothing better to say.
+ */
+export interface WifiJoinFailure {
+  /**
+   * The backend's own description, for
+   * [`WifiJoinFailureKind::Rejected`] and
+   * [`WifiJoinFailureKind::Other`]. `None` for the kinds whose meaning is
+   * already in the kind.
+   */
+  detail?: string | null;
+  kind: WifiJoinFailureKind;
+}
+
+/**
+ * Why a join ended without a network.
+ *
+ * Every variant is a distinct thing to *do* about it, which is the only
+ * reason to distinguish them. Measured against NetworkManager 1.54.3 —
+ * association failures surface on the device's `StateChanged`, never on the
+ * active connection, which reports a generic disconnect for all of these.
+ */
+export type WifiJoinFailureKind =
+  /**
+   * The key was refused. NetworkManager reason 7, `no-secrets`.
+   *
+   * With no secret agent in the kiosk session there is nothing to re-prompt,
+   * so a wrong key fails instead of hanging — which is what makes this
+   * reportable at all.
+   */
+  | "wrong_password"
+  /**
+   * No access point with that name answered. Reason 53, `ssid-not-found`.
+   * Out of range, switched off, or — for a network that does not broadcast
+   * — saved without `hidden` set.
+   */
+  | "not_found"
+  /**
+   * Associated, and then no address. Reason 5, `ip-config-unavailable`.
+   *
+   * The key was right and the radio link came up; DHCP did not answer.
+   * Distinct from [`Self::WrongPassword`] because the thing to check is the
+   * router, not the key — and a parent told "wrong password" here will
+   * retype a correct one until they give up.
+   */
+  | "no_address"
+  /**
+   * The device may not write a profile: no polkit grant, and no custodian
+   * to borrow one from.
+   */
+  | "not_authorized"
+  /**
+   * It was refused before NetworkManager saw it.
+   */
+  | "rejected"
+  /**
+   * Anything else. `detail` names it as NetworkManager named it, so a log
+   * is useful even for a case nobody anticipated.
+   */
+  | "other";
+
+/**
+ * Save a network, and maybe join it now.
+ *
+ * One request for both because they differ by one bool and every other field
+ * is shared — and because "remember this" and "get on it" are the same act
+ * from a parent's side, distinguished only by where they are standing.
+ */
+export interface WifiJoinRequest {
+  /**
+   * `true` joins now. `false` only remembers it — what the web leads with,
+   * because joining from a browser can cut off the browser.
+   */
+  connect: boolean;
+  /**
+   * Whether this network does not broadcast its name. Set from the manual
+   * form; a network picked from a scan was broadcasting by definition.
+   */
+  hidden?: boolean;
+  /**
+   * The key. `None` for [`WifiSecurity::Open`] and [`WifiSecurity::Owe`],
+   * which have none.
+   */
+  password?: string | null;
+  security: WifiSecurity;
+  ssid: string;
+}
+
+/**
+ * What the most recent join is doing.
+ */
+export type WifiJoinState =
+  /**
+   * None has been asked for since the daemon started.
+   */
+  | { state: "idle" }
+  /**
+   * Asked for, and not yet settled.
+   */
+  | {
+      state: "connecting";
+      ssid: string;
+    }
+  /**
+   * On the network.
+   */
+  | {
+      state: "connected";
+      ssid: string;
+    }
+  /**
+   * Over, without a network.
+   */
+  | {
+      state: "failed";
+      reason: WifiJoinFailure;
+      ssid: string;
+    };
+
+/**
+ * One network in a scan, aggregated across every access point announcing it.
+ *
+ * A home mesh puts the same SSID on three radios in two bands; a picker that
+ * listed each would ask a parent to choose between three identical rows. So
+ * entries are merged by (name, security) and the best signal wins.
+ *
+ * No BSSID, matching #182's stance on MAC addresses: it is not a fact anybody
+ * picking a network needs, and it identifies hardware.
+ */
+export interface WifiNetwork {
+  /**
+   * Whether this is the network the device is on right now.
+   */
+  active: boolean;
+  /**
+   * Which bands it was heard on, in GHz, ascending — `[2]`, `[5]`, or
+   * `[2, 5]` for a network on both.
+   */
+  bands_ghz: number[];
+  /**
+   * Whether a saved profile already exists for this network.
+   */
+  saved: boolean;
+  security: WifiSecurity;
+  /**
+   * Signal quality 0–100, the strongest among the access points announcing
+   * this network.
+   */
+  signal_percent: number;
+  /**
+   * The network's name. Always valid UTF-8 here: an SSID is up to 32
+   * arbitrary octets, and one that is not text cannot be shown in a picker
+   * or typed into the manual form, so it is left out of the scan entirely.
+   */
+  ssid: string;
+}
+
+/**
+ * Everything one poll of the wireless state returns.
+ *
+ * Scan list and join progress arrive together deliberately. The UI is already
+ * polling this to refresh signal strengths while a parent looks at the list;
+ * making the join's outcome ride along means no second timer, no second
+ * endpoint, and no window where the list has updated but the result has not.
+ */
+export interface WifiScanView {
+  /**
+   * Whether this device may write a profile at all.
+   *
+   * False on a device whose custodian holds no NetworkManager grant. The
+   * UIs use it to disable the forms up front and point at the remedy,
+   * rather than letting a parent type a password into a box that was never
+   * going to work. The matching Health diagnostic says the same thing in
+   * the place people look for problems.
+   */
+  can_configure: boolean;
+  /**
+   * What the most recent join is doing. [`WifiJoinState::Idle`] when none
+   * has been asked for since the daemon started.
+   */
+  join: WifiJoinState;
+  /**
+   * How long ago the last scan completed. `None` when no scan has run since
+   * boot.
+   *
+   * Seconds, and derived on the host, because NetworkManager reports this
+   * as a `CLOCK_BOOTTIME` reading that means nothing on the phone reading
+   * it.
+   */
+  last_scan_age_s?: number | null;
+  /**
+   * Networks in range, strongest first, capped at [`MAX_WIFI_NETWORKS`].
+   */
+  networks: WifiNetwork[];
+  /**
+   * Whether the radio is on. Reported, never changed — toggling it is out
+   * of scope, and a device switched off at the rfkill has to be fixed where
+   * it is.
+   */
+  radio_enabled: boolean;
+  /**
+   * Whether this device has a wireless adapter at all. Everything below is
+   * empty when it does not, and a UI says so rather than showing an empty
+   * list that looks like a failed scan.
+   */
+  supported: boolean;
+  /**
+   * Whether [`MAX_WIFI_NETWORKS`] hid anything.
+   */
+  truncated?: boolean;
+}
+
+/**
+ * How a network is protected.
+ *
+ * Derived from an access point's beacon flags, which is the only thing a scan
+ * can tell us. The mapping is measured against real beacons — see
+ * [`WifiSecurity::from_ap_flags`].
+ */
+export type WifiSecurity =
+  /**
+   * No protection at all. Joinable with no key.
+   */
+  | "open"
+  /**
+   * Enhanced Open (OWE). Encrypted, still no key to type.
+   */
+  | "owe"
+  /**
+   * WPA/WPA2 Personal. Also the right choice for a WPA2/WPA3 transition
+   * access point, because every card that can see one can join it this way.
+   */
+  | "wpa_psk"
+  /**
+   * WPA3 Personal (SAE).
+   */
+  | "sae"
+  /**
+   * 802.1X. Recognised so it can be shown as unsupported; see
+   * [`WifiSecurity::joinable`].
+   */
+  | "enterprise"
+  /**
+   * WEP. Recognised for the same reason, and it is not coming back.
+   */
+  | "wep";
 
 /**
  * The wireless network an interface is associated with.
