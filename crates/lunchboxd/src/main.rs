@@ -1725,6 +1725,11 @@ impl Service {
                     Arc::new(diagnostic_publisher.clone()) as Arc<dyn lunchbox_api::DiagnosticSink>
                 ),
                 network: Some(Arc::new(LinuxNetworkInfo::new()) as Arc<dyn NetworkInfoProvider>),
+                // Wired up once the NetworkManager backend lands (issue
+                // #194). Until then the methods answer "this device has no
+                // Wi-Fi", which is wrong but honest -- better than a form
+                // that accepts a password and drops it.
+                wifi: None,
                 web_listener: web_listener.clone(),
                 web_auth: web_auth.clone(),
             })

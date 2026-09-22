@@ -25,6 +25,7 @@ import type {
   LimitSubject,
   LoginRequestInfo,
   NetworkStatusView,
+  SavedWifiNetwork,
   ServiceStateSnapshot,
   SessionInfo,
   StopMode,
@@ -33,6 +34,8 @@ import type {
   VolumeInfo,
   WebAuthStatus,
   WebSessionInfo,
+  WifiJoinRequest,
+  WifiScanView,
   WindowAction,
   WindowInfo,
 } from "./wire-types.generated";
@@ -100,6 +103,12 @@ export type RpcMethod =
   | "logout"
   | "list_diagnostics"
   | "network_status"
+  | "wifi_scan"
+  | "wifi_networks"
+  | "wifi_saved_networks"
+  | "wifi_save"
+  | "wifi_connect"
+  | "wifi_forget"
   | "enter_admin_mode"
   | "exit_admin_mode"
   | "admin_idle_timeout"
@@ -260,6 +269,18 @@ export interface RpcParamsMap {
   "logout": Record<string, never>;
   "list_diagnostics": Record<string, never>;
   "network_status": Record<string, never>;
+  "wifi_scan": Record<string, never>;
+  "wifi_networks": Record<string, never>;
+  "wifi_saved_networks": Record<string, never>;
+  "wifi_save": {
+    request: WifiJoinRequest;
+  };
+  "wifi_connect": {
+    id: string;
+  };
+  "wifi_forget": {
+    id: string;
+  };
   "enter_admin_mode": Record<string, never>;
   "exit_admin_mode": Record<string, never>;
   "admin_idle_timeout": Record<string, never>;
@@ -342,6 +363,12 @@ export interface RpcResultMap {
   "logout": null;
   "list_diagnostics": DiagnosticSet;
   "network_status": NetworkStatusView;
+  "wifi_scan": null;
+  "wifi_networks": WifiScanView;
+  "wifi_saved_networks": SavedWifiNetwork[];
+  "wifi_save": SavedWifiNetwork;
+  "wifi_connect": null;
+  "wifi_forget": boolean;
   "enter_admin_mode": null;
   "exit_admin_mode": null;
   "admin_idle_timeout": boolean;

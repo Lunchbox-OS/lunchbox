@@ -271,6 +271,30 @@ object RpcParams {
     /** Params for `network_status`, which takes none. */
     fun networkStatus(): JsonObject = JsonObject(emptyMap())
 
+    /** Params for `wifi_scan`, which takes none. */
+    fun wifiScan(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `wifi_networks`, which takes none. */
+    fun wifiNetworks(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `wifi_saved_networks`, which takes none. */
+    fun wifiSavedNetworks(): JsonObject = JsonObject(emptyMap())
+
+    /** Params for `wifi_save`. */
+    fun wifiSave(request: WifiJoinRequest): JsonObject = buildJsonObject {
+        put("request", LunchboxJson.encodeToJsonElement(WifiJoinRequest.serializer(), request))
+    }
+
+    /** Params for `wifi_connect`. */
+    fun wifiConnect(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
+    /** Params for `wifi_forget`. */
+    fun wifiForget(id: String): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(id))
+    }
+
     /** Params for `enter_admin_mode`, which takes none. */
     fun enterAdminMode(): JsonObject = JsonObject(emptyMap())
 
