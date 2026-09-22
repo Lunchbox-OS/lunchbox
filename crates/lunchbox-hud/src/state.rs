@@ -7,6 +7,7 @@ use lunchbox_api::{
     HudOrientation, InternetStatusView, VolumeInfo, VolumeRestrictions, WarningSeverity,
 };
 use lunchbox_util::{EntryId, SessionId};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -185,6 +186,18 @@ pub struct SharedState {
     /// kiosk has nothing to switch between, and polling it would be pure cost.
     windows_tx: Arc<watch::Sender<Vec<lunchbox_api::WindowInfo>>>,
     windows_rx: watch::Receiver<Vec<lunchbox_api::WindowInfo>>,
+    /// Every entry the last snapshot carried, by id (issue #209).
+    ///
+    /// The bar shows the running activity's own icon, and an icon is not on any
+    /// session event — `SessionStarted` carries the label and the deadline, and
+    /// nothing else about the entry. It is on `EntryView`, which rides every
+    /// `StateChanged`, so the entries are kept as they arrive and the session's
+    /// is looked up by id. Kept rather than read at the moment the session
+    /// starts, because the two arrive in no guaranteed order and an icon that
+    /// appeared a beat after the name would be worse than one that was there
+    /// from the first frame.
+    entries_tx: Arc<watch::Sender<HashMap<EntryId, lunchbox_api::EntryView>>>,
+    entries_rx: watch::Receiver<HashMap<EntryId, lunchbox_api::EntryView>>,
 }
 
 impl SharedState {
@@ -199,6 +212,7 @@ impl SharedState {
         let (display_tx, display_rx) = watch::channel(None);
         let (admin_tx, admin_rx) = watch::channel(false);
         let (windows_tx, windows_rx) = watch::channel(Vec::new());
+        let (entries_tx, entries_rx) = watch::channel(HashMap::new());
 
         Self {
             session_tx: Arc::new(session_tx),
@@ -221,6 +235,8 @@ impl SharedState {
             admin_rx,
             windows_tx: Arc::new(windows_tx),
             windows_rx,
+            entries_tx: Arc::new(entries_tx),
+            entries_rx,
         }
     }
 
@@ -240,6 +256,19 @@ impl SharedState {
 
     pub fn set_windows(&self, windows: Vec<lunchbox_api::WindowInfo>) {
         let _ = self.windows_tx.send(windows);
+    }
+
+    /// The entry an id names, as of the last snapshot.
+    pub fn entry(&self, id: &EntryId) -> Option<lunchbox_api::EntryView> {
+        self.entries_rx.borrow().get(id).cloned()
+    }
+
+    pub fn set_entries(&self, entries: &[lunchbox_api::EntryView]) {
+        let by_id = entries
+            .iter()
+            .map(|entry| (entry.entry_id.clone(), entry.clone()))
+            .collect();
+        let _ = self.entries_tx.send(by_id);
     }
 
     /// Current external-display arrangement, if known.
@@ -522,6 +551,7 @@ impl SharedState {
 
             EventPayload::StateChanged(snapshot) => {
                 self.set_admin_mode(snapshot.admin_mode);
+                self.set_entries(&snapshot.entries);
                 // Fresh state has arrived (on resume this follows the
                 // post-suspend connectivity re-check), so drop the suspend
                 // placeholders and show live values again.

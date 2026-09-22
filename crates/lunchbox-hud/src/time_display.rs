@@ -2,6 +2,7 @@
 //!
 //! Shows elapsed time, remaining time, or countdown.
 
+use crate::theme::Urgency;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
@@ -19,6 +20,9 @@ mod imp {
         /// `HH:MM:SS`. Set for the vertical HUD, where the bar is 48px wide
         /// and a clock-style readout does not fit (issue #171).
         pub compact: Cell<bool>,
+        /// How loudly to show it, or `None` for the ordinary cream. Set from
+        /// the session's warning state (issue #209) — see `set_urgency`.
+        pub urgency: Cell<Option<Urgency>>,
     }
 
     #[glib::object_subclass]
@@ -101,6 +105,40 @@ impl TimeDisplay {
         self.update_display();
     }
 
+    /// Whether there is anything to count down to.
+    ///
+    /// The bar asks because the countdown shares the middle with two other
+    /// things: a warning, which takes its place, and the wall clock, which
+    /// moves into the middle when neither of them is there.
+    pub fn has_remaining(&self) -> bool {
+        self.imp().remaining_secs.borrow().is_some()
+    }
+
+    /// Show the countdown as a warning, or not.
+    ///
+    /// This used to be decided here, from the number of seconds left: yellow
+    /// under five minutes, putty and blinking under one. Those thresholds are
+    /// the same numbers the example config warns at, and the two systems
+    /// crossed them on the same tick in opposite directions — a yellow "1
+    /// minute remaining!" toast over a countdown that had just gone putty. So
+    /// the countdown no longer has an opinion about time: it is told, from the
+    /// session's own warning state, through the one mapping in `theme::Urgency`
+    /// that the toast goes through too.
+    ///
+    /// The consequence worth knowing: **an activity with no warnings configured
+    /// has a cream countdown all the way down**. The bar says what the policy
+    /// says, and a policy that says nothing is a device that was told not to
+    /// interrupt. `config.example.toml` ships `[[service.default_warnings]]`,
+    /// so a device built from it is unaffected.
+    pub fn set_urgency(&self, urgency: Option<Urgency>) {
+        let imp = self.imp();
+        if imp.urgency.get() == urgency {
+            return;
+        }
+        imp.urgency.set(urgency);
+        self.update_display();
+    }
+
     /// Update the display based on current state
     fn update_display(&self) {
         let imp = self.imp();
@@ -109,25 +147,29 @@ impl TimeDisplay {
             let remaining = *imp.remaining_secs.borrow();
 
             let compact = imp.compact.get();
-            let text = match remaining {
-                Some(secs) if compact => format_compact(secs),
-                Some(secs) => format_duration(secs),
-                None if compact => "--".to_string(),
-                None => "--:--".to_string(),
-            };
-
-            label.set_text(&text);
-
-            // Update styling based on remaining time
-            label.remove_css_class("time-warning");
-            label.remove_css_class("time-critical");
-
-            if let Some(secs) = remaining {
-                if secs <= 60 {
-                    label.add_css_class("time-critical");
-                } else if secs <= 300 {
-                    label.add_css_class("time-warning");
+            // Nothing to count down to — no session, or an activity with no
+            // time limit — shows nothing at all. The bar used to say `--:--`,
+            // which is a countdown's way of saying it has no news; the idle bar
+            // in §8 of the branding brief simply has no countdown on it. The
+            // label is hidden rather than blanked so the box around it
+            // collapses instead of leaving a gap on the bar.
+            match remaining {
+                Some(secs) => {
+                    label.set_text(&if compact {
+                        format_compact(secs)
+                    } else {
+                        format_remaining(secs)
+                    });
+                    label.set_visible(true);
                 }
+                None => label.set_visible(false),
+            }
+
+            for urgency in Urgency::ALL {
+                label.remove_css_class(urgency.countdown_class());
+            }
+            if let Some(urgency) = imp.urgency.get() {
+                label.add_css_class(urgency.countdown_class());
             }
         }
     }
@@ -139,16 +181,27 @@ impl Default for TimeDisplay {
     }
 }
 
-/// Format a duration in seconds as HH:MM:SS or MM:SS
-fn format_duration(secs: u64) -> String {
+/// How much is left, in words: `12:40 left`.
+///
+/// From §8 of the branding brief, and a change of kind rather than of spelling.
+/// The bar used to carry a bare `MM:SS` in a monospace face, which is a
+/// stopwatch — a thing that counts, with no opinion about what the number is
+/// for. A child reading this one wants to know how long they have, so the
+/// readout says so, in the bar's own face.
+///
+/// The leading unit loses its zero for the same reason: `5:03 left` is how the
+/// time would be said out loud, and `05:03` is how an instrument would print it.
+/// Everything after the leading unit keeps both digits, because that is what
+/// makes it a time rather than two numbers.
+fn format_remaining(secs: u64) -> String {
     let hours = secs / 3600;
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
 
     if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+        format!("{hours}:{minutes:02}:{seconds:02} left")
     } else {
-        format!("{:02}:{:02}", minutes, seconds)
+        format!("{minutes}:{seconds:02} left")
     }
 }
 
@@ -182,7 +235,7 @@ mod tests {
     #[test]
     fn compact_format_never_exceeds_three_characters() {
         // Whatever else changes, the width budget is the point of this format:
-        // a fourth character does not fit the 48px bar. Walk a full day.
+        // a fourth character does not fit across the bar. Walk a full day.
         for secs in (0..=24 * 3600).step_by(7) {
             let text = format_compact(secs);
             assert!(
@@ -219,12 +272,17 @@ mod tests {
     }
 
     #[test]
-    fn test_format_duration() {
-        assert_eq!(format_duration(0), "00:00");
-        assert_eq!(format_duration(59), "00:59");
-        assert_eq!(format_duration(60), "01:00");
-        assert_eq!(format_duration(3599), "59:59");
-        assert_eq!(format_duration(3600), "01:00:00");
-        assert_eq!(format_duration(3661), "01:01:01");
+    fn the_countdown_says_what_it_is_counting() {
+        // The brief's own example.
+        assert_eq!(format_remaining(12 * 60 + 40), "12:40 left");
+        assert_eq!(format_remaining(0), "0:00 left");
+        assert_eq!(format_remaining(59), "0:59 left");
+        assert_eq!(format_remaining(60), "1:00 left");
+        assert_eq!(format_remaining(3599), "59:59 left");
+        // Past an hour the hours become the leading unit, and the minutes take
+        // the second digit the seconds always had.
+        assert_eq!(format_remaining(3600), "1:00:00 left");
+        assert_eq!(format_remaining(3661), "1:01:01 left");
+        assert_eq!(format_remaining(10 * 3600), "10:00:00 left");
     }
 }
