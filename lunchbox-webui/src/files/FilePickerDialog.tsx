@@ -16,7 +16,7 @@
  * It is mounted per-pick rather than kept alive, so every "Browse…" opens
  * where the field points rather than where the last one was left.
  */
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -29,6 +29,7 @@ import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import Link from "@mui/material/Link";
 import Switch from "@mui/material/Switch";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -36,13 +37,25 @@ import FolderIcon from "@mui/icons-material/Folder";
 import HomeIcon from "@mui/icons-material/Home";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import PlaceIcon from "@mui/icons-material/Place";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import UsbIcon from "@mui/icons-material/Usb";
 import type { PickRequest } from "../config/pick/FilePicker";
 import { DEFAULT_MAX_PAGES } from "../api/files";
+import { canWriteInto } from "./permissions";
+import { basename } from "./useFileActions";
 import { ancestorKeys, configPathOf, locate, pickRefusal } from "./pick";
-import { buildRows, isExpandable, nodeKey, reachableExpanded, type Row } from "./tree";
+import {
+  buildRows,
+  isExpandable,
+  joinPath,
+  nodeKey,
+  parentPath,
+  reachableExpanded,
+  type Row,
+} from "./tree";
 import { describe, useDirectories, useFileRoots, useFilesRefresh } from "./useDirectories";
 import { useFileTree } from "./useFileTree";
+import { useUploads } from "./useUploads";
 
 export interface FilePickerDialogProps {
   request: PickRequest;
@@ -50,10 +63,23 @@ export interface FilePickerDialogProps {
   onChoose: (value: string) => void;
 }
 
+/** Where an upload started from here would land. */
+interface UploadTarget {
+  rootId: string;
+  dir: string;
+  /** What to call it in "Upload to Books…". */
+  label: string;
+}
+
 export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDialogProps) {
   const roots = useFileRoots();
   const refresh = useFilesRefresh();
+  const uploads = useUploads();
   const tree = useFileTree({ showHidden: request.showHidden ?? false });
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [refused, setRefused] = useState<string | null>(null);
+  // A single uploaded file to select once the device has it, or null.
+  const arrival = useRef<{ rootId: string; dir: string; name: string } | null>(null);
 
   const rootList = useMemo(() => roots.data?.roots ?? [], [roots.data]);
 
@@ -123,10 +149,80 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
     if (value !== null) onChoose(value);
   };
 
+  // -- putting the file there in the first place ----------------------------
+
+  // Where an upload would land: the selected folder, or the folder holding
+  // the selected file — which is what somebody who has just been told "that
+  // ROM is not there" actually has selected.
+  const target = useMemo((): UploadTarget | null => {
+    if (!selected) return null;
+    if (selected.kind === "root") {
+      return selected.root.writable
+        ? { rootId: selected.root.id, dir: "", label: selected.root.label }
+        : null;
+    }
+    if (selected.kind !== "entry") return null;
+    if (canWriteInto(selected)) {
+      return { rootId: selected.rootId, dir: selected.path, label: selected.entry.name };
+    }
+    if (!selected.parentWritable) return null;
+    const dir = parentPath(selected.path);
+    const root = rootList.find((r) => r.id === selected.rootId);
+    return {
+      rootId: selected.rootId,
+      dir,
+      label: dir === "" ? (root?.label ?? "this place") : basename(dir),
+    };
+  }, [selected, rootList]);
+
+  const send = (files: File[]) => {
+    if (!target || files.length === 0) return;
+    const refused = uploads.start({
+      rootId: target.rootId,
+      dir: target.dir,
+      files,
+      root: rootList.find((r) => r.id === target.rootId),
+      limits: roots.data?.limits,
+    });
+    setRefused(refused.length > 0 ? refused.join(" ") : null);
+    tree.expand(nodeKey(target.rootId, target.dir));
+    // One file is an answer to the question on screen, so it is worth
+    // selecting when it lands. Several are a stocking-up, and choosing one of
+    // them on somebody's behalf would be a guess.
+    const only = files.length - refused.length === 1 ? files[0] : undefined;
+    arrival.current =
+      only && !refused.some((r) => r.startsWith(only.name))
+        ? { rootId: target.rootId, dir: target.dir, name: only.name }
+        : null;
+  };
+
+  // A transfer is not the file: the device assembles it under `.name.part`
+  // and publishes it with one rename at the end, so until it is `done` there
+  // is nothing on the device for a policy to point at.
+  useEffect(() => {
+    const waiting = arrival.current;
+    if (!waiting) return;
+    const landed = uploads.transfers.some(
+      (t) =>
+        t.status === "done" &&
+        t.rootId === waiting.rootId &&
+        t.dir === waiting.dir &&
+        t.name === waiting.name,
+    );
+    if (!landed) return;
+    arrival.current = null;
+    tree.select(nodeKey(waiting.rootId, joinPath(waiting.dir, waiting.name)));
+  }, [uploads.transfers, tree]);
+
   return (
     <Dialog open onClose={onCancel} fullWidth maxWidth="sm">
       <DialogTitle>Choose {request.what}</DialogTitle>
       <DialogContent dividers sx={{ minHeight: 320 }}>
+        {refused && (
+          <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setRefused(null)}>
+            {refused}
+          </Alert>
+        )}
         {roots.isPending && (
           <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
             <CircularProgress size={16} />
@@ -181,18 +277,53 @@ export function FilePickerDialog({ request, onCancel, onChoose }: FilePickerDial
           </Box>
         )}
       </DialogContent>
+      {/* The file may not be on the device yet, which is the other half of
+          why a policy points at something that is not there. The queue is the
+          Files tab's — the editor renders inside `UploadsProvider` — so this
+          transfer survives closing the dialog and the tray shows it. */}
+      <input
+        ref={fileInput}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => {
+          send(Array.from(e.target.files ?? []));
+          // So picking the same file twice in a row still fires a change.
+          e.target.value = "";
+        }}
+      />
+
       <DialogActions sx={{ justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
-        <FormControlLabel
-          sx={{ pl: 1 }}
-          control={
-            <Switch
-              size="small"
-              checked={tree.state.showHidden}
-              onChange={(e) => tree.setShowHidden(e.target.checked)}
-            />
-          }
-          label={<Typography variant="body2">Hidden files</Typography>}
-        />
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, pl: 1 }}>
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={tree.state.showHidden}
+                onChange={(e) => tree.setShowHidden(e.target.checked)}
+              />
+            }
+            label={<Typography variant="body2">Hidden files</Typography>}
+          />
+          <Tooltip
+            title={
+              target
+                ? `Put a file into ${target.label} from this computer`
+                : "Choose a folder to put it in first"
+            }
+          >
+            <span>
+              <Button
+                size="small"
+                startIcon={<UploadFileIcon />}
+                disabled={!target}
+                onClick={() => fileInput.current?.click()}
+              >
+                Upload
+              </Button>
+            </span>
+          </Tooltip>
+        </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <Typography variant="caption" color="text.secondary">
             {refusal ?? ""}
