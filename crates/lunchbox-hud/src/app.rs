@@ -844,6 +844,21 @@ fn build_hud_window(
     // activity with its own `hud_orientation` moves the bar for the life of
     // its session and it moves back when the session ends.
     let applied_orientation = std::rc::Rc::new(std::cell::Cell::new(orientation));
+    // The scale the *widgets* were last built against. The bar restyles itself
+    // for a new factor from its own timer, which is enough for everything on
+    // screen at the time — but not for anything hidden: GTK validates a
+    // widget's style when it is mapped and leaves it alone while it is not, so
+    // a widget that sits out a `HudScaleChanged` comes back wearing the
+    // previous factor's sizes (issue #118). The wordmark did exactly that: it
+    // is the idle bar's, so it is hidden for the whole of an
+    // `xwayland_native_resolution` activity, which is the only thing that
+    // changes the factor — and it returned at twice its size.
+    //
+    // So a factor change rebuilds the bar, the way an orientation change does
+    // and for the same reason. The restyle in the bar's own timer stays: it is
+    // what corrects the sizes that are widget properties rather than CSS, and
+    // on a freshly built bar it runs once, at the new factor.
+    let applied_scale = std::rc::Rc::new(std::cell::Cell::new(state.scale_factor()));
     let follow_daemon = pinned_orientation.is_none();
     let window_for_orientation = window.clone();
     let css_for_orientation = css_provider.clone();
@@ -853,23 +868,30 @@ fn build_hud_window(
             return glib::ControlFlow::Continue;
         }
         let desired = state_for_orientation.orientation();
-        if desired == applied_orientation.get() {
+        let desired_scale = state_for_orientation.scale_factor();
+        let turned = desired != applied_orientation.get();
+        let rescaled = (desired_scale - applied_scale.get()).abs() > f64::EPSILON;
+        if !turned && !rescaled {
             return glib::ControlFlow::Continue;
         }
         tracing::info!(
             before = ?applied_orientation.get(),
             after = ?desired,
-            "Rebuilding the HUD for a new orientation"
+            scale_before = applied_scale.get(),
+            scale_after = desired_scale,
+            "Rebuilding the HUD"
         );
         applied_orientation.set(desired);
+        applied_scale.set(desired_scale);
 
         // The bar is rebuilt rather than restyled, for the reason issue #118
         // documents: GTK validates a widget's style when it is *mapped* and
         // leaves it alone while hidden, so anything currently hidden — the
-        // confirm prompts, the warning — would keep the previous layout's
-        // sizes and paint at them the next time it is shown. A fresh widget
-        // has no cached style. Rebuilding also spares every widget below from
-        // having to know how to change its own axis.
+        // confirm prompts, the warning, the idle bar's own wordmark — would
+        // keep the previous sizes and paint at them the next time it is shown.
+        // A fresh widget has no cached style. For an orientation change,
+        // rebuilding also spares every widget below from having to know how to
+        // change its own axis.
         //
         // Bumping the generation first is what retires the old bar's 500ms
         // update timer: it sees a generation that is no longer its own on its
@@ -892,17 +914,23 @@ fn build_hud_window(
         // not move it; the layer surface has to be built again. Same unmap →
         // reconfigure → remap dance the output switch uses, and for the same
         // reason (see the `set_monitor` call in the update timer).
+        // Only an orientation change needs the surface rebuilt; a factor change
+        // leaves the bar on the edge it was already on.
         let visible = window_for_orientation.is_visible();
-        window_for_orientation.set_visible(false);
-        apply_anchors(&window_for_orientation, desired);
+        if turned {
+            window_for_orientation.set_visible(false);
+            apply_anchors(&window_for_orientation, desired);
+        }
         apply_scale(
             &css_for_orientation,
             &window_for_orientation,
             thickness,
-            state_for_orientation.scale_factor(),
+            desired_scale,
             desired,
         );
-        window_for_orientation.set_visible(visible);
+        if turned {
+            window_for_orientation.set_visible(visible);
+        }
 
         glib::ControlFlow::Continue
     });
