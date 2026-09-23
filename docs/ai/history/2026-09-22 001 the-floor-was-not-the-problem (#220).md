@@ -55,11 +55,18 @@ The field now reports no vertical minimum. It is laid out to whatever it is
 given, so it has none to ask for. That is its own commit, ahead of the budget
 fix, because the budget fix is not safe without it.
 
-## Left alone, and worth doing
+## The scale had the same mistake
 
-`rebuild` also computes the scale from `self.height()`, against a
+`rebuild` also computed the scale from `self.height()`, against a
 `DESIGN_HEIGHT` (720 minus the HUD) that *includes* the field's padding. At
-1280x720, the design's own size, that comes out at 0.92 rather than 1.0 on
-`main` as well as here, so the launcher is drawn 8% small at the size it was
-designed for. Same mistake, different consequence, and fixing it enlarges
-everything at 720p, so it was not folded into this.
+1280x720, the design's own size, that came out at 0.92 rather than 1.0, and
+1920x1080 at about 1.42 rather than 1.5. It also disagreed with the stylesheet,
+which `App::track_scale` scales from the window, so the CSS was drawn at one
+scale and the size requests (cell widths, gaps, the budget's probe) at another.
+
+Found while fixing the above and first left alone, because fixing it makes
+everything at 720p 8% bigger; then fixed as a follow-up in the same branch
+("yes, fix the scale bug too"). The field now takes its scale from its border
+box (`compute_bounds`), which is what `DESIGN_HEIGHT` describes. Checked
+headless: 1280x720 lays out at 1.0 with three-row stacks and Play fitting,
+1280x800 at 1.0, 1920x1080 at 1.5.
