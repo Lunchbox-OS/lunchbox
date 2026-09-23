@@ -274,6 +274,12 @@ the screen, and every allocation after it is the same stale height again.
 `measure` therefore answers zero vertically, and a field that is given less
 simply lays itself out again (#220).
 
+**A GTK 4 widget's `width()` and `height()` are its content box**, with its own
+CSS padding and border already taken off. `.lb-field` is on the field widget
+itself, so the height `rebuild` reads is already inside the field's margins,
+and `compartment::budget` must not take them off again. It did until #220, which
+cost every screen 52px of the room it had.
+
 ### Launch Flow
 
 ```
