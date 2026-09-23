@@ -23,6 +23,7 @@ separate panel.
 | `icon/lunchbox-sticker.svg` | Full mark with a white keyline: die-cut sticker artwork. |
 | `icon/lunchbox-{16…1024}.png` | Rendered set. 16 and 24 use the small mark; 32+ the full one. |
 | `icon/avatar-1024.png` | GitHub org/repo avatar: the mark on a cream rounded tile. |
+| `icon/apps/companion*.svg`, `media*.svg` (+ PNGs) | The two sibling apps, delivered with issue #217. **Companion** (Android parent app): the tin with the packed column replaced by a padlock. **Media** (standalone player): the tin with a single compartment and a large play. Each has `-small` (under 32 px), `-mono-white` / `-mono-black` (one color, wells cut out as real holes; the white one is the Android notification icon), and the three Android adaptive layers `-adaptive-foreground` / `-background` / `-monochrome` (108 dp canvas, mark at 60 dp inside the 66 dp safe zone; `-512.png` is the Play Store listing icon). The apps draw these as VectorDrawables translated from the adaptive SVGs, so a change here has to be made there too. |
 | `tokens.json` | Colors, type, strokes, radii, spacing, shadows, motion — one source of truth. |
 
 The typeface is **Baloo 2**, in `assets/fonts` beside this folder, under the SIL
@@ -46,6 +47,10 @@ from them.
   glyph is ever needed, drop the tab and keep the three wells.
 - Clear space: half the tin's width on every side. Don't rotate, recolor the
   wells, or put a face on it.
+- Sibling apps change one thing and nothing else: the companion swaps the
+  packed column for a padlock (play well stays, so it's still Lunchbox); the
+  media app has one compartment and a bigger play. Don't add a third variation
+  without a third app.
 
 ## Color
 

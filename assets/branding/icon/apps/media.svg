@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Lunchbox Media">
+<rect x="92" y="18" width="72" height="28" rx="14" fill="#1C1B18"></rect><rect x="28" y="40" width="200" height="190" rx="30" fill="#2FB5A5"></rect><rect x="28" y="40" width="200" height="190" rx="30" fill="none" stroke="#1C1B18" stroke-width="12"></rect><rect x="50" y="62" width="156" height="146" rx="18" fill="#F7F5EE"></rect>
+<path d="M68 62 h120 a18 18 0 0 1 18 18 v10 h-156 v-10 a18 18 0 0 1 18 -18 z" fill="rgba(28,27,24,0.14)"></path>
+<rect x="50" y="62" width="156" height="146" rx="18" fill="none" stroke="#1C1B18" stroke-width="9"></rect><path d="M96 97l68 38-68 38z" fill="#FFD166" stroke="#1C1B18" stroke-width="9" stroke-linejoin="round"></path>
+</svg>
