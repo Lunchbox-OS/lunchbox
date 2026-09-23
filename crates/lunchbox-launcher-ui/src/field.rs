@@ -584,7 +584,17 @@ impl LauncherField {
         }
         imp.pending_layout.set(false);
 
-        let scale = theme::scale_for(self.width(), self.height());
+        // The scale is taken from the field's *border* box, not from
+        // `width()`/`height()`: those are the content box, with `.lb-field`'s
+        // own margins already off, while `DESIGN_HEIGHT` is the whole field
+        // with its margins in. Comparing the two drew a 1280x720 screen — the
+        // size the design is for — at 0.92, and at a different scale from the
+        // stylesheet, which `App::track_scale` takes from the window.
+        let (outer_w, outer_h) = self
+            .compute_bounds(self)
+            .map(|b| (b.width().round() as i32, b.height().round() as i32))
+            .unwrap_or((self.width(), self.height()));
+        let scale = theme::scale_for(outer_w, outer_h);
         imp.scale.set(scale);
 
         // Keep where the child was looking, so a snapshot arriving while they
