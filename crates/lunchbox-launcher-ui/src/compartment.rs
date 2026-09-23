@@ -383,16 +383,16 @@ fn split_into_stacks(entries: Vec<EntryView>, rows: usize) -> Vec<Vec<EntryView>
 
 /// What the field's height means for the compartments in it.
 pub struct Budget {
-    /// The height a column of the field actually gets, once the field's own
-    /// margins above and below the row are out of it. What
-    /// [`pack_into_slots`] measures against.
+    /// The height a column of the field actually gets: the field's own height,
+    /// which is already inside its margins. What [`pack_into_slots`] measures
+    /// against.
     pub height: i32,
     /// Items one column of a compartment can hold.
     pub rows: usize,
 }
 
-/// Work out, for a field `field_height` px tall, how much room a column of it
-/// has and how many items fit in one column of a compartment.
+/// Work out, for a field whose content is `field_height` px tall, how much room
+/// a column of it has and how many items fit in one column of a compartment.
 ///
 /// The design hands down a fixed three rows (`space.rows` in `tokens.json`),
 /// and three is what a 1280×720 screen has room for. But the launcher runs on
@@ -403,13 +403,20 @@ pub struct Budget {
 /// and the token becomes the value used before the field has been measured.
 ///
 /// **Measured, not calculated.** A compartment's vertical budget is the
-/// field's own padding, the compartment's border and padding, a header, a
-/// floor, and *n* item cells with gaps between them — and every one of those
-/// numbers lives in the stylesheet. Asking GTK what they add up to is the only
-/// answer that cannot drift from the CSS, and drift is exactly what went wrong
-/// when this was three by construction: the item cell grew to 178px against
-/// the 150px the geometry assumed, and the compartment clipped at 720p with
-/// nothing to catch it.
+/// compartment's border and padding, a header, a floor, and *n* item cells
+/// with gaps between them — and every one of those numbers lives in the
+/// stylesheet. Asking GTK what they add up to is the only answer that cannot
+/// drift from the CSS, and drift is exactly what went wrong when this was
+/// three by construction: the item cell grew to 178px against the 150px the
+/// geometry assumed, and the compartment clipped at 720p with nothing to catch
+/// it.
+///
+/// **The field's margins are not in it.** They are `.lb-field`'s padding, on
+/// the field widget itself, and a GTK 4 widget's `height()` is its content box
+/// — padding already out. This used to measure them and take them off a
+/// second time, which cost every screen 52px it had: at 1280×800 a two-row
+/// and a one-row category, both with a floor, need 660px and have 700, but
+/// were measured against 648 and given a column each (#220).
 ///
 /// The probe is the worst case on purpose — a header wearing a badge and a
 /// floor, which not every category has — so one row count fits every
@@ -428,20 +435,8 @@ pub fn budget(field_height: i32, scale: f64) -> Budget {
         };
     }
 
-    // `.lb-field` carries the margins above and below the row, so the probe
-    // starts there rather than at the compartment: the padding is in the
-    // stylesheet and this way it never has to be named twice.
-    let field = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    field.add_css_class("lb-field");
-    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    row.add_css_class("lb-field__row");
-    field.append(&row);
-    let measure = || field.measure(gtk4::Orientation::Vertical, -1).1;
-
-    // Three measurements of the same probe, each adding one part: the field's
-    // margins, then a compartment with nothing in it, then one item.
-    let margins = measure();
-
+    // Two measurements of the same probe: a compartment with nothing in it,
+    // then the same compartment holding one item.
     let well = new_well();
     let (header, ..) = build_header("Category", Some(&Badge::Earn), scale);
     well.append(&header);
@@ -456,21 +451,20 @@ pub fn budget(field_height: i32, scale: f64) -> Budget {
         },
         scale,
     ));
-    row.append(&well);
+    let measure = || well.measure(gtk4::Orientation::Vertical, -1).1;
 
-    let chrome = measure() - margins;
+    let chrome = measure();
 
     // Every item is the same height whatever its name — `item.rs` reserves two
     // lines and caps the label at two — so one probe stands for all of them.
     let probe = LauncherItem::new();
     probe.set_entry(probe_entry(), scale, Some(Badge::Earn));
     column.append(&probe);
-    let cell = measure() - margins - chrome;
+    let cell = measure() - chrome;
 
-    let height = field_height - margins;
     Budget {
-        height,
-        rows: rows_in(height - chrome, cell, theme::px(ROW_GAP, scale)),
+        height: field_height,
+        rows: rows_in(field_height - chrome, cell, theme::px(ROW_GAP, scale)),
     }
 }
 

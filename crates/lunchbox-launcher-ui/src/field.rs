@@ -433,6 +433,19 @@ mod imp {
                 }
                 child = widget.next_sibling();
             }
+            // Where this stops being a bin layout: the field asks for no
+            // height at all. Its contents are laid out *to* the height it is
+            // given, so a minimum taken from them is only the last layout's
+            // answer — and when that layout was for a taller field (the
+            // default-sized window before the fullscreen configure arrives,
+            // say), reporting it holds the window open past the bottom of the
+            // screen, and the next allocation is the same stale height again.
+            // The layout can never find out it is too tall. With no minimum it
+            // is simply given less, and `size_allocate` lays it out again.
+            if orientation == gtk4::Orientation::Vertical {
+                minimum = 0;
+                minimum_baseline = -1;
+            }
             (minimum, natural, minimum_baseline, natural_baseline)
         }
 
@@ -571,7 +584,17 @@ impl LauncherField {
         }
         imp.pending_layout.set(false);
 
-        let scale = theme::scale_for(self.width(), self.height());
+        // The scale is taken from the field's *border* box, not from
+        // `width()`/`height()`: those are the content box, with `.lb-field`'s
+        // own margins already off, while `DESIGN_HEIGHT` is the whole field
+        // with its margins in. Comparing the two drew a 1280x720 screen — the
+        // size the design is for — at 0.92, and at a different scale from the
+        // stylesheet, which `App::track_scale` takes from the window.
+        let (outer_w, outer_h) = self
+            .compute_bounds(self)
+            .map(|b| (b.width().round() as i32, b.height().round() as i32))
+            .unwrap_or((self.width(), self.height()));
+        let scale = theme::scale_for(outer_w, outer_h);
         imp.scale.set(scale);
 
         // Keep where the child was looking, so a snapshot arriving while they

@@ -1,0 +1,124 @@
+config_version = 1
+
+[service]
+default_max_run_seconds = 3600
+
+[[groups]]
+id = "a"
+label = "Short"
+
+[groups.availability]
+[[groups.availability.windows]]
+days = "all"
+start = "08:00"
+end = "18:00"
+
+[[groups]]
+id = "b"
+label = "Longer"
+
+[groups.availability]
+[[groups.availability.windows]]
+days = "all"
+start = "08:00"
+end = "18:00"
+
+[[groups]]
+id = "c"
+label = "Three"
+
+[groups.availability]
+[[groups.availability.windows]]
+days = "all"
+start = "08:00"
+end = "18:00"
+
+[[groups]]
+id = "d"
+label = "One"
+
+[groups.availability]
+[[groups.availability.windows]]
+days = "all"
+start = "08:00"
+end = "18:00"
+
+[[entries]]
+id = "a0"
+label = "Short 0"
+group = "a"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "a1"
+label = "Short 1"
+group = "a"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "b0"
+label = "Longer 0"
+group = "b"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "b1"
+label = "Longer 1"
+group = "b"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "b2"
+label = "Longer 2"
+group = "b"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "b3"
+label = "Longer 3"
+group = "b"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "c0"
+label = "Three 0"
+group = "c"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "c1"
+label = "Three 1"
+group = "c"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "c2"
+label = "Three 2"
+group = "c"
+[entries.kind]
+type = "process"
+command = "true"
+
+[[entries]]
+id = "d0"
+label = "One 0"
+group = "d"
+[entries.kind]
+type = "process"
+command = "true"
