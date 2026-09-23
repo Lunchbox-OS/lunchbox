@@ -266,6 +266,14 @@ knowing before adding a layout manager to any widget here that cares what size
 it is — the override goes quiet rather than failing, and no test without a
 display can tell.
 
+**The field asks for no height.** Its contents are laid out *to* the height it
+is given, so a minimum taken from them is only the previous layout's answer.
+Report it, and a layout made for a taller field (the default-sized window,
+before the fullscreen configure lands) holds the window open past the bottom of
+the screen, and every allocation after it is the same stale height again.
+`measure` therefore answers zero vertically, and a field that is given less
+simply lays itself out again (#220).
+
 ### Launch Flow
 
 ```

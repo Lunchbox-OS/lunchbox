@@ -433,6 +433,19 @@ mod imp {
                 }
                 child = widget.next_sibling();
             }
+            // Where this stops being a bin layout: the field asks for no
+            // height at all. Its contents are laid out *to* the height it is
+            // given, so a minimum taken from them is only the last layout's
+            // answer — and when that layout was for a taller field (the
+            // default-sized window before the fullscreen configure arrives,
+            // say), reporting it holds the window open past the bottom of the
+            // screen, and the next allocation is the same stale height again.
+            // The layout can never find out it is too tall. With no minimum it
+            // is simply given less, and `size_allocate` lays it out again.
+            if orientation == gtk4::Orientation::Vertical {
+                minimum = 0;
+                minimum_baseline = -1;
+            }
             (minimum, natural, minimum_baseline, natural_baseline)
         }
 
