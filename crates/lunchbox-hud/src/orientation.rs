@@ -66,6 +66,29 @@ pub trait HudOrientationExt {
     /// so there is exactly one place where the two layouts differ in order and
     /// no chance of the two drifting apart.
     fn flow_append(self, parent: &gtk4::Box, child: &impl IsA<gtk4::Widget>);
+
+    /// The bar's three sections, in the order the *screen* wants them.
+    ///
+    /// The same reversal as [`Self::flow_append`], as a value rather than as an
+    /// insertion: a `CenterBox` is told which child is which and cannot be
+    /// filled by appending. `leading` is the end of the bar the mark and the
+    /// activity name live at, and on the vertical bar that is the *bottom* of
+    /// the screen, so it comes back last.
+    fn sections<'a, T>(
+        self,
+        leading: &'a T,
+        centre: &'a T,
+        trailing: &'a T,
+    ) -> (&'a T, &'a T, &'a T);
+
+    /// Put the bar's three sections into a `CenterBox`, in that order.
+    fn flow_sections(
+        self,
+        parent: &gtk4::CenterBox,
+        leading: &impl IsA<gtk4::Widget>,
+        centre: &impl IsA<gtk4::Widget>,
+        trailing: &impl IsA<gtk4::Widget>,
+    );
 }
 
 impl HudOrientationExt for HudOrientation {
@@ -89,6 +112,38 @@ impl HudOrientationExt for HudOrientation {
             parent.append(child);
         }
     }
+
+    fn sections<'a, T>(
+        self,
+        leading: &'a T,
+        centre: &'a T,
+        trailing: &'a T,
+    ) -> (&'a T, &'a T, &'a T) {
+        if self.is_vertical() {
+            (trailing, centre, leading)
+        } else {
+            (leading, centre, trailing)
+        }
+    }
+
+    fn flow_sections(
+        self,
+        parent: &gtk4::CenterBox,
+        leading: &impl IsA<gtk4::Widget>,
+        centre: &impl IsA<gtk4::Widget>,
+        trailing: &impl IsA<gtk4::Widget>,
+    ) {
+        use gtk4::prelude::Cast;
+        let (leading, centre, trailing): (&gtk4::Widget, &gtk4::Widget, &gtk4::Widget) = (
+            leading.upcast_ref(),
+            centre.upcast_ref(),
+            trailing.upcast_ref(),
+        );
+        let (start, centre, end) = self.sections(leading, centre, trailing);
+        parent.set_start_widget(Some(start));
+        parent.set_center_widget(Some(centre));
+        parent.set_end_widget(Some(end));
+    }
 }
 
 #[cfg(test)]
@@ -103,6 +158,32 @@ mod tests {
         // A typo must not cost the child the button that ends the session.
         assert_eq!(parse_anchor("sideways"), HudOrientation::Top);
         assert_eq!(parse_anchor(""), HudOrientation::Top);
+    }
+
+    /// The vertical bar is the horizontal one read backwards, so the section
+    /// that leads the bar lands at the *bottom* of the screen — the same
+    /// reversal `flow_append` does by prepending, which a `CenterBox` cannot.
+    ///
+    /// Tested on the ordering rather than on the widgets, because a unit test
+    /// has no GTK: constructing one panics with "GTK has not been initialized".
+    #[test]
+    fn the_vertical_bar_puts_the_leading_section_at_the_bottom() {
+        let (mark_end, centre, controls_end) = ("mark", "countdown", "controls");
+        assert_eq!(
+            HudOrientation::Top.sections(&mark_end, &centre, &controls_end),
+            (&mark_end, &centre, &controls_end)
+        );
+        assert_eq!(
+            HudOrientation::Bottom.sections(&mark_end, &centre, &controls_end),
+            (&mark_end, &centre, &controls_end)
+        );
+        // Rotated a quarter turn to the left: the end-session button that sits
+        // at the far right of the horizontal bar is at the top of this one, so
+        // the mark's end comes last.
+        assert_eq!(
+            HudOrientation::Left.sections(&mark_end, &centre, &controls_end),
+            (&controls_end, &centre, &mark_end)
+        );
     }
 
     #[test]

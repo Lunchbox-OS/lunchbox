@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 lunchbox-api = { workspace = true }
+lunchbox-branding = { workspace = true }
 lunchbox-bridge = { workspace = true }
 lunchbox-ipc = { workspace = true }
 lunchbox-util = { workspace = true }

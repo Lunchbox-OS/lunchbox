@@ -11,5 +11,7 @@
 //! practice.
 
 pub mod clock_face;
+pub mod icon;
 
 pub use clock_face::ClockFace;
+pub use icon::{IconArt, resolve_icon};

@@ -6,7 +6,10 @@ license.workspace = true
 description = "GTK4 widgets shared by the lunchbox launcher and HUD"
 
 [dependencies]
+lunchbox-api = { workspace = true }
 lunchbox-util = { workspace = true }
 
 gtk4 = { workspace = true }
 chrono = { workspace = true }
+# `resolve_icon` expands a `~/` in an entry's `icon_ref`.
+dirs = "5.0"

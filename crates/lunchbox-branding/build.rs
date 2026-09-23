@@ -2,7 +2,7 @@
 //!
 //! `assets/branding/tokens.json` is the hand-off from the design canvas and the
 //! one place a colour, a radius or a type size is decided (issue #207). This
-//! reads it and writes `tokens.rs` into `OUT_DIR`, which `theme.rs` includes.
+//! reads it and writes `tokens.rs` into `OUT_DIR`, which `lib.rs` includes.
 //!
 //! Generated at build time rather than committed on purpose. The wire codegen
 //! in this repository commits its output because it crosses into Kotlin and
@@ -14,8 +14,14 @@
 //! Two kinds of output, because there are two kinds of consumer:
 //!
 //! * typed constants, for the code that measures and draws;
-//! * a substitution table, for the stylesheet, which is a string and wants
+//! * a substitution table, for the stylesheets, which are strings and want
 //!   text.
+//!
+//! **Every token gets both**, named after its own key rather than after the
+//! consumer that wanted it: `space.hud-h` is `SPACE_HUD_H`, `color.ink` is
+//! `COLOR_INK` and `COLOR_INK_RGB`. The list used to be hand-maintained here,
+//! which meant a second crate wanting a token had to come back and add it; the
+//! naming is mechanical so that it does not.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -45,7 +51,8 @@ fn main() {
     );
 
     // Every token that is a plain `$value`, flattened to `group-name`. The
-    // stylesheet wants all of them as text; only some become typed constants.
+    // stylesheets want all of them as text; the typed pass below takes the ones
+    // that are a number or a colour.
     let mut css: BTreeMap<String, String> = BTreeMap::new();
 
     for group in [
@@ -83,10 +90,22 @@ fn main() {
         }
     }
 
+    // Every colour also as bare rgba components, because a stylesheet that
+    // wants a *translucent* wash of one — a hover state, a tint — cannot get
+    // there from `#rrggbb`: CSS has no syntax for "this colour at 14%". Keyed
+    // `<name>-rgb`, which is not a token name the design file can collide with
+    // and so never becomes a constant of its own.
+    for (key, value) in css.clone() {
+        if is_hex(&value) {
+            let (r, g, b) = hex_to_u8(&value);
+            css.insert(format!("{key}-rgb"), format!("{r}, {g}, {b}"));
+        }
+    }
+
     // The field's sheen is a gradient, so its end stop — the enamel at the very
     // edge of the screen — is not a token of its own. The edge fade has to
-    // match it exactly or it shows as a seam (see `theme.rs`), so pull it out
-    // rather than write it down twice.
+    // match it exactly or it shows as a seam (see the launcher's `theme.rs`), so
+    // pull it out rather than write it down twice.
     let sheen = css
         .get("color-enamel-sheen")
         .expect("tokens.json has no color.enamel-sheen");
@@ -97,62 +116,47 @@ fn main() {
     css.insert("color-enamel-edge-rgb".into(), format!("{r}, {g}, {b}"));
 
     // ---- typed constants -------------------------------------------------
-    for (name, key) in [
-        ("INK", "color-ink"),
-        ("YELLOW", "color-yellow"),
-        ("CREAM", "color-cream"),
-    ] {
-        let hex = &css[key];
-        let (r, g, b) = hex_to_u8(hex);
-        writeln!(out, "    /// `{key}` from tokens.json.").unwrap();
-        writeln!(out, "    pub const {name}: &str = \"{hex}\";").unwrap();
-        // Emitted already divided. Writing `255.0 / 255.0` would be clearer
-        // about where the number came from, but clippy's `eq_op` rejects it,
-        // and generated code has to pass the same lints as written code.
-        writeln!(
-            out,
-            "    /// `{key}`, as the components cairo draws with.\n    \
-             pub const {name}_RGB: (f64, f64, f64) = ({:?}, {:?}, {:?});",
-            f64::from(r) / 255.0,
-            f64::from(g) / 255.0,
-            f64::from(b) / 255.0,
-        )
-        .unwrap();
+    //
+    // A token that parses as a number becomes an `i32` when it is whole and an
+    // `f64` when it is not, because that is what the code measuring with it
+    // wants and a cast at every use site reads worse than the one place the
+    // type is decided. A token that is a plain `#rrggbb` becomes both the hex
+    // string and the triple cairo and GSK draw with. Everything else — the
+    // gradients, the font stacks, the shadow recipes, `120ms` — is text only,
+    // and reaches the stylesheet through `CSS`.
+    for (key, value) in &css {
+        let name = screaming(key);
+        if let Ok(n) = value.parse::<f64>() {
+            writeln!(out, "    /// `{key}` from tokens.json.").unwrap();
+            if n.fract() == 0.0 {
+                writeln!(out, "    pub const {name}: i32 = {};", n as i64).unwrap();
+            } else {
+                writeln!(out, "    pub const {name}: f64 = {n:?};").unwrap();
+            }
+        } else if is_hex(value) {
+            let (r, g, b) = hex_to_u8(value);
+            writeln!(out, "    /// `{key}` from tokens.json.").unwrap();
+            writeln!(out, "    pub const {name}: &str = \"{value}\";").unwrap();
+            // Emitted already divided. Writing `255.0 / 255.0` would be clearer
+            // about where the number came from, but clippy's `eq_op` rejects it,
+            // and generated code has to pass the same lints as written code.
+            writeln!(
+                out,
+                "    /// `{key}`, as the components cairo and GSK draw with.\n    \
+                 pub const {name}_RGB: (f64, f64, f64) = ({:?}, {:?}, {:?});",
+                f64::from(r) / 255.0,
+                f64::from(g) / 255.0,
+                f64::from(b) / 255.0,
+            )
+            .unwrap();
+        }
     }
 
-    for (name, key) in [
-        ("ITEM_W", "space-item-w"),
-        ("ITEM_ROW_H", "space-item-row-h"),
-        ("ICON_PX", "space-icon"),
-        ("HUD_H", "space-hud-h"),
-        ("ROWS_PER_STACK", "space-rows"),
-        ("ITEM_FONT_PX", "type-item-size"),
-        ("FOOTER_FONT_PX", "type-footer-size"),
-    ] {
-        let v = css[key]
-            .parse::<f64>()
-            .unwrap_or_else(|_| panic!("{key} is not a number"));
-        writeln!(out, "    /// `{key}` from tokens.json.").unwrap();
-        writeln!(out, "    pub const {name}: i32 = {};", v as i64).unwrap();
-    }
-
-    for (name, key) in [
-        ("KEYLINE", "stroke-keyline"),
-        ("ITEM_LINE_HEIGHT", "type-item-line-height"),
-        ("LOCKED_OPACITY", "opacity-locked"),
-    ] {
-        let v: f64 = css[key]
-            .parse()
-            .unwrap_or_else(|_| panic!("{key} is not a number"));
-        writeln!(out, "    /// `{key}` from tokens.json.").unwrap();
-        writeln!(out, "    pub const {name}: f64 = {v:?};").unwrap();
-    }
-
-    // ---- the stylesheet's substitution table -----------------------------
+    // ---- the stylesheets' substitution table -----------------------------
     writeln!(
         out,
         "\n    /// Every token as text, keyed the way `@name@` placeholders in\n    \
-         /// the stylesheet spell it.\n    \
+         /// a stylesheet spell it.\n    \
          pub const CSS: &[(&str, &str)] = &["
     )
     .unwrap();
@@ -181,6 +185,12 @@ fn kebab(field: &str) -> String {
     out
 }
 
+/// `color-muted-on-dark` -> `COLOR_MUTED_ON_DARK`: the token's own key, as a
+/// Rust constant.
+fn screaming(key: &str) -> String {
+    key.replace('-', "_").to_ascii_uppercase()
+}
+
 /// `4.0` prints as `4`, so a size written as an integer stays one in the CSS.
 fn trim_float(n: f64) -> String {
     if n.fract() == 0.0 {
@@ -190,13 +200,17 @@ fn trim_float(n: f64) -> String {
     }
 }
 
+fn is_hex(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|c| c.is_ascii_hexdigit())
+}
+
 fn first_hex(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'#' && i + 7 <= bytes.len() {
             let candidate = &s[i..i + 7];
-            if candidate[1..].bytes().all(|c| c.is_ascii_hexdigit()) {
+            if is_hex(candidate) {
                 return Some(candidate.to_string());
             }
         }

@@ -2898,6 +2898,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunchbox-branding"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "lunchbox-bridge"
 version = "0.5.1"
 dependencies = [
@@ -3075,6 +3082,7 @@ dependencies = [
  "gtk4",
  "gtk4-layer-shell",
  "lunchbox-api",
+ "lunchbox-branding",
  "lunchbox-bridge",
  "lunchbox-ipc",
  "lunchbox-util",
@@ -3113,6 +3121,7 @@ dependencies = [
  "gilrs",
  "gtk4",
  "lunchbox-api",
+ "lunchbox-branding",
  "lunchbox-ipc",
  "lunchbox-util",
  "lunchbox-widgets",
@@ -3400,7 +3409,9 @@ name = "lunchbox-widgets"
 version = "0.5.1"
 dependencies = [
  "chrono",
+ "dirs",
  "gtk4",
+ "lunchbox-api",
  "lunchbox-util",
 ]
 

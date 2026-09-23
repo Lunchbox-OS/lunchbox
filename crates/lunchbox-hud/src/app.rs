@@ -13,6 +13,7 @@ use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use lunchbox_api::HudOrientation;
 use lunchbox_ipc::IpcClient;
+use lunchbox_util::EntryId;
 use lunchbox_util::default_socket_path;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -248,6 +249,94 @@ impl ConfirmAction {
 /// the compositor scale for an XWayland activity.
 const BASE_ICON_PIXEL_SIZE: i32 = 20;
 
+/// The running activity's own icon, at scale 1.0, from §8 of the branding
+/// brief ("app icon 34 px, keyline"). Like `MARK_PX` it is given in prose
+/// rather than as a token.
+const APP_ICON_PX: i32 = 34;
+
+/// The mark on the bar, at scale 1.0: the size an activity's icon is drawn at,
+/// because they stand in the same place and never at the same time — the mark
+/// while nothing is running, the activity's own icon while something is.
+///
+/// §8 gives 26px, in prose rather than as a token. At 26, next to a wordmark
+/// set in 18px type, the mark read as a detail of the bar rather than as the
+/// thing the bar belongs to.
+///
+/// The brief names the colour mark; the bar wears the mono one, which is the
+/// same drawing in one colour — see `lunchbox_branding::MARK_MONO_WHITE_SVG`.
+const MARK_PX: i32 = APP_ICON_PX;
+
+/// An `Image` carrying the mark, sized for a bar at `factor`.
+///
+/// Two places want one: the idle bar, and administrator mode's "Apps" button.
+/// Both are rebuilt by `set_mark_scale` when the HUD scale factor changes.
+fn build_mark(factor: f64) -> gtk4::Image {
+    let mark = gtk4::Image::from_paintable(mark_texture(factor).as_ref());
+    set_mark_scale(&mark, factor);
+    mark
+}
+
+/// Redraw `mark` for a bar at `factor`.
+///
+/// The mark is a texture, not a themed icon, so it is re-*rasterized* rather
+/// than re-measured — six rounded rectangles and a triangle, drawn at the size
+/// they will be shown at, keep their corners at every factor.
+///
+/// `set_pixel_size`, not `set_size_request`. A `GtkImage` draws what it holds at
+/// its *icon size* and centres it in whatever the widget was given, so a size
+/// request makes the widget bigger and leaves the mark the size it was — which
+/// is how it spent its first few commits rendering at GTK's default 16px while
+/// every comment here said 26. Measured on the virtual output, not reasoned
+/// about: the drawn mark was 13px across.
+fn set_mark_scale(mark: &gtk4::Image, factor: f64) {
+    mark.set_paintable(mark_texture(factor).as_ref());
+    mark.set_pixel_size((f64::from(MARK_PX) * factor).round() as i32);
+}
+
+/// The mark, rasterized for a bar at `factor`.
+///
+/// An SVG at a known size rather than a paintable GTK can rescale, because the
+/// mark is six rounded rectangles and a triangle: rasterized at the size it
+/// will be drawn at, its corners stay crisp at every HUD scale factor. The
+/// texture is therefore rebuilt when the factor changes, alongside the icon
+/// pixel sizes.
+///
+/// `None` if the SVG cannot be rasterized, which on a device means the
+/// gdk-pixbuf SVG loader is missing. The bar then carries no mark and says so
+/// once in the log — losing the mark is not worth failing to start the one
+/// surface a child cannot get out of.
+fn mark_texture(factor: f64) -> Option<gtk4::gdk::Texture> {
+    let px = (f64::from(MARK_PX) * factor).round() as i32;
+    let bytes = glib::Bytes::from_static(lunchbox_branding::MARK_MONO_WHITE_SVG);
+    let stream = gtk4::gio::MemoryInputStream::from_bytes(&bytes);
+    match gtk4::gdk_pixbuf::Pixbuf::from_stream_at_scale(
+        &stream,
+        px,
+        px,
+        true,
+        gtk4::gio::Cancellable::NONE,
+    ) {
+        Ok(pixbuf) => Some(gtk4::gdk::Texture::for_pixbuf(&pixbuf)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "cannot rasterize the Lunchbox mark; is the gdk-pixbuf SVG loader installed?"
+            );
+            None
+        }
+    }
+}
+
+/// How far a popover stands off the control it drops from, at scale 1.0.
+///
+/// The wedge used to do this by existing: it put twelve pixels between the bar
+/// and the panel's keyline, eight of them clear. With it gone the panel
+/// overlapped the bar's last four pixels, and two dark edges touching read as
+/// one surface. This is a little less than the wedge gave — enough to see the
+/// bar end and the panel begin, and not so much that the panel looks unmoored
+/// from the button it came out of.
+const POPOVER_GAP_PX: f64 = 8.0;
+
 /// Logical-pixel length of a pop-out slider at scale 1.0, scaled the same way
 /// as the icon size above so the slider grows with the rest of the HUD.
 ///
@@ -269,6 +358,27 @@ const BASE_SLIDER_LENGTH: i32 = 140;
 /// into a release build, and deliberately *not* consulted by the button
 /// handlers: forcing the buttons visible must not let a stray press send page
 /// keys to whatever holds focus.
+/// Whether the bar should be in administrator mode (issue #154).
+///
+/// Debug builds additionally honour `LUNCHBOX_HUD_DEBUG_FORCE_ADMIN_MODE`, for
+/// the same reason the page buttons have a hook: the mode is entered from the
+/// companion app or the web interface, over BLE or HTTP, so the headless dev
+/// session cannot reach it and its taskbar is the one layout on this bar nobody
+/// can look at. The hook only makes the HUD *believe* it — nothing else on the
+/// device changes, and the window list is real, because the poll that fills it
+/// asks this same question.
+///
+/// Never compiled into a release build. It cannot grant anything either: every
+/// action the mode offers is refused by lunchboxd unless lunchboxd agrees the
+/// mode is on.
+fn in_admin_mode(actual: bool) -> bool {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("LUNCHBOX_HUD_DEBUG_FORCE_ADMIN_MODE").is_some() {
+        return true;
+    }
+    actual
+}
+
 fn show_page_buttons(can_turn_pages: bool) -> bool {
     #[cfg(debug_assertions)]
     if std::env::var_os("LUNCHBOX_HUD_DEBUG_FORCE_PAGE_BUTTONS").is_some() {
@@ -286,7 +396,7 @@ fn show_page_buttons(can_turn_pages: bool) -> bool {
 /// read whichever popover is current rather than one captured at build time —
 /// hence the `Rc<RefCell<..>>` handles rather than the popovers themselves.
 struct HudContent {
-    container: gtk4::Box,
+    container: gtk4::CenterBox,
     confirm_prompt: std::rc::Rc<std::cell::RefCell<ConfirmPrompt>>,
     reset_prompt: std::rc::Rc<std::cell::RefCell<ConfirmPrompt>>,
     /// The volume and brightness flyouts (issue #178). Rebuilt on a scale
@@ -314,6 +424,37 @@ impl HudContent {
             popover.unparent();
         }
     }
+}
+
+/// How long a warning stays on the bar.
+///
+/// §8 of the branding brief makes the warning a toast — up for a few seconds,
+/// then gone — where it used to sit on the bar for the rest of the session.
+/// Nothing persistent is lost by that: the countdown carries the warning's own
+/// colour for the rest of the session, through the one mapping both of them go
+/// through (`theme::Urgency`). What the banner was doing after the first few
+/// seconds was standing in the middle of the bar holding a sentence a child had
+/// already read.
+///
+/// **Ten seconds, not the brief's three.** The toast takes the countdown's
+/// place rather than sitting beside it, so the three seconds are not only how
+/// long the message is up but how long the time remaining is *away* — and three
+/// seconds is short for a sentence a new reader is sounding out. Ten is long
+/// enough to read twice and still short against the shortest gap between two
+/// configured warnings worth having.
+///
+/// Read against `warning_issued_at`, which the state records once per warning
+/// (`EventPayload::WarningIssued`), so a second warning raises a second toast
+/// rather than extending the first.
+const WARNING_TOAST: Duration = Duration::from_secs(10);
+
+/// Whether a warning raised `since` ago is still on the bar.
+///
+/// The tick is 500ms, so a toast is up for between ten and ten and a half
+/// seconds — and cheaper than a timer of its own that would have to be
+/// cancelled on every session change.
+fn warning_toast_is_up(since: Duration) -> bool {
+    since < WARNING_TOAST
 }
 
 /// The time-remaining warning, in whichever form the bar can hold.
@@ -364,6 +505,7 @@ impl WarningBanner {
             // confirmation prompts do — see `align_popover_to_button`.
             let popover = gtk4::Popover::builder()
                 .autohide(false)
+                .has_arrow(false)
                 .position(gtk4::PositionType::Right)
                 .child(&label)
                 .build();
@@ -389,6 +531,17 @@ impl WarningBanner {
 
     /// Show or hide the warning. The popover follows the icon, so a warning
     /// that clears takes its message with it.
+    /// Stand the message's popover off the bar by the same gap the flyouts
+    /// use. It is the one popover on this bar that is not placed by
+    /// `align_popover_to_button`, so it has to be told separately — and told
+    /// again whenever the HUD scale factor changes, since the bar itself is not
+    /// rebuilt for that.
+    fn set_gap(&self, factor: f64) {
+        if let Some(popover) = &self.popover {
+            popover.set_offset((POPOVER_GAP_PX * factor).round() as i32, 0);
+        }
+    }
+
     fn set_visible(&self, visible: bool) {
         self.container.set_visible(visible);
         if let Some(popover) = &self.popover {
@@ -400,14 +553,15 @@ impl WarningBanner {
         }
     }
 
-    /// Apply the severity styling. The class goes on the bar element in both
+    /// Apply the toast's styling. The class goes on the bar element in both
     /// layouts, and on the popover too when there is one, so the message is
-    /// tinted to match the icon that produced it.
+    /// tinted to match the icon that produced it. The class itself comes from
+    /// `theme::Urgency`, which the countdown reads too.
     fn set_severity_class(&self, class: Option<&str>) {
-        for target in ["warning-info", "warning-warn", "warning-critical"] {
-            self.container.remove_css_class(target);
+        for urgency in crate::theme::Urgency::ALL {
+            self.container.remove_css_class(urgency.toast_class());
             if let Some(popover) = &self.popover {
-                popover.remove_css_class(target);
+                popover.remove_css_class(urgency.toast_class());
             }
         }
         if let Some(class) = class {
@@ -446,9 +600,10 @@ impl TitleLabel {
         }
     }
 
-    /// Show or hide the label. Administrator mode's taskbar wants the space the
-    /// activity name occupies in the kiosk, and "No session" says nothing there
-    /// (issue #154).
+    /// Show or hide the label. It is hidden whenever there is no activity to
+    /// name: in administrator mode, where the taskbar wants the space (issue
+    /// #154), and at the launcher, where the wordmark has already said what the
+    /// device is doing (issue #209).
     fn set_visible(&self, visible: bool) {
         match self {
             Self::Horizontal(label) => label.set_visible(visible),
@@ -460,7 +615,10 @@ impl TitleLabel {
 /// Number of characters of activity name the bar guarantees, and the most it
 /// will give up to.
 ///
-/// Horizontally these are measured, not guessed: the bar is full at 1280
+/// The guarantee is the vertical bar's only — see `build_title_label` for why
+/// the horizontal one gave it up. The ceiling is both bars'.
+///
+/// Horizontally these were measured, not guessed: the bar is full at 1280
 /// logical pixels, and twelve characters is the most that leaves room for the
 /// reading buttons *and* the end-session button. At eighteen the "X" fell off
 /// the end, where GTK clips rather than wraps, and a session the child cannot
@@ -487,7 +645,9 @@ fn build_title_label(orientation: HudOrientation) -> TitleLabel {
         TitleLabel::Horizontal(label) => label.clone(),
         TitleLabel::Vertical(rotated) => rotated.label(),
     };
-    label.set_text("No session");
+    // Empty until there is an activity, rather than "No session": the label is
+    // hidden without one, and the text a hidden label holds is the text that
+    // shows in the half-second before the first state arrives.
     label.add_css_class("app-name");
     // The left box expands, so without this a long activity name ("Alice's
     // Adventures in Wonderland") takes its natural width and pushes the
@@ -496,25 +656,42 @@ fn build_title_label(orientation: HudOrientation) -> TitleLabel {
     // so the controls always fit (issue #160 added two more of them).
     label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     // An ellipsizing label asks for the ellipsis as its *minimum*, and GTK
-    // hands out minimums unless a child claims the leftover — so without
-    // `hexpand` the name collapses to "..." with hundreds of pixels going
-    // spare. `xalign` then keeps the text against the start edge as it grows.
-    // On the rotated label these are set on the child, whose own axes are
-    // still the text's: it expands along the text, and the wrapper turns that
-    // into vertical expansion.
-    label.set_hexpand(true);
+    // hands out minimums unless a child claims the leftover — so something has
+    // to claim it or the name collapses to "..." with hundreds of pixels going
+    // spare. `xalign` keeps the text against the start edge either way.
+    //
+    // On the **rotated** label that claimant is the label itself, set on the
+    // child, whose own axes are still the text's: it expands along the text,
+    // and the wrapper turns that into vertical expansion.
+    //
+    // On the **horizontal** bar it is not, any more. An expanding label
+    // stretches its allocation across the whole bar, and the countdown packed
+    // after it goes to the far end with it — which is where "12:40 left" used
+    // to render, three hundred pixels from the name it is about (#209). The
+    // slack goes to a spacer of its own instead; see `build_hud_content`.
+    label.set_hexpand(vertical);
     label.set_xalign(0.0);
-    // Bound the request explicitly rather than trusting expand semantics: an
-    // ellipsizing label asks for the ellipsis as its minimum and GTK hands out
-    // minimums first, so "Alice in Wonderland" rendered as "..." with 400px of
-    // the bar unused. A floor keeps the name readable; the ceiling stops a
-    // very long one from crowding out the controls it shares the bar with.
+    // The ceiling stops a very long name from crowding out the controls it
+    // shares the bar with.
+    //
+    // The floor that went with it is now the vertical bar's alone. It was
+    // there because an ellipsizing label asks for the ellipsis as its minimum
+    // and GTK hands out minimums first, so "Alice in Wonderland" rendered as
+    // "..." with 400px of the bar unused (#160) — but a floor is also a
+    // *natural* width, so "Celeste" reserved twelve characters and the
+    // countdown that now sits beside it started forty pixels out (#209). The
+    // horizontal bar no longer needs the floor: nothing on it claims the slack
+    // any more except the spacer, so the name is allocated its natural width
+    // whenever there is room, and shrinks first when there is not — which is
+    // the behaviour #160 wanted in the first place.
     let (min_chars, max_chars) = if vertical {
         VERTICAL_TITLE_CHARS
     } else {
         TITLE_CHARS
     };
-    label.set_width_chars(min_chars);
+    if vertical {
+        label.set_width_chars(min_chars);
+    }
     label.set_max_width_chars(max_chars);
 
     if let TitleLabel::Vertical(rotated) = &title {
@@ -667,6 +844,21 @@ fn build_hud_window(
     // activity with its own `hud_orientation` moves the bar for the life of
     // its session and it moves back when the session ends.
     let applied_orientation = std::rc::Rc::new(std::cell::Cell::new(orientation));
+    // The scale the *widgets* were last built against. The bar restyles itself
+    // for a new factor from its own timer, which is enough for everything on
+    // screen at the time — but not for anything hidden: GTK validates a
+    // widget's style when it is mapped and leaves it alone while it is not, so
+    // a widget that sits out a `HudScaleChanged` comes back wearing the
+    // previous factor's sizes (issue #118). The wordmark did exactly that: it
+    // is the idle bar's, so it is hidden for the whole of an
+    // `xwayland_native_resolution` activity, which is the only thing that
+    // changes the factor — and it returned at twice its size.
+    //
+    // So a factor change rebuilds the bar, the way an orientation change does
+    // and for the same reason. The restyle in the bar's own timer stays: it is
+    // what corrects the sizes that are widget properties rather than CSS, and
+    // on a freshly built bar it runs once, at the new factor.
+    let applied_scale = std::rc::Rc::new(std::cell::Cell::new(state.scale_factor()));
     let follow_daemon = pinned_orientation.is_none();
     let window_for_orientation = window.clone();
     let css_for_orientation = css_provider.clone();
@@ -676,23 +868,30 @@ fn build_hud_window(
             return glib::ControlFlow::Continue;
         }
         let desired = state_for_orientation.orientation();
-        if desired == applied_orientation.get() {
+        let desired_scale = state_for_orientation.scale_factor();
+        let turned = desired != applied_orientation.get();
+        let rescaled = (desired_scale - applied_scale.get()).abs() > f64::EPSILON;
+        if !turned && !rescaled {
             return glib::ControlFlow::Continue;
         }
         tracing::info!(
             before = ?applied_orientation.get(),
             after = ?desired,
-            "Rebuilding the HUD for a new orientation"
+            scale_before = applied_scale.get(),
+            scale_after = desired_scale,
+            "Rebuilding the HUD"
         );
         applied_orientation.set(desired);
+        applied_scale.set(desired_scale);
 
         // The bar is rebuilt rather than restyled, for the reason issue #118
         // documents: GTK validates a widget's style when it is *mapped* and
         // leaves it alone while hidden, so anything currently hidden — the
-        // confirm prompts, the warning — would keep the previous layout's
-        // sizes and paint at them the next time it is shown. A fresh widget
-        // has no cached style. Rebuilding also spares every widget below from
-        // having to know how to change its own axis.
+        // confirm prompts, the warning, the idle bar's own wordmark — would
+        // keep the previous sizes and paint at them the next time it is shown.
+        // A fresh widget has no cached style. For an orientation change,
+        // rebuilding also spares every widget below from having to know how to
+        // change its own axis.
         //
         // Bumping the generation first is what retires the old bar's 500ms
         // update timer: it sees a generation that is no longer its own on its
@@ -715,17 +914,23 @@ fn build_hud_window(
         // not move it; the layer surface has to be built again. Same unmap →
         // reconfigure → remap dance the output switch uses, and for the same
         // reason (see the `set_monitor` call in the update timer).
+        // Only an orientation change needs the surface rebuilt; a factor change
+        // leaves the bar on the edge it was already on.
         let visible = window_for_orientation.is_visible();
-        window_for_orientation.set_visible(false);
-        apply_anchors(&window_for_orientation, desired);
+        if turned {
+            window_for_orientation.set_visible(false);
+            apply_anchors(&window_for_orientation, desired);
+        }
         apply_scale(
             &css_for_orientation,
             &window_for_orientation,
             thickness,
-            state_for_orientation.scale_factor(),
+            desired_scale,
             desired,
         );
-        window_for_orientation.set_visible(visible);
+        if turned {
+            window_for_orientation.set_visible(visible);
+        }
 
         glib::ControlFlow::Continue
     });
@@ -764,9 +969,15 @@ fn build_hud_content(
     // child at the far end of it — which for a bar rotated to the left means
     // the top of the screen. See `HudOrientation::flow_append`.
     let vertical = orientation.is_vertical();
-    let container = gtk4::Box::builder()
+    // A `CenterBox` rather than a `Box`, because the countdown sits in the
+    // *middle of the bar* the way a desktop shell puts the clock there — and a
+    // box cannot do that. Extra space in a box is shared between the children
+    // that claim it, so a centred child lands half the difference between the
+    // two side groups away from the real centre, and the countdown would drift
+    // as the activity's name grew. A `CenterBox` centres its middle child
+    // against the whole bar and gives the sides what is left.
+    let container = gtk4::CenterBox::builder()
         .orientation(orientation.flow())
-        .spacing(16)
         .hexpand(!vertical)
         .vexpand(vertical)
         .build();
@@ -779,19 +990,30 @@ fn build_hud_content(
         container.add_css_class("hud-vertical");
     }
 
-    // Left section: App name and time
+    // The mark's end of the bar: the mark, the wordmark or the running
+    // activity's icon and name, and the page-turn buttons ahead of them.
+    //
     // `halign(Fill)`, not `Start`: with `Start` the box is allocated its
     // *minimum* width and merely positioned left, which collapses the
     // ellipsizing label below to the ellipsis even when the bar has hundreds
     // of pixels to spare. Filling gives the name the leftover room, and the
     // ellipsis then only appears when the bar is genuinely full.
+    //
+    // The vertical bar wants the other thing on its own axis: this group is the
+    // `CenterBox`'s *end*, so it should hug the bottom edge the way the controls
+    // hug the top. Filling instead left a lone mark floating in the middle of
+    // the bottom half, at the top of an allocation nothing else was using.
     let left_box = gtk4::Box::builder()
         .orientation(orientation.flow())
         .spacing(12)
         .hexpand(!vertical)
         .vexpand(vertical)
         .halign(gtk4::Align::Fill)
-        .valign(gtk4::Align::Fill)
+        .valign(if vertical {
+            gtk4::Align::End
+        } else {
+            gtk4::Align::Fill
+        })
         .build();
 
     // Page-turn buttons, shown only for activities that read (issue #160).
@@ -842,12 +1064,57 @@ fn build_hud_content(
 
     orientation.flow_append(&left_box, &page_box);
 
+    // The mark and the wordmark: the idle bar, and only the idle bar (§8 of the
+    // branding brief). In an activity the mark gives its place to the
+    // activity's own icon, which is the more useful thing to put there — the
+    // child knows whose device it is, and what they want from this end of the
+    // bar is what is running.
+    //
+    // That also settles where the mark goes. The brief puts it at the very left
+    // of the bar, where the page-turn buttons are; those stay, because they are
+    // the two controls a child touches on every page and the reason they are
+    // there is to be as far as possible from the two that throw the session
+    // away. Nothing is given up by it: the page buttons belong to a reading
+    // session and the mark to no session at all, so the two can no longer be on
+    // the bar at the same time.
+    let mark = build_mark(1.0);
+    orientation.flow_append(&left_box, &mark);
+
+    // "Lunchbox", carried only while no activity is running: in an activity the
+    // app's own name takes this end of the bar, and two names would be one too
+    // many.
+    //
+    // **Horizontal only.** A word does not fit across the bar when it is on
+    // its side, and one read sideways is worse than none — so the vertical bar
+    // wears the mark alone, the way a lid stamped on its edge would. Shrinking
+    // the wordmark instead was not enough: at the caption size it still
+    // measured sixty pixels across a bar that wants to be fifty, and it made
+    // the whole bar that wide.
+    //
+    // The brief puts a "No session" chip beside it. There is deliberately none:
+    // a bar reading `[mark] Lunchbox` over the launcher's own field is already
+    // a device with nothing running, and a label saying so is a caption on a
+    // picture of itself. What the chip was really fixing is that "No session"
+    // used to sit in the *title's* place, where it read as the name of an
+    // activity — and the title is simply empty now.
+    let wordmark = gtk4::Label::new(Some("Lunchbox"));
+    wordmark.add_css_class("hud-wordmark");
+    orientation.flow_append(&left_box, &wordmark);
+
+    // The running activity's icon, keylined, between the mark and the name
+    // (§8 of the brief). Drawn by the same widget the launcher draws its
+    // 64px icons with; the keyline comes out cream here rather than ink,
+    // because the stylesheet says so and an ink keyline on an ink bar would be
+    // no keyline at all.
+    let app_icon = lunchbox_widgets::IconArt::new();
+    app_icon.add_css_class("hud-app-icon");
+    app_icon.set_size_request(APP_ICON_PX, APP_ICON_PX);
+    app_icon.set_keyline(lunchbox_branding::tokens::STROKE_KEYLINE, 1.0);
+    app_icon.set_visible(false);
+    orientation.flow_append(&left_box, &app_icon);
+
     let app_label = build_title_label(orientation);
     orientation.flow_append(&left_box, &app_label.widget());
-
-    let time_display = TimeDisplay::new();
-    time_display.set_compact(vertical);
-    orientation.flow_append(&left_box, &time_display);
 
     // Administrator mode's taskbar (issue #154). Hidden in the kiosk, where the
     // whole point is that there is nothing to switch between; shown when a
@@ -864,8 +1131,15 @@ fn build_hud_content(
     // The Start button raises the launcher, which in administrator mode *is*
     // the app picker. Nothing new to show or hide: focusing its window brings
     // the picker in front of whatever the caregiver has open.
+    //
+    // It carries the mark rather than the word "Apps". Administrator mode is
+    // the one place on this device with a taskbar, and a shell's home button is
+    // the thing the shell is called — which here is a lunchbox. It is also the
+    // only place the mark appears while a session is running, and it earns that
+    // by being a button rather than a decoration.
+    let apps_mark = build_mark(1.0);
     let start_button = gtk4::Button::builder()
-        .label("Apps")
+        .child(&apps_mark)
         .tooltip_text("Show the application picker")
         // Frameless like every other control on this bar; the default frame is
         // a light rounded rect that reads as a blank tile against the HUD.
@@ -901,13 +1175,27 @@ fn build_hud_content(
     taskbar_box.append(&window_buttons);
     orientation.flow_append(&left_box, &taskbar_box);
 
-    orientation.flow_append(&container, &left_box);
+    // The middle of the bar, which holds exactly one thing at a time: the
+    // countdown, or the message that has taken its place. A warning is the only
+    // thing on this bar more important than how long is left, so it says so by
+    // standing where the countdown stands rather than by appearing beside it.
+    let centre_box = gtk4::Box::builder()
+        .orientation(orientation.flow())
+        .spacing(0)
+        .halign(gtk4::Align::Center)
+        .valign(gtk4::Align::Center)
+        .build();
+    centre_box.add_css_class("hud-centre");
 
-    // Center section: Warning banner (hidden by default)
+    let time_display = TimeDisplay::new();
+    time_display.set_compact(vertical);
+    centre_box.append(&time_display);
+
     let warning = WarningBanner::build(orientation);
+    warning.set_gap(1.0);
     let warning_box = warning.container.clone();
     let warning_icon = warning.icon.clone();
-    orientation.flow_append(&container, &warning_box);
+    centre_box.append(&warning_box);
 
     // Right section: System indicators and close button
     let right_box = gtk4::Box::builder()
@@ -1435,10 +1723,28 @@ fn build_hud_content(
         });
     }
 
-    orientation.flow_append(&container, &right_box);
+    orientation.flow_sections(&container, &left_box, &centre_box, &right_box);
 
     // Set up state updates
     let app_label_clone = app_label.clone();
+    let mark_for_timer = mark.clone();
+    // Both of them: the idle bar's, and the one on administrator mode's "Apps"
+    // button. A mark left out here would keep the previous factor's size.
+    let marks_for_scale = [mark.clone(), apps_mark.clone()];
+    // The wall clock moves between the end of the bar and the middle of it, so
+    // the tick needs both boxes and a memory of where it currently is. Moved
+    // rather than duplicated: two clocks would be two things to keep wound.
+    let clock_box_for_timer = clock_box.clone();
+    let centre_box_for_timer = centre_box.clone();
+    let right_box_for_clock = right_box.clone();
+    let clock_is_centred = std::rc::Rc::new(std::cell::Cell::new(false));
+    let app_icon_for_timer = app_icon.clone();
+    // The icon the bar is currently showing, so a session that has not changed
+    // does not re-resolve its icon twice a second — a theme lookup and possibly
+    // a file read.
+    let shown_icon_for: std::rc::Rc<std::cell::RefCell<Option<EntryId>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let wordmark_for_timer = wordmark.clone();
     let time_display_clone = time_display.clone();
     let warning_for_timer = warning.clone();
     let battery_box_clone = battery_box.clone();
@@ -1508,9 +1814,11 @@ fn build_hud_content(
     // alongside the icons and sliders closes the gap the #114 fix left open.
     // The flyouts' own rows are absent on purpose: they are rebuilt for the
     // new factor rather than rescaled in place (see `SliderPopover`), so they
-    // are constructed with the right spacing already.
-    let scaled_boxes: [(gtk4::Box, i32); 7] = [
-        (container.clone(), 16),
+    // are constructed with the right spacing already. So is the bar itself,
+    // which is a `CenterBox` and has no spacing to scale: what used to be its
+    // 16px is now the centre section's margin, which is in the stylesheet and
+    // so scales with everything else there.
+    let scaled_boxes: [(gtk4::Box, i32); 6] = [
         (left_box.clone(), 12),
         (warning_box.clone(), 8),
         (right_box.clone(), 8),
@@ -1546,6 +1854,22 @@ fn build_hud_content(
             for icon in &scaled_icons {
                 icon.set_pixel_size(icon_size);
             }
+            for mark in &marks_for_scale {
+                set_mark_scale(mark, desired_scale);
+            }
+            warning_for_timer.set_gap(desired_scale);
+            // The activity icon is a paintable GTK rescales, so only its slot
+            // and its keyline follow the factor. Dropping the remembered id
+            // makes the next tick re-resolve it at the new size, which is what
+            // picks a larger icon out of the theme rather than enlarging a
+            // small one.
+            let icon_px = (f64::from(APP_ICON_PX) * desired_scale).round() as i32;
+            app_icon_for_timer.set_size_request(icon_px, icon_px);
+            app_icon_for_timer.set_keyline(
+                lunchbox_branding::tokens::STROKE_KEYLINE * desired_scale,
+                desired_scale,
+            );
+            shown_icon_for.borrow_mut().take();
             if let Some(face) = &analog_clock_for_scale {
                 face.set_diameter(
                     (f64::from(lunchbox_widgets::clock_face::HUD_DIAMETER) * desired_scale).round()
@@ -1644,7 +1968,7 @@ fn build_hud_content(
             }
         }
 
-        let admin_mode = state.admin_mode();
+        let admin_mode = in_admin_mode(state.admin_mode());
 
         // Update session state
         let session_state = state.session_state();
@@ -1695,11 +2019,56 @@ fn build_hud_content(
         // in the bar; now they are in flyouts and the bar has the room.
         let can_turn_pages = show_page_buttons(session_state.can_turn_pages());
         page_box_clone.set_visible(can_turn_pages);
-        match &session_state {
+        // The mark and the wordmark are the *idle* bar: an activity's own icon
+        // and name replace them, and two of either would be one too many. In
+        // administrator mode the mark is on the "Apps" button instead, and the
+        // taskbar wants this end of the bar.
+        mark_for_timer.set_visible(!has_session && !admin_mode);
+        wordmark_for_timer.set_visible(!has_session && !admin_mode && !vertical);
+
+        // The running activity's icon. Resolved when the session changes rather
+        // than twice a second: a lookup can reach the icon theme and a file on
+        // disk, and neither answer changes while the same activity runs.
+        //
+        // `want` is `None` until the entry is actually known, so a session that
+        // started before the first snapshot arrived shows its name now and
+        // gains its icon on the tick after the entries do, rather than being
+        // remembered as "resolved to nothing".
+        let running = match &session_state {
+            SessionState::Active { entry_id, .. } | SessionState::Warning { entry_id, .. } => {
+                state.entry(entry_id)
+            }
+            SessionState::NoSession | SessionState::Ending { .. } => None,
+        };
+        let want = running.as_ref().map(|entry| entry.entry_id.clone());
+        if *shown_icon_for.borrow() != want {
+            match &running {
+                Some(entry) => {
+                    let px =
+                        (f64::from(APP_ICON_PX) * applied_scale_for_timer.get()).round() as i32;
+                    app_icon_for_timer.set_icon(lunchbox_widgets::resolve_icon(entry, px), px);
+                }
+                None => app_icon_for_timer.set_icon(None, 0),
+            }
+            *shown_icon_for.borrow_mut() = want;
+        }
+        // Administrator mode wants this end of the bar for the window list, the
+        // same way it takes the title and the wordmark.
+        app_icon_for_timer.set_visible(shown_icon_for.borrow().is_some() && !admin_mode);
+        // Whether the middle of the bar is showing a message rather than the
+        // countdown. The two share that space and only one of them is ever in
+        // it: a warning is the only thing on this bar more important than how
+        // long is left, so it says so by standing where the countdown stands.
+        let message_in_the_centre = match &session_state {
             SessionState::NoSession => {
-                app_label_clone.set_text("No session");
+                // A title with no activity to name is blank, rather than
+                // filled with a sentence about being blank. The wordmark and
+                // the field below it already say what the device is doing.
+                app_label_clone.set_text("");
                 time_display_clone.set_remaining(None);
+                time_display_clone.set_urgency(None);
                 warning_for_timer.set_visible(false);
+                false
             }
             SessionState::Active {
                 entry_name,
@@ -1714,7 +2083,12 @@ fn build_hud_content(
                     limit.saturating_sub(elapsed)
                 });
                 time_display_clone.set_remaining(remaining);
+                // No warning has fired for this session yet, so the countdown
+                // is the bar's ordinary cream. It is told; it no longer decides
+                // (see `TimeDisplay::set_urgency`).
+                time_display_clone.set_urgency(None);
                 warning_for_timer.set_visible(false);
+                false
             }
             SessionState::Warning {
                 entry_name,
@@ -1735,21 +2109,28 @@ fn build_hud_content(
                     .unwrap_or_else(|| format!("Only {} seconds remaining!", remaining));
                 warning_for_timer.set_text(&warning_text);
 
-                // Apply severity-based CSS classes
-                warning_for_timer.set_severity_class(Some(match severity {
-                    lunchbox_api::WarningSeverity::Info => "warning-info",
-                    lunchbox_api::WarningSeverity::Warn => "warning-warn",
-                    lunchbox_api::WarningSeverity::Critical => "warning-critical",
-                }));
+                // One mapping for both, so the pill and the countdown cannot
+                // disagree about how loud this is (`theme::Urgency`).
+                let urgency = crate::theme::Urgency::from_severity(*severity);
+                warning_for_timer.set_severity_class(Some(urgency.toast_class()));
+                time_display_clone.set_urgency(Some(urgency));
 
-                warning_for_timer.set_visible(true);
+                // A toast, not a banner: up for a few seconds from the moment
+                // the warning was issued, then back to the countdown. The state
+                // stays `Warning` for the rest of the session, which is what
+                // keeps the countdown in this warning's colour once the toast
+                // has gone.
+                let up = warning_toast_is_up(warning_issued_at.elapsed());
+                warning_for_timer.set_visible(up);
+                up
             }
             SessionState::Ending { reason, .. } => {
                 app_label_clone.set_text("Session ending...");
                 warning_for_timer.set_text(reason);
                 warning_for_timer.set_visible(true);
+                true
             }
-        }
+        };
 
         // Update network connectivity indicator. The HUD aggregates every
         // configured check: if any one is offline we surface the offline
@@ -1792,11 +2173,45 @@ fn build_hud_content(
         lock_button_clone.set_visible(admin_mode);
 
         // The taskbar, and with it the kiosk's own left-hand labels: in
-        // administrator mode "No session" and a blank countdown say nothing,
-        // and the space is wanted for the window list.
+        // administrator mode the idle bar's wordmark and blank countdown say
+        // nothing, and the space is wanted for the window list.
         taskbar_box_clone.set_visible(admin_mode);
-        app_label_clone.set_visible(!admin_mode);
-        time_display_clone.set_visible(!admin_mode);
+        // The title is hidden without a session as well as in administrator
+        // mode. On the vertical bar it reserves twelve characters of width
+        // whatever it holds (see `TITLE_CHARS`), so an empty one would leave a
+        // hole after the wordmark.
+        app_label_clone.set_visible(!admin_mode && has_session);
+        // The countdown stands down while a message is in its place.
+        let countdown_in_the_centre =
+            !admin_mode && !message_in_the_centre && time_display_clone.has_remaining();
+        time_display_clone.set_visible(!admin_mode && !message_in_the_centre);
+
+        // And the wall clock takes the middle when neither of them wants it —
+        // which is most of the time, because most of the time nothing is
+        // running. A bar with its one remaining readout hard against the
+        // controls looks like a bar that lost something; a desktop shell puts
+        // the clock in the middle for the same reason.
+        //
+        // The widget is moved rather than duplicated. Reparenting it means
+        // putting it back where it came from, and "where it came from" is not
+        // the same end of the box in both layouts: `flow_append` appends along
+        // a horizontal bar and prepends along a vertical one, so the clock is
+        // the first child of the controls in one and the last in the other.
+        let centre_is_free = !message_in_the_centre && !countdown_in_the_centre;
+        if centre_is_free != clock_is_centred.get() {
+            if centre_is_free {
+                right_box_for_clock.remove(&clock_box_for_timer);
+                centre_box_for_timer.append(&clock_box_for_timer);
+            } else {
+                centre_box_for_timer.remove(&clock_box_for_timer);
+                if vertical {
+                    right_box_for_clock.append(&clock_box_for_timer);
+                } else {
+                    right_box_for_clock.prepend(&clock_box_for_timer);
+                }
+            }
+            clock_is_centred.set(centre_is_free);
+        }
         if admin_mode {
             rebuild_taskbar(&window_buttons_clone, &admin_windows(&state.windows()));
         }
@@ -2121,6 +2536,7 @@ fn build_slider_popover(
 ) -> SliderPopover {
     let popover = gtk4::Popover::new();
     popover.set_parent(anchor);
+    popover.set_has_arrow(false);
     popover.add_css_class("slider-popover");
     // Out of the bar and into the screen, the same direction and for the same
     // reason as the confirm prompts: a layer-shell popup that lands past the
@@ -2328,6 +2744,7 @@ fn build_confirm_prompt(
     // child popup above the running activity.
     let popover = gtk4::Popover::new();
     popover.set_parent(action_button);
+    popover.set_has_arrow(false);
     popover.add_css_class("confirm-close-popover");
     // Drop the prompt straight down from the "X" button. The button sits at the
     // extreme right of the bar, so the default (horizontally centered) placement
@@ -2456,11 +2873,14 @@ fn align_popover_to_button(
     );
     // A vertical bar anchors the button at the *top*, so the overhang to pull
     // back is below the button rather than beside it -- the same shift, on the
-    // other axis.
+    // other axis. The gap is on the axis the popover drops *along*, which is
+    // the other one again: down from a horizontal bar, out to the right of a
+    // vertical one.
+    let gap = (POPOVER_GAP_PX * factor).round() as i32;
     if orientation.is_vertical() {
-        popover.set_offset(0, -offset);
+        popover.set_offset(gap, -offset);
     } else {
-        popover.set_offset(offset, 0);
+        popover.set_offset(offset, gap);
     }
 }
 
@@ -2494,505 +2914,8 @@ fn apply_scale(
         window.set_default_height(scaled);
     }
     window.set_exclusive_zone(scaled);
-    provider.load_from_data(&css_for_scale(factor));
+    provider.load_from_data(&crate::theme::css_for_scale(factor));
 }
-
-/// Build the HUD stylesheet with `factor`-scaled px values. Every `Npx`
-/// literal in `CSS_TEMPLATE` is multiplied by `factor` so the layer-shell
-/// surface stays a constant physical size when lunchboxd drops the
-/// compositor scale to 1.0 for an XWayland activity (see the
-/// HudScaleChanged event in lunchbox-api). Non-px numbers (timings,
-/// opacities, rgba components) are passed through unchanged.
-fn css_for_scale(factor: f64) -> String {
-    scale_px_literals(CSS_TEMPLATE, factor)
-}
-
-fn scale_px_literals(template: &str, factor: f64) -> String {
-    let bytes = template.as_bytes();
-    let mut out = String::with_capacity(template.len() + 64);
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c.is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            let num_str = &template[start..i];
-            if i + 1 < bytes.len() && &bytes[i..i + 2] == b"px" {
-                let n: f64 = num_str.parse().unwrap_or(0.0);
-                out.push_str(&((n * factor).round() as i32).to_string());
-                out.push_str("px");
-                i += 2;
-            } else {
-                out.push_str(num_str);
-            }
-        } else {
-            out.push(c as char);
-            i += 1;
-        }
-    }
-    out
-}
-
-const CSS_TEMPLATE: &str = r#"
-        :root {
-            --hud-bg: rgba(30, 30, 30, 0.95);
-            --text-primary: white;
-            --text-secondary: #d8dee9;
-            --color-info: #88c0d0;
-            --color-warning: #ebcb8b;
-            --color-critical: #ff6b6b;
-            --color-success: #a3be8c;
-            --hover-bg: rgba(255, 255, 255, 0.1);
-        }
-
-        /* Base font size for the whole bar. Every size that should follow the
-           HUD scale factor has to be written *here*, in px, for
-           `scale_px_literals` to counter-scale it; anything left to the GTK
-           theme keeps its logical-pixel value and so shrinks on screen by
-           1/factor once sway drops to scale 1.0. Setting the size on the root
-           means a label that doesn't name its own font-size inherits a scaled
-           one instead of falling back to the theme's default (issue #114). */
-        .hud-bar {
-            background-color: var(--hud-bg);
-            border: none;
-            margin: 0;
-            padding: 6px 12px;
-            font-size: 14px;
-        }
-
-        .app-name {
-            font-weight: bold;
-            font-size: 14px;
-            color: var(--text-primary);
-        }
-
-        /* The vertical bar (issue #171). Everything above applies to it
-           unchanged; these are the handful of rules that cannot be the same
-           when the long axis is the other one.
-
-           Each still has to be written in px here for `scale_px_literals` to
-           counter-scale it -- the vertical layout gets no exemption from the
-           rule at the top of this stylesheet. */
-        .hud-bar.hud-vertical {
-            /* The bar's own padding, turned with it: the 6px that used to be
-               above and below the row is now beside the column. */
-            padding: 12px 6px;
-        }
-
-        /* The sliders used to need an axis swap here: written for a
-           horizontal bar they name 80px of length and a 4px-thick trough, and
-           left alone on a vertical bar they demanded that length *across* it
-           -- the surface measured 124px wide instead of 48px. They no longer
-           need one, because they are no longer in the bar: both open out of
-           their icon as a flyout, which is a popover and so keeps its own
-           horizontal axis whichever edge the bar is on (issue #178).
-
-           The lesson the swap taught is still worth keeping for whatever comes
-           next, and it has its own trap: state the axis, never the *length*. A
-           CSS minimum is a floor GTK takes the maximum of against the widget's
-           size request, so a `min-height` restated here silently outranks the
-           request -- which is how the #160 reading-session shortening came to
-           be inert on the vertical bar, and how #178 ran out of height and
-           clipped the page-turn buttons off the bottom. */
-
-        .hud-vertical .network-indicator {
-            padding: 2px 0;
-        }
-
-        /* The one readout that still has to fit *across* a 48px bar rather
-           than along it. At the bar's 14px "100%" is wider than the space
-           between the paddings, so it gets a size that fits. The volume and
-           brightness percentages used to be dropped from this bar for the same
-           reason; they are in the flyouts now, which have room (issue #178). */
-        .hud-vertical .battery-label {
-            font-size: 11px;
-        }
-
-        /* The message that no longer fits in the bar. It is a popover rather
-           than part of the bar (see `WarningBanner`), so it needs the bar's
-           own background -- a popover does not inherit it -- and a width bound
-           so an operator's long sentence wraps instead of running off the
-           screen. */
-        .warning-popover > contents {
-            background-color: var(--hud-bg);
-            border: none;
-            border-radius: 4px;
-            padding: 8px 12px;
-        }
-
-        .warning-popover .warning-text {
-            font-size: 14px;
-        }
-
-        .time-display {
-            font-family: monospace;
-            font-size: 14px;
-            color: var(--color-info);
-        }
-
-        .time-display.time-warning {
-            color: var(--color-warning);
-        }
-
-        .time-display.time-critical {
-            color: var(--color-critical);
-            animation: blink 1s infinite;
-        }
-
-        @keyframes blink {
-            50% { opacity: 0.5; }
-        }
-
-        .warning-banner {
-            background-color: rgba(235, 203, 139, 0.2);
-            border-radius: 4px;
-            padding: 4px 12px;
-        }
-
-        .warning-banner.warning-info {
-            background-color: rgba(136, 192, 208, 0.2);
-        }
-
-        .warning-banner.warning-info .warning-text {
-            color: var(--color-info);
-        }
-
-        .warning-banner.warning-warn {
-            background-color: rgba(235, 203, 139, 0.2);
-        }
-
-        .warning-banner.warning-warn .warning-text {
-            color: var(--color-warning);
-        }
-
-        .warning-banner.warning-critical {
-            background-color: rgba(255, 107, 107, 0.2);
-            animation: blink 1s infinite;
-        }
-
-        .warning-banner.warning-critical .warning-text {
-            color: var(--color-critical);
-        }
-
-        .warning-text {
-            color: var(--color-warning);
-            font-weight: bold;
-        }
-
-        image {
-            color: var(--text-primary);
-        }
-
-        /* The analog clock draws itself in whatever colour CSS resolves for
-           it (`Widget::color`; see lunchbox-widgets), and it is not an `image`
-           node, so without this it inherits the *theme's* default text colour
-           -- near-black, and all but invisible against the bar. */
-        .analog-clock {
-            color: var(--text-primary);
-        }
-
-        .indicator-button,
-        .control-button {
-            min-width: 32px;
-            min-height: 32px;
-            padding: 4px;
-            border-radius: 4px;
-            color: var(--text-primary);
-        }
-
-        /* The page-turn buttons exist for a finger, on a panel with no
-           keyboard, so they get a wider touch target than the 32px an
-           indicator gets — a mis-tap here turns no page and reads as the
-           activity being broken. Width only: the bar's height is its
-           layer-shell exclusive zone, and a taller child pushes the window
-           past it, so the HUD grows over the activity while a book is open. */
-        .page-button {
-            min-width: 44px;
-        }
-
-        .indicator-button:hover,
-        .control-button:hover {
-            background-color: var(--hover-bg);
-        }
-
-        /* Administrator mode's taskbar (issue #154). Window buttons carry a
-           label rather than an icon, so they need room to the sides that the
-           square indicator buttons do not. */
-        .indicator-button label {
-            padding: 0 6px;
-        }
-
-        /* Which window the keyboard is talking to. The taskbar is the only
-           place that says so — the kiosk hides every border and title bar. */
-        .taskbar-focused {
-            background-color: var(--hover-bg);
-        }
-
-        /* Automatic brightness is the default, so its toggle stays plain when
-           checked (auto on) and lights up only in the *manual* state
-           (unchecked, and only when a sensor makes auto an option at all),
-           using the brightness bar's own highlight colour so the two read as
-           one control.
-
-           `.brightness-manual` is the same state shown on the *bar* icon,
-           which the update loop sets. The toggle itself moved into the flyout
-           with issue #178, and without this the bar would have stopped saying
-           who is driving the backlight until someone opened the flyout. */
-        .brightness-toggle:not(:checked):not(:disabled),
-        .indicator-button.brightness-manual {
-            background-color: var(--color-warning);
-        }
-
-        .brightness-toggle:not(:checked):not(:disabled) image,
-        .indicator-button.brightness-manual image {
-            color: #2e3440;
-        }
-
-        /* A muted volume is worth showing on its own toggle the same way, so
-           the flyout says which state it is in rather than only the icon
-           shape. Checked means muted here, the opposite of the brightness
-           toggle above, because muted is the exceptional state. */
-        .mute-toggle:checked:not(:disabled) {
-            background-color: var(--color-critical);
-        }
-
-        .mute-toggle:checked:not(:disabled) image {
-            color: #2e3440;
-        }
-
-        /* The GTK theme shades a *checked* toggle button by default. Automatic
-           brightness (checked) must look completely plain, so clear that
-           shading — keeping only the normal hover feedback. */
-        .brightness-toggle:checked {
-            background-color: transparent;
-            background-image: none;
-            box-shadow: none;
-        }
-
-        .brightness-toggle:checked:hover {
-            background-color: var(--hover-bg);
-        }
-
-        .close-button {
-            min-width: 32px;
-            min-height: 32px;
-            padding: 4px;
-            border-radius: 4px;
-            color: var(--color-critical);
-        }
-
-        .close-button:hover {
-            background-color: rgba(191, 97, 106, 0.3);
-        }
-
-        .battery-label {
-            font-size: 12px;
-            color: var(--text-primary);
-        }
-
-        .network-indicator {
-            padding: 0 2px;
-        }
-
-        .network-indicator.network-online image {
-            color: var(--color-success);
-        }
-
-        .network-indicator.network-offline image {
-            color: var(--color-critical);
-        }
-
-        /* Length comes from the widget's size request (`BASE_SLIDER_LENGTH`),
-           which is what lets it follow the HUD scale factor. Stating a floor
-           here as well would outrank a shorter request -- see the note by the
-           `.hud-vertical` rules above. */
-        .volume-slider {
-            min-width: 0px;
-        }
-
-        .volume-slider trough {
-            min-height: 4px;
-            border-radius: 2px;
-            background-color: rgba(255, 255, 255, 0.2);
-        }
-
-        .volume-slider highlight {
-            min-height: 4px;
-            border-radius: 2px;
-            background-color: var(--color-info);
-        }
-
-        /* 16px and the -8px overhang are what the GTK theme gives the slider
-           node on its own, so at factor 1.0 these change nothing — but stating
-           them here is what lets the knob grow with the rest of the HUD under
-           the counter-scale. The old 12px was below the theme's own minimum, so
-           the theme won at factor 1.0 and the knob ended up *smaller* than
-           normal at 1.5, making it hard to hit on a touchscreen (issue #114).
-           The negative margin has to be restated for the same reason: it is
-           what keeps the knob overhanging the trough by a constant amount, and
-           it also decides how much of the knob the trough has to accommodate
-           (an unscaled -8px against a scaled knob thickens the bar). */
-        .volume-slider slider {
-            min-width: 16px;
-            min-height: 16px;
-            margin: -8px;
-            border-radius: 50%;
-            background-color: var(--text-primary);
-        }
-
-        .volume-slider:disabled trough {
-            background-color: rgba(255, 255, 255, 0.1);
-        }
-
-        .volume-slider:disabled highlight {
-            background-color: rgba(136, 192, 208, 0.5);
-        }
-
-        .volume-label {
-            font-size: 12px;
-            color: var(--text-secondary);
-            min-width: 3em;
-            text-align: right;
-        }
-
-        /* Matches `.volume-slider` -- see the note there. */
-        .brightness-slider {
-            min-width: 0px;
-        }
-
-        .brightness-slider trough {
-            min-height: 4px;
-            border-radius: 2px;
-            background-color: rgba(255, 255, 255, 0.2);
-        }
-
-        .brightness-slider highlight {
-            min-height: 4px;
-            border-radius: 2px;
-            background-color: var(--color-warning);
-        }
-
-        /* Matches `.volume-slider slider` — see the note there. */
-        .brightness-slider slider {
-            min-width: 16px;
-            min-height: 16px;
-            margin: -8px;
-            border-radius: 50%;
-            background-color: var(--text-primary);
-        }
-
-        .brightness-slider:disabled trough {
-            background-color: rgba(255, 255, 255, 0.1);
-        }
-
-        .brightness-slider:disabled highlight {
-            background-color: rgba(235, 203, 139, 0.5);
-        }
-
-        .brightness-label {
-            font-size: 12px;
-            color: var(--text-secondary);
-            min-width: 3em;
-            text-align: right;
-        }
-
-        .clock-label {
-            font-family: monospace;
-            font-size: 14px;
-            color: var(--text-primary);
-        }
-
-        .mock-time-indicator {
-            font-size: 10px;
-            font-weight: bold;
-            color: var(--color-warning);
-            margin-left: 4px;
-        }
-
-        /* Opaque dark surface with explicit colors (not theme variables) so
-           the prompt keeps strong text contrast regardless of the system GTK
-           theme and never lets the bright activity behind it bleed through.
-           The arrow (the triangle pointing at the "X") is a separate CSS node
-           and must be recolored to match the box. */
-        .confirm-close-popover > contents {
-            background-color: #1e1e1e;
-            border-radius: 8px;
-            padding: 14px;
-            /* The popover is its own surface, so state the base font size here
-               too rather than relying on inheriting the bar's (issue #114):
-               without it the Cancel / End labels keep the theme's unscaled
-               size while the box around them grows. */
-            font-size: 14px;
-        }
-
-        /* The pop-out volume / brightness controls (issue #178). Same opaque
-           surface as the prompt above and for the same reasons: a popover does
-           not inherit the bar's background, the activity behind it must not
-           bleed through, and the base font size has to be stated here or the
-           readout inside falls back to the theme's unscaled default (#114). */
-        .slider-popover > contents {
-            background-color: #1e1e1e;
-            border-radius: 8px;
-            padding: 14px;
-            font-size: 14px;
-        }
-
-        .slider-popover > arrow {
-            background-color: #1e1e1e;
-            border: none;
-        }
-
-        .confirm-close-popover > arrow {
-            background-color: #1e1e1e;
-            border: none;
-        }
-
-        .confirm-close-message {
-            color: #ffffff;
-            font-size: 15px;
-            font-weight: bold;
-        }
-
-        /* Theme buttons paint a gradient via background-image, which a bare
-           background-color won't override, so clear it and set explicit
-           high-contrast fills: a light Cancel with dark text, a red End with
-           white text. */
-        .confirm-close-popover button {
-            min-height: 32px;
-            padding: 6px 14px;
-            border-radius: 4px;
-            border: none;
-            background-image: none;
-            color: #2e3440;
-            background-color: #d8dee9;
-            /* State the font-size on the button node itself, not just on
-               `> contents`. #114 set the base size on the popover surface
-               expecting the Cancel / End labels to inherit it, but the GTK
-               theme sets an explicit `font-size` on `button`, which is more
-               specific than the inherited `> contents` value and wins the
-               cascade — so the labels kept the theme's logical-pixel size and
-               rendered 1/factor too small under the counter-scale, while the
-               button box around them (min-height/padding, stated here in px)
-               grew. Restating it here, at higher specificity than the theme's
-               bare `button`, is what lets the label follow the HUD factor. */
-            font-size: 14px;
-        }
-
-        .confirm-close-popover button:hover {
-            background-color: #e5e9f0;
-        }
-
-        .confirm-close-popover button.destructive-action {
-            color: #ffffff;
-            background-color: #bf616a;
-        }
-
-        .confirm-close-popover button.destructive-action:hover {
-            background-color: #d08770;
-        }
-    "#;
 
 /// Keep the taskbar's window list current while administrator mode is on.
 ///
@@ -3008,7 +2931,7 @@ fn run_window_poll(socket_path: PathBuf, state: SharedState) -> anyhow::Result<(
     rt.block_on(async {
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if !state.admin_mode() {
+            if !in_admin_mode(state.admin_mode()) {
                 // Drop a stale list, so re-entering the mode never shows
                 // windows that closed while nobody was looking.
                 if !state.windows().is_empty() {
@@ -3247,6 +3170,21 @@ mod tests {
         assert_eq!(shell_window_id(&windows[..1]), None);
     }
 
+    /// The toast is up from the moment the warning was issued and gone a few
+    /// ticks later. The bar checks this every 500ms, so the boundary only has
+    /// to be right to within a tick.
+    #[test]
+    fn a_warning_is_a_toast_rather_than_a_banner() {
+        assert!(warning_toast_is_up(Duration::from_millis(0)));
+        assert!(warning_toast_is_up(Duration::from_millis(9_500)));
+        assert!(!warning_toast_is_up(Duration::from_secs(10)));
+        // A warning issued ten minutes ago is not still on the bar, which is
+        // the whole of the change: the session's state stays `Warning` until
+        // it ends, and the countdown carries this warning's own colour from
+        // then on.
+        assert!(!warning_toast_is_up(Duration::from_secs(600)));
+    }
+
     #[test]
     fn taskbar_labels_fall_back_and_are_truncated() {
         use lunchbox_api::WindowOwner;
@@ -3272,163 +3210,5 @@ mod tests {
         // Exactly at the limit keeps every character and gains no ellipsis.
         w.name = Some("x".repeat(TASKBAR_LABEL_CHARS));
         assert_eq!(taskbar_label(&w).chars().count(), TASKBAR_LABEL_CHARS);
-    }
-
-    #[test]
-    fn scales_px_literals_and_leaves_other_numbers_alone() {
-        let css = scale_px_literals(
-            "a { padding: 4px 12px; opacity: 0.5; color: rgba(30, 30, 30, 0.95); }",
-            1.5,
-        );
-        assert_eq!(
-            css,
-            "a { padding: 6px 18px; opacity: 0.5; color: rgba(30, 30, 30, 0.95); }"
-        );
-    }
-
-    /// Issue #114: the bar and the confirm popover must each state a base
-    /// `font-size`. A label that inherits the *theme's* default instead keeps
-    /// its logical-pixel size and so renders 1/factor too small once lunchboxd
-    /// drops the compositor scale for an XWayland activity — the bug the
-    /// warning banner text showed.
-    #[test]
-    fn text_roots_declare_a_scalable_font_size() {
-        for root in [".hud-bar {", ".confirm-close-popover > contents {"] {
-            let block = CSS_TEMPLATE
-                .split_once(root)
-                .and_then(|(_, rest)| rest.split_once('}'))
-                .map(|(block, _)| block)
-                .unwrap_or_else(|| panic!("{root} rule missing from the stylesheet"));
-            assert!(
-                block.contains("font-size:"),
-                "{root} must set a font-size so labels don't fall back to the theme default"
-            );
-        }
-        // ...and that size has to follow the factor.
-        assert!(css_for_scale(2.0).contains("font-size: 28px"));
-    }
-
-    /// Issue #114 follow-up: the confirm popover's Cancel / End buttons must
-    /// state their own `font-size`, not rely on inheriting the popover surface's
-    /// (`> contents`). The GTK theme sets an explicit `font-size` on `button`,
-    /// which is more specific than the inherited value and wins the cascade — so
-    /// without a rule of its own the button label kept the theme's logical-pixel
-    /// size and rendered 1/factor too small under the counter-scale, even though
-    /// the box around it grew.
-    #[test]
-    fn confirm_popover_button_declares_its_own_font_size() {
-        let rule = ".confirm-close-popover button {";
-        let block = CSS_TEMPLATE
-            .split_once(rule)
-            .and_then(|(_, rest)| rest.split_once('}'))
-            .map(|(block, _)| block)
-            .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
-        assert!(
-            block.contains("font-size:"),
-            "{rule} must set a font-size so the label scales instead of \
-             inheriting the theme's unscaled button font"
-        );
-    }
-
-    /// Issue #114: the slider knob has to be at least as big as the size the
-    /// GTK theme would pick on its own (16px), or the theme wins the cascade at
-    /// factor 1.0 and the counter-scaled value comes out smaller than the
-    /// un-scaled knob — a shrinking touch target.
-    #[test]
-    fn slider_knob_is_scaled_from_at_least_the_theme_size() {
-        for slider in [".volume-slider slider {", ".brightness-slider slider {"] {
-            let block = CSS_TEMPLATE
-                .split_once(slider)
-                .and_then(|(_, rest)| rest.split_once('}'))
-                .map(|(block, _)| block)
-                .unwrap_or_else(|| panic!("{slider} rule missing from the stylesheet"));
-            for dim in ["min-width", "min-height"] {
-                let value: i32 = block
-                    .split_once(&format!("{dim}:"))
-                    .and_then(|(_, rest)| rest.split_once("px"))
-                    .and_then(|(value, _)| value.trim().parse().ok())
-                    .unwrap_or_else(|| panic!("{slider} must set {dim} in px"));
-                assert!(
-                    value >= 16,
-                    "{slider} {dim} is {value}px; below the theme's own 16px it does not scale"
-                );
-            }
-        }
-    }
-
-    /// Issue #178: the flyout is a text root of its own, so like the bar and
-    /// the confirm prompt it has to state a `font-size` — its percentage
-    /// readout would otherwise keep the theme's logical-pixel size and render
-    /// 1/factor too small under the counter-scale (issue #114's rule).
-    #[test]
-    fn the_slider_flyout_declares_a_scalable_font_size() {
-        let rule = ".slider-popover > contents {";
-        let block = CSS_TEMPLATE
-            .split_once(rule)
-            .and_then(|(_, rest)| rest.split_once('}'))
-            .map(|(block, _)| block)
-            .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
-        assert!(
-            block.contains("font-size:"),
-            "{rule} must set a font-size so the readout does not fall back to \
-             the theme default"
-        );
-    }
-
-    /// Issue #178: neither slider rule may state a *length* floor.
-    ///
-    /// A CSS minimum is a floor GTK takes the maximum of against the widget's
-    /// size request, so a `min-width` here outranks a shorter request — which
-    /// is exactly how the vertical bar's swapped rule silently cancelled the
-    /// #160 reading-session shortening and left the page-turn buttons clipped
-    /// off the bottom of the bar. The length is `BASE_SLIDER_LENGTH`, applied
-    /// as a request so it can follow the HUD scale factor.
-    #[test]
-    fn slider_rules_leave_their_length_to_the_size_request() {
-        for rule in [".volume-slider {", ".brightness-slider {"] {
-            let block = CSS_TEMPLATE
-                .split_once(rule)
-                .and_then(|(_, rest)| rest.split_once('}'))
-                .map(|(block, _)| block)
-                .unwrap_or_else(|| panic!("{rule} rule missing from the stylesheet"));
-            let value: i32 = block
-                .split_once("min-width:")
-                .and_then(|(_, rest)| rest.split_once("px"))
-                .and_then(|(value, _)| value.trim().parse().ok())
-                .unwrap_or_else(|| panic!("{rule} must state min-width in px"));
-            assert_eq!(
-                value, 0,
-                "{rule} min-width is {value}px, which outranks the slider's \
-                 own size request"
-            );
-        }
-    }
-
-    /// The sliders are out of the bar, so nothing in the stylesheet should
-    /// still be turning them for the vertical layout. A leftover rule here
-    /// would apply to the flyout — a popover is a descendant of the bar icon
-    /// it is parented to, so `.hud-vertical` still matches inside it — and
-    /// would zero the width of a slider that is horizontal in both layouts.
-    #[test]
-    fn the_vertical_layout_no_longer_turns_the_sliders() {
-        for dead in [
-            ".hud-vertical .volume-slider",
-            ".hud-vertical .brightness-slider",
-            ".hud-vertical .volume-control",
-            ".hud-vertical .brightness-control",
-        ] {
-            // Only selectors count; the explanatory comment above them names
-            // the rules deliberately, and naming them is the point.
-            let stylesheet: String = CSS_TEMPLATE
-                .lines()
-                .filter(|line| !line.trim_start().starts_with(['/', '*', '-']))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                !stylesheet.contains(dead),
-                "{dead} is still in the stylesheet; the sliders left the bar in \
-                 issue #178 and a rule that turns them now hits the flyout"
-            );
-        }
     }
 }

@@ -10,6 +10,7 @@ mod orientation;
 mod page_turn;
 mod rotated_label;
 mod state;
+mod theme;
 mod time_display;
 mod volume;
 
@@ -48,7 +49,13 @@ struct Args {
 
     /// Thickness of the HUD bar in pixels — its height when the bar is
     /// horizontal, its width when it runs down the side.
-    #[arg(long, default_value = "48")]
+    ///
+    /// Defaults to the branding's own `space.hud-h`, because the thickness is a
+    /// design decision rather than a taste. It is 48px: the branding hand-off
+    /// drew the bar at 56 and it was built that way, then taken back down,
+    /// because eight pixels of every activity is a lot to pay for a bar that
+    /// reads no better at 56 (issue #209).
+    #[arg(long, default_value_t = lunchbox_branding::tokens::SPACE_HUD_H)]
     height: i32,
 }
 

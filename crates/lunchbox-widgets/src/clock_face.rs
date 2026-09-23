@@ -43,8 +43,11 @@ use std::f64::consts::PI;
 
 /// Diameter of the HUD's face in logical pixels at scale 1.0.
 ///
-/// Sized to the bar's usable width: a 48 px bar with 6 px of padding on each
-/// side leaves 36 px, and the face fills it.
+/// Sized to the bar's usable width: a 48 px bar with 4 px of padding on each
+/// side leaves 40, and the face fills all but a hair of it. It was drawn for
+/// the same bar with 6 px of padding, where it fitted exactly; the branding
+/// went to 56 px and back to 48 with thinner padding (issue #209), and this is
+/// still the right size for it.
 pub const HUD_DIAMETER: i32 = 36;
 
 mod imp {

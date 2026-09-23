@@ -2,10 +2,10 @@
 //!
 //! **Nothing here is a number somebody typed twice.** `assets/branding/tokens.json`
 //! is the hand-off from the design canvas and the one place a colour, a radius
-//! or a type size is decided; `build.rs` turns it into `tokens.rs` in `OUT_DIR`
-//! and this file includes it. The constants below are that module, and the
-//! stylesheet reaches it through `@name@` placeholders substituted on the way
-//! out. Move a value in the token file and it moves here, or the build fails.
+//! or a type size is decided; `lunchbox-branding` turns it into Rust. The
+//! constants below name tokens from that crate, and the stylesheet reaches them
+//! through `@name@` placeholders substituted on the way out. Move a value in the
+//! token file and it moves here, or the build fails.
 //!
 //! What is *not* generated is anything the design file does not decide: the
 //! shape of the CSS, the two sizes the brief gives in prose rather than tokens,
@@ -18,15 +18,15 @@
 //! lives on the compartment or the item it applies to, never in a panel of its
 //! own.
 
-include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
+pub use lunchbox_branding::tokens;
 
 /// Ink, as the components cairo draws with: the only outline colour, and the
 /// colour of type.
-pub const INK_RGB: (f64, f64, f64) = tokens::INK_RGB;
+pub const INK_RGB: (f64, f64, f64) = tokens::COLOR_INK_RGB;
 /// Yellow: "you can" — the coin on an earn or a have/need pill.
-pub const YELLOW_RGB: (f64, f64, f64) = tokens::YELLOW_RGB;
+pub const YELLOW_RGB: (f64, f64, f64) = tokens::COLOR_YELLOW_RGB;
 /// Cream: the coin on the deep-teal bank pill, where yellow would lose its ring.
-pub const CREAM_RGB: (f64, f64, f64) = tokens::CREAM_RGB;
+pub const CREAM_RGB: (f64, f64, f64) = tokens::COLOR_CREAM_RGB;
 
 /// The logical width the geometry below is drawn for. A wider output scales
 /// the whole field rather than reflowing it: the layout is one row at every
@@ -37,7 +37,7 @@ pub const CREAM_RGB: (f64, f64, f64) = tokens::CREAM_RGB;
 pub const DESIGN_WIDTH: f64 = 1280.0;
 /// The logical height of the *field*: the 720 px screen the design targets,
 /// less the HUD bar that sits above this window rather than inside it.
-pub const DESIGN_HEIGHT: f64 = 720.0 - tokens::HUD_H as f64;
+pub const DESIGN_HEIGHT: f64 = 720.0 - tokens::SPACE_HUD_H as f64;
 
 /// Items in a stack before the category spills into a second stack beside it,
 /// *as the design hands it down*.
@@ -49,9 +49,9 @@ pub const DESIGN_HEIGHT: f64 = 720.0 - tokens::HUD_H as f64;
 /// budgeted for. This is what that function answers before the window knows
 /// its size, and what its arithmetic falls back to if a measurement comes back
 /// nonsense — the design's own number, and the right one at 1280×720.
-pub const ROWS_PER_STACK: usize = tokens::ROWS_PER_STACK as usize;
+pub const ROWS_PER_STACK: usize = tokens::SPACE_ROWS as usize;
 /// Item cell, unscaled.
-pub const ITEM_W: i32 = tokens::ITEM_W;
+pub const ITEM_W: i32 = tokens::SPACE_ITEM_W;
 /// The cell's height: the design's row height less the row the badge used to
 /// occupy under the name.
 ///
@@ -59,7 +59,7 @@ pub const ITEM_W: i32 = tokens::ITEM_W;
 /// same height whether or not it has one and the space goes back to the field.
 /// Subtracted from the token rather than written as a new number, so a change
 /// to the design's row height still carries.
-pub const ITEM_H: i32 = tokens::ITEM_ROW_H - BADGE_ROW_RECLAIMED;
+pub const ITEM_H: i32 = tokens::SPACE_ITEM_ROW_H - BADGE_ROW_RECLAIMED;
 
 /// The height the badge no longer needs under the name. See `ITEM_H`.
 const BADGE_ROW_RECLAIMED: i32 = 18;
@@ -70,9 +70,9 @@ const BADGE_ROW_RECLAIMED: i32 = 18;
 /// describes `space.icon` as "App icon size inside a 78 px slot" — so the icon
 /// is generated and its slot is not.
 pub const ART_SLOT: i32 = 78;
-pub const ICON_PX: i32 = tokens::ICON_PX;
+pub const ICON_PX: i32 = tokens::SPACE_ICON;
 /// Radius of the ink keyline traced around an icon's silhouette.
-pub const KEYLINE: f64 = tokens::KEYLINE;
+pub const KEYLINE: f64 = tokens::STROKE_KEYLINE;
 
 /// Type size of an activity's name, unscaled.
 ///
@@ -80,7 +80,7 @@ pub const KEYLINE: f64 = tokens::KEYLINE;
 /// attribute rather than a CSS rule — GTK4 CSS has no `line-height` — and an
 /// absolute leading is computed from the size. Both spellings now come from
 /// `type.item.size`, so they cannot disagree.
-pub const ITEM_FONT_PX: i32 = tokens::ITEM_FONT_PX;
+pub const ITEM_FONT_PX: i32 = tokens::TYPE_ITEM_SIZE;
 
 /// How much to scale the design for an output of `width` × `height` logical
 /// pixels. Both axes are considered so a short screen shrinks the row rather
@@ -100,88 +100,17 @@ pub fn px(value: i32, scale: f64) -> i32 {
     ((value as f64) * scale).round() as i32
 }
 
-/// Rewrite every `<digits>px` literal in `template` by `factor`.
-///
-/// The launcher is fullscreen on an output of unknown size, and GTK CSS has no
-/// unit that follows it, so the stylesheet is written at the design size and
-/// multiplied on the way in. The consequence to remember: **a size that should
-/// scale has to be written here in px**. Anything left to the GTK theme, or
-/// given in any other unit, keeps its logical value and so shrinks on screen as
-/// everything around it grows. (The HUD learned this the hard way — see the
-/// note at the top of its own stylesheet.)
-fn scale_px_literals(template: &str, factor: f64) -> String {
-    let bytes = template.as_bytes();
-    let mut out = String::with_capacity(template.len() + 128);
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            let digits = &template[start..i];
-            if template[i..].starts_with("px") {
-                let n: f64 = digits.parse().unwrap_or(0.0);
-                out.push_str(&((n * factor).round() as i64).to_string());
-                out.push_str("px");
-                i += 2;
-            } else {
-                out.push_str(digits);
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
-}
-
 /// The launcher stylesheet, resolved against the design tokens and scaled for
 /// the output it will be shown on.
 ///
-/// Tokens first, scaling second, and the order matters: a token carries a bare
-/// number (`24`), the stylesheet spells the unit (`@radius-compartment@px`),
-/// and only once it is `24px` can the scaler see it. Substituting afterwards
-/// would drop every token-derived length back to its design size.
+/// The two passes and the order they run in belong to `lunchbox-branding`,
+/// because the HUD's stylesheet needs the same two.
 pub fn stylesheet(scale: f64) -> String {
-    scale_px_literals(&resolve_tokens(CSS_TEMPLATE), scale)
+    lunchbox_branding::stylesheet(CSS_TEMPLATE, scale)
 }
 
-/// Replace every `@name@` in the stylesheet with its design token.
-///
-/// An unknown name is a panic rather than a silent pass-through: it means the
-/// stylesheet asked for a token the design file does not define, and a CSS rule
-/// containing a stray `@earn-colour@` would be dropped by GTK's parser without
-/// a word — the kind of failure that reaches a screenshot rather than a build.
-fn resolve_tokens(template: &str) -> String {
-    let mut out = String::with_capacity(template.len() + 512);
-    let mut rest = template;
-    while let Some(start) = rest.find('@') {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('@') else {
-            panic!(
-                "unterminated `@` in the stylesheet near: {}",
-                &rest[start..rest.len().min(start + 40)]
-            );
-        };
-        let name = &after[..end];
-        let value = tokens::CSS
-            .iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, value)| *value)
-            .unwrap_or_else(|| {
-                panic!("the stylesheet wants `@{name}@`, which tokens.json does not define")
-            });
-        out.push_str(value);
-        rest = &after[end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Written at the design size; see `scale_px_literals` for why every length is
-/// in `px`. Colours are spelled out rather than named through GTK's own
+/// Written at the design size; see `lunchbox_branding::scale_px_literals` for
+/// why every length is in `px`. Colours are spelled out rather than named through GTK's own
 /// `@define-color`, so that this file and `tokens.json` are diffable.
 const CSS_TEMPLATE: &str = r#"
 /* ---------------------------------------------------------------- the tin */
@@ -526,14 +455,6 @@ mod tests {
         );
     }
 
-    /// And asking for one the design file does not define is a build-time
-    /// noise, not a silent pass-through.
-    #[test]
-    #[should_panic(expected = "tokens.json does not define")]
-    fn an_unknown_token_is_loud() {
-        resolve_tokens("a { color: @color-chartreuse@; }");
-    }
-
     /// Tokens are substituted before the scaler runs, so a length that came
     /// from the design file scales like any other. Written the other way round,
     /// every token-derived size would stay stuck at its design value.
@@ -572,19 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn px_literals_scale_and_nothing_else_does() {
-        let css = scale_px_literals(
-            "a { margin: 10px 4px; opacity: 0.50; color: #1C1B18; }",
-            1.5,
-        );
-        assert_eq!(
-            css, "a { margin: 15px 6px; opacity: 0.50; color: #1C1B18; }",
-            "only <digits>px may be rewritten: opacities, colours and \
-             unitless numbers have to survive untouched"
-        );
-    }
-
-    #[test]
     fn the_stylesheet_scales_as_a_whole() {
         let one = stylesheet(1.0);
         let two = stylesheet(2.0);
@@ -605,18 +513,24 @@ mod tests {
 
     #[test]
     fn scale_follows_the_narrower_axis_and_stays_sane() {
+        // Written against the design size rather than the number it works out
+        // to. These used to say 664 and 996, which is 720 and 1080 with a 56px
+        // HUD taken off — and stopped being true the moment the bar's own token
+        // changed (issue #209 took it to 48). The field's height is not this
+        // file's to know twice.
+        let field = DESIGN_HEIGHT as i32;
         assert_eq!(
-            scale_for(1280, 664),
+            scale_for(DESIGN_WIDTH as i32, field),
             1.0,
             "the design size is 1.0 by definition"
         );
         assert_eq!(
-            scale_for(1920, 996),
+            scale_for((DESIGN_WIDTH * 1.5) as i32, (DESIGN_HEIGHT * 1.5) as i32),
             1.5,
-            "1920x1080 with the HUD taken off"
+            "a 1.5x output, with the HUD taken off both"
         );
         // A wide, short output must not scale by width and clip the row.
-        assert_eq!(scale_for(2560, 664), 1.0);
+        assert_eq!(scale_for(2560, field), 1.0);
         // Degenerate outputs must not produce a degenerate stylesheet.
         assert_eq!(scale_for(0, 0), 1.0);
         assert_eq!(scale_for(320, 200), 0.75, "clamped at the 12px type floor");

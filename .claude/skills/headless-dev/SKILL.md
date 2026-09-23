@@ -132,6 +132,31 @@ Example (bedtime restriction):
 
 ## Gotchas (read before trusting a screenshot)
 
+- **`dev headless` does not kill the previous session's HUD.** Respawning
+  without `dev stop` first leaves the old `lunchbox-hud` running, and because it
+  is a layer-shell surface on the overlay layer the new one draws *on top of*
+  it. The screenshot then shows two builds at once — which reads as a layout
+  bug, not as a stale process: a label that should be hidden is still there,
+  because the older binary is still drawing it. `ps -eo pid,ppid,args | grep
+  [l]unchbox-hud` should show exactly two lines, a `sh -c sleep 1 && ...` and
+  its child. Always `dev stop` before `dev headless`, including with
+  `--no-build`.
+
+- **Hover states are always on, for whatever a popover grabbed.** With the
+  pointer parked in the far corner, the confirmation prompt's default button
+  still renders its `:hover` colour: the popover takes a grab and GTK treats the
+  widget under it as hovered. So a screenshot of a popover is a screenshot of a
+  hover state, and a resting colour you never chose can go unphotographed for a
+  whole branch. Read the CSS for what *should* be there, and sample pixels to
+  find out what is.
+
+- **Sample pixels; do not squint at a crop.** A 4x upscale of a dark region is
+  convincing and wrong — an ink keyline on a dark terminal is ink on ink, and
+  reading "there is no border here" off one cost a real border in issue #209. A
+  three-line Pillow script that prints a row or a column of RGB values settles
+  in seconds what an eye cannot settle at all: `[im.getpixel((x, y)) for y in
+  range(a, b)]`.
+
 - **`dev click` doesn't reliably activate GTK widgets.** The synthetic pointer
   (`swaymsg seat seat0 cursor set/press/release`) does not fire GTK4
   `connect_clicked` handlers here — a launcher grid tile won't launch and a HUD
