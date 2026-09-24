@@ -78,6 +78,8 @@ use lunchbox_state_proto::WifiAuthorityReply;
 use tracing::{debug, info, warn};
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 
+mod forget;
+
 /// The polkit action that gates writing a system connection profile.
 const ACTION_MODIFY_SYSTEM: &str = "org.freedesktop.NetworkManager.settings.modify.system";
 
@@ -233,6 +235,12 @@ trait SettingsConnection {
     ) -> zbus::Result<HashMap<String, OwnedValue>>;
 
     fn delete(&self) -> zbus::Result<()>;
+
+    /// The file the profile was loaded from. netplan's are generated under
+    /// `/run/NetworkManager/system-connections/netplan-*`, which is how
+    /// [`forget::remove_profile`] tells them apart.
+    #[zbus(property)]
+    fn filename(&self) -> zbus::Result<String>;
 }
 
 /// Writes wireless profiles, and remembers how the last join went.
@@ -446,26 +454,15 @@ impl WifiCustodian {
         Ok(())
     }
 
-    /// Delete a saved profile.
+    /// Remove a saved profile, and nothing else.
     ///
-    /// On Ubuntu this has a side effect worth knowing about: NetworkManager's
-    /// settings backend is netplan, and a delete makes netplan rewrite the
-    /// whole of `/etc/netplan` — during the investigation it stripped a
-    /// comment from `01-network-manager-all.yaml` and removed
-    /// `00-installer-config.yaml` outright. Nothing here can prevent that;
-    /// it is recorded so the next person to see a mangled `/etc/netplan` knows
-    /// where to look. See the history note, and issue #194.
+    /// Not NetworkManager's `Delete` for a profile stored in netplan: on
+    /// Ubuntu that rewrites every file in `/etc/netplan`. See [`forget`].
     pub async fn forget(&self, id: &str) -> Result<bool> {
         let Some((path, ssid)) = self.find_by_uuid(id).await? else {
             return Ok(false);
         };
-        let profile = SettingsConnectionProxy::builder(&self.conn)
-            .path(path)?
-            .build()
-            .await?;
-        with_timeout(profile.delete())
-            .await
-            .context("deleting the profile")?;
+        forget::remove_profile(&self.conn, &path).await?;
         info!(%ssid, "forgot a Wi-Fi network");
         Ok(true)
     }
@@ -711,7 +708,7 @@ async fn watch_join(
                         // Only now, with the new one on disk: removed any
                         // earlier, a failed save would leave no profile at all.
                         if let Some(old) = persist.replaces {
-                            match delete_profile(&conn, &old).await {
+                            match forget::remove_profile(&conn, &old).await {
                                 Ok(()) => info!(%ssid, "retired the profile it replaces"),
                                 Err(e) => warn!(
                                     %ssid, error = %e,
@@ -774,15 +771,6 @@ async fn persist_profile(conn: &zbus::Connection, path: &OwnedObjectPath) -> Res
         .await?;
     with_timeout(profile.update2(HashMap::new(), UPDATE2_TO_DISK, HashMap::new())).await?;
     Ok(())
-}
-
-/// Delete a saved profile. Used to retire the one a successful join replaced.
-async fn delete_profile(conn: &zbus::Connection, path: &OwnedObjectPath) -> Result<()> {
-    let profile = SettingsConnectionProxy::builder(conn)
-        .path(path.clone())?
-        .build()
-        .await?;
-    with_timeout(profile.delete()).await
 }
 
 /// A device state reason, as the thing a parent should do about it.
@@ -934,7 +922,8 @@ async fn with_timeout<T>(future: impl std::future::Future<Output = zbus::Result<
     }
 }
 
-/// Whether an error is NetworkManager refusing on polkit's behalf.
+/// Whether an error is NetworkManager, or systemd starting the forget unit,
+/// refusing on polkit's behalf.
 ///
 /// Told apart by the D-Bus error *name*, which NetworkManager keeps stable
 /// across its interfaces (`org.freedesktop.NetworkManager.PermissionDenied`,
@@ -952,7 +941,14 @@ pub fn is_polkit_refusal(error: &anyhow::Error) -> bool {
 }
 
 fn is_refusal_name(name: &str) -> bool {
-    name.starts_with("org.freedesktop.NetworkManager") && name.ends_with(".PermissionDenied")
+    (name.starts_with("org.freedesktop.NetworkManager") && name.ends_with(".PermissionDenied"))
+        // systemd, refusing to start the forget unit. With no rule, polkit
+        // would ask, so systemd answers `InteractiveAuthorizationRequired`
+        // (measured); a rule that says no outright gives `AccessDenied`.
+        // Nobody can be asked either way. Both arrive as plain method errors
+        // through a proxy, never as zbus's typed `fdo` ones.
+        || name == "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired"
+        || name == "org.freedesktop.DBus.Error.AccessDenied"
 }
 
 /// Ask polkit whether this daemon may write and join a system connection
@@ -1204,6 +1200,20 @@ mod tests {
         ] {
             assert!(!is_refusal_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn systemd_refusing_the_forget_unit_is_a_refusal() {
+        // A refusal has to reach a parent as the thing they can fix (install
+        // the rule), not as an internal error. The first name is what systemd
+        // sent on 26.04 with the unit grant missing from the rules file.
+        for name in [
+            "org.freedesktop.DBus.Error.InteractiveAuthorizationRequired",
+            "org.freedesktop.DBus.Error.AccessDenied",
+        ] {
+            assert!(is_refusal_name(name), "{name}");
+        }
+        assert!(!is_refusal_name("org.freedesktop.systemd1.NoSuchUnit"));
     }
 
     #[test]

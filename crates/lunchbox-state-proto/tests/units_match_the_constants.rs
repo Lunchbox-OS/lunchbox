@@ -193,6 +193,38 @@ fn the_wifi_rule_grants_the_write_action_to_the_custodian() {
 }
 
 #[test]
+fn the_wifi_rule_lets_the_custodian_start_the_forget_unit_and_nothing_else() {
+    // Issue #194. `manage-units` is systemd's whole unit API: unconditioned,
+    // this grant would let the custodian stop the firewall or start a shell.
+    // What makes it acceptable is the three conditions beside it.
+    let granting = granting_lines("50-lunchbox-network.rules");
+    let clause = &granting[granting
+        .find("org.freedesktop.systemd1.manage-units")
+        .expect("the Wi-Fi rule no longer lets the custodian forget a network without netplan")..];
+    let clause = &clause[..clause.find("polkit.Result.YES").expect("the clause grants")];
+
+    assert!(
+        clause.contains(&format!("subject.user === \"{STATE_USER}\"")),
+        "the unit grant does not name {STATE_USER}"
+    );
+    assert!(
+        clause.contains("action.lookup(\"verb\") === \"start\""),
+        "the unit grant is not limited to starting a unit"
+    );
+    let unit = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dist/systemd/lunchbox-wifi-forget@.service");
+    assert!(
+        unit.exists(),
+        "the unit the rule names is not in dist/systemd"
+    );
+    assert!(
+        clause.contains("/^lunchbox-wifi-forget@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.service$/"),
+        "the unit grant no longer pins the unit name to lunchbox-wifi-forget@<uuid>.service, \
+         anchored at both ends"
+    );
+}
+
+#[test]
 fn the_wifi_rule_does_not_grant_the_kiosk_user() {
     // The whole reason this rule exists rather than adding the kiosk user to
     // netdev: every activity runs as the kiosk user, and this action was
