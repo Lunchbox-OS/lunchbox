@@ -23,7 +23,7 @@
 
 [Unit]
 Description=Socket for lunchbox's state custodian (user %i)
-Documentation=https://github.com/aarmea/lunchbox/issues/157
+Documentation=https://github.com/Lunchbox-OS/lunchbox/issues/157
 
 [Socket]
 ListenStream=/run/lunchboxd/state/%i.sock

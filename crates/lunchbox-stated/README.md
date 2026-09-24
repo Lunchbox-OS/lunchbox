@@ -342,7 +342,7 @@ set answers the setup endpoints and nothing else. Since #185 that API also
 `WriteFile` was always in the protocol, and what changed is that lunchboxd now
 sends one.
 
-[#157]: https://github.com/aarmea/lunchbox/issues/157
-[#172]: https://github.com/aarmea/lunchbox/issues/172
+[#157]: https://github.com/Lunchbox-OS/lunchbox/issues/157
+[#172]: https://github.com/Lunchbox-OS/lunchbox/issues/172
 [`2026-08-29 004`]: ../../docs/ai/history/
 [`2026-08-29 005`]: ../../docs/ai/history/

@@ -31,7 +31,7 @@
 //! A rim and two hands, and nothing else. The first version of this (in the
 //! HUD) also drew quarter-hour ticks; the branding concept does not, and the
 //! flat ring is what matches the rest of the launcher — see the review on
-//! <https://github.com/aarmea/lunchbox/pull/208>. The HUD's own restyle is
+//! <https://github.com/Lunchbox-OS/lunchbox/pull/208>. The HUD's own restyle is
 //! issue #209.
 
 use chrono::{DateTime, Local};

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Lunchbox Companion</string>
-    <string name="issue_tracker_url">https://github.com/aarmea/lunchbox/issues</string>
+    <string name="issue_tracker_url">https://github.com/Lunchbox-OS/lunchbox/issues</string>
 </resources>

@@ -14,7 +14,7 @@
 <policyconfig>
 
   <vendor>Lunchbox Launcher</vendor>
-  <vendor_url>https://github.com/aarmea/lunchbox</vendor_url>
+  <vendor_url>https://github.com/Lunchbox-OS/lunchbox</vendor_url>
 
   <!--
     One action covers every helper subcommand because polkit's

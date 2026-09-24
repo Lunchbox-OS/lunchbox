@@ -426,7 +426,7 @@ EOF
 
 # The Forgejo project whose releases carry the APKs. Overridable so a fork or a
 # staging server can be pointed at without editing this file.
-LUNCHBOX_FORGE_URL="${LUNCHBOX_FORGE_URL:-https://github.com/aarmea/lunchbox}"
+LUNCHBOX_FORGE_URL="${LUNCHBOX_FORGE_URL:-https://github.com/Lunchbox-OS/lunchbox}"
 
 # Downloaded release APKs are cached here so a re-run does not re-fetch. Per
 # user rather than system-wide, because this command deliberately does not want
