@@ -21,11 +21,11 @@ use lunchbox_core::{BeginStopDecision, CoreEngine, CoreEvent};
 use lunchbox_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
     HudLayoutController, LightSensor, NetworkInfoProvider, NoOpDisplayController,
-    StopMode as HostStopMode, VolumeController,
+    StopMode as HostStopMode, VolumeController, WifiController,
 };
 use lunchbox_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxNetworkInfo,
-    LinuxVolumeController, PipeWireAudioRouter, SwayIpcBackend,
+    LinuxVolumeController, LinuxWifiReader, PipeWireAudioRouter, SwayIpcBackend,
 };
 use lunchbox_http::{AppState as HttpAppState, HttpServer};
 use lunchbox_ipc::{IpcServer, ServerMessage};
@@ -114,6 +114,7 @@ mod internet;
 mod media;
 mod pairing_display;
 mod system_events;
+mod wifi;
 
 use display::{DisplayManager, WlMirrorLauncher};
 use hidpi::XwaylandHidpi;
@@ -296,6 +297,14 @@ struct Service {
     /// what to say if not. Carried for the same reason [`StateProtection`] is:
     /// it is settled before there is a diagnostics channel to report it on.
     session_guard: SessionGuard,
+    /// Wi-Fi configuration (issue #194): NetworkManager for the reads, the
+    /// custodian for the writes.
+    ///
+    /// Carried rather than rebuilt where the service is assembled, because
+    /// whether the custodian answered at all is only known during startup —
+    /// and because the polkit answer it holds feeds a diagnostic that is
+    /// raised later, once there is somewhere to say it.
+    wifi: Arc<wifi::CustodialWifi>,
 }
 
 /// Whether the session survives this daemon being killed (issue #172).
@@ -930,6 +939,30 @@ impl Service {
         })
     }
 
+    /// What to say about a device that cannot save a Wi-Fi network.
+    ///
+    /// `None` on a device that can, and on one with no wireless adapter —
+    /// which is not missing anything and should not be told it is.
+    fn wifi_config_unavailable_diagnostic(reason: &str) -> Diagnostic {
+        Diagnostic {
+            code: DiagnosticCode::WifiConfigUnavailable,
+            subject: DiagnosticSubject::Service,
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "this device can list Wi-Fi networks but cannot save one, so the management \
+                 UIs offer no way to point it at a new network — {reason}"
+            ),
+            remedy: Some(
+                "Install the polkit rule that lets the state custodian write a network \
+                 profile (/etc/polkit-1/rules.d/50-lunchbox-network.rules, shipped with the \
+                 package and installed by `lunchbox install state`), then reload polkit. \
+                 Until then, use administrator mode to set the network up on the device."
+                    .to_string(),
+            ),
+            since: lunchbox_util::now(),
+        }
+    }
+
     /// Report an unguarded session once diagnostics exist, for the same
     /// ordering reason [`Self::degraded_state_protection_is_reported`] is
     /// separate: this is settled at startup, before there is anywhere to say it.
@@ -992,6 +1025,20 @@ impl Service {
         if state_protection == StateProtection::Custodian {
             Self::warn_about_a_superseded_local_store(&data_dir);
         }
+
+        // Wi-Fi configuration (issue #194). The reads run here, needing no
+        // privilege; the writes go to the custodian, which holds the polkit
+        // grant this uid must not -- every activity runs as this uid, and that
+        // grant reads back every saved network's password.
+        //
+        // Built from `custodian_answered` rather than from a fresh connection
+        // attempt, so a device that fell back to a local store does not then
+        // claim it can save networks.
+        let wifi_user = custodian_answered.then(Self::this_user).flatten();
+        let wifi = Arc::new(wifi::CustodialWifi::new(
+            Arc::new(LinuxWifiReader::new()) as Arc<dyn WifiController>,
+            wifi_user.as_deref(),
+        ));
 
         // Log service start
         store.append_audit(AuditEvent::new(AuditEventType::ServiceStarted))?;
@@ -1133,6 +1180,7 @@ impl Service {
             data_dir,
             supervision,
             session_guard,
+            wifi,
         })
     }
 
@@ -1455,6 +1503,9 @@ impl Service {
         let ipc_peer_hardening = self.ipc_peer_hardening.clone();
         let state_protection = self.state_protection.clone();
         let session_guard = self.session_guard.clone();
+        // Copied out for the same reason, and used twice: once to build the
+        // service and once to report a missing grant (issue #194).
+        let wifi_for_diagnostic = Arc::clone(&self.wifi);
         // Moved out rather than cloned: what keeps the watchdog quiet is this
         // value existing, so the loop below has to be the thing that owns it.
         // When `run` returns, it drops, the connection closes, and the custodian
@@ -1725,6 +1776,7 @@ impl Service {
                     Arc::new(diagnostic_publisher.clone()) as Arc<dyn lunchbox_api::DiagnosticSink>
                 ),
                 network: Some(Arc::new(LinuxNetworkInfo::new()) as Arc<dyn NetworkInfoProvider>),
+                wifi: Some(Arc::clone(&self.wifi) as Arc<dyn WifiController>),
                 web_listener: web_listener.clone(),
                 web_auth: web_auth.clone(),
             })
@@ -2087,6 +2139,14 @@ impl Service {
         Self::degraded_ipc_hardening_is_reported(&ipc_peer_hardening, &diagnostic_publisher);
         Self::degraded_state_protection_is_reported(&state_protection, &diagnostic_publisher);
         Self::unguarded_session_is_reported(&session_guard, &diagnostic_publisher);
+        // Settled at startup like the others, and reported here for the same
+        // reason (issue #194). Asked of the adapter as well as of the grant: a
+        // device with no radio is not missing a permission.
+        if let Some(reason) = wifi_for_diagnostic.unavailable_reason()
+            && wifi_for_diagnostic.has_adapter().await
+        {
+            diagnostic_publisher.raise(Self::wifi_config_unavailable_diagnostic(reason));
+        }
 
         // Every sway connection this daemon needs is now open, so the socket's
         // name in the filesystem has done its job (issue #144).

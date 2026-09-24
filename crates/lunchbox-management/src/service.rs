@@ -7,16 +7,17 @@ use lunchbox_api::{
     AudioOutputRecord, BrightnessInfo, BrightnessRestrictions, DailyOverride, DesktopApp,
     Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticSink,
     DiagnosticSubject, DisplayMode, DisplayState, EntryKind, EntryView, Event, EventPayload,
-    GroupView, HealthStatus, HudOrientation, NetworkStatusView, ServiceStateSnapshot,
-    SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo,
-    VolumeRestrictions, WindowAction, WindowInfo, WindowOwner,
+    GroupView, HealthStatus, HudOrientation, NetworkStatusView, SavedWifiNetwork,
+    ServiceStateSnapshot, SessionEndReason, SessionInfo, StopMode, TokenStatus, UsageStat,
+    VolumeInfo, VolumeRestrictions, WifiJoinRequest, WifiJoinState, WifiScanView, WindowAction,
+    WindowInfo, WindowOwner, aggregate_networks,
 };
 use lunchbox_config::{BrightnessPolicy, VolumePolicy, parse_config};
 use lunchbox_core::{BeginStopDecision, CoreEngine, CoreEvent, LaunchDecision, TokenAdjustError};
 use lunchbox_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HudLayoutController,
     LightSensor, NetworkInfoProvider, NetworkSnapshot, SpawnOptions, SponsorBlockSpec,
-    VolumeController, VolumeError,
+    VolumeController, VolumeError, WifiController, WifiError,
 };
 use lunchbox_store::{AuditEvent, AuditEventType, Store};
 use lunchbox_util::{EntryId, LimitSubject, MonotonicInstant, ProtectedFile, ProtectedFiles};
@@ -375,6 +376,38 @@ pub trait ManagementService: Send + Sync {
     /// them from there.
     async fn network_status(&self) -> NetworkStatusView;
 
+    // Wi-Fi configuration (issue #194)
+    /// Ask for a fresh scan and return at once.
+    ///
+    /// Results arrive as property changes seconds later, so there is nothing
+    /// to wait for. A UI calls this when its network page opens and then polls
+    /// [`Self::wifi_networks`].
+    async fn wifi_scan(&self) -> ManagementResult<()>;
+
+    /// What is in range, plus what the last join is doing.
+    ///
+    /// One call for both because the UI is already polling this to refresh
+    /// signal strengths, and a join's outcome cannot be returned by the call
+    /// that started it — association plus DHCP outlives the companion's
+    /// 15-second RPC timeout.
+    async fn wifi_networks(&self) -> WifiScanView;
+
+    /// Networks this device already knows. Never includes a password.
+    async fn wifi_saved_networks(&self) -> ManagementResult<Vec<SavedWifiNetwork>>;
+
+    /// Remember a network, and join it if the request says to.
+    ///
+    /// Returns once the profile is written and the activation accepted, not
+    /// once the device is on the network. Saving over an existing profile for
+    /// the same SSID updates it rather than adding a second.
+    async fn wifi_save(&self, request: WifiJoinRequest) -> ManagementResult<SavedWifiNetwork>;
+
+    /// Join a network this device already has a profile for.
+    async fn wifi_connect(&self, id: String) -> ManagementResult<()>;
+
+    /// Delete a saved profile. `false` when there was nothing to delete.
+    async fn wifi_forget(&self, id: String) -> ManagementResult<bool>;
+
     // Administrator mode (issue #154)
     /// Relax the kiosk so a caregiver can set the device up in place: the
     /// compositor's key grabs are released, the screen stops blanking, and
@@ -569,6 +602,11 @@ pub struct DefaultManagementService {
     /// embedding with no way to look, which reports itself as
     /// `NetworkSource::Unavailable` rather than as a device with no network.
     pub network: Option<Arc<dyn NetworkInfoProvider>>,
+    /// How to scan for and join wireless networks (issue #194). `None` on an
+    /// embedding with no wireless backend, which reports itself as
+    /// unsupported — a device that cannot look, not a device with no networks
+    /// in range.
+    pub wifi: Option<Arc<dyn WifiController>>,
     /// What the web management interface is really doing, as opposed to what
     /// the config asked for. Written by whoever owns the listener; `Disabled`
     /// by default, which is the truth for an embedding that never starts one.
@@ -593,6 +631,32 @@ pub struct DefaultManagementService {
     /// claim machine does not exist until the BLE server is built, and the BLE
     /// server needs this service to build.
     pub admins: std::sync::RwLock<Option<Arc<dyn AdminRoster>>>,
+}
+
+impl DefaultManagementService {
+    /// The wireless backend, or the error a device without one owes its
+    /// caller. Separate from an empty scan: "this device cannot look" and
+    /// "nothing is in range" are different answers.
+    fn wifi(&self) -> ManagementResult<&Arc<dyn WifiController>> {
+        self.wifi
+            .as_ref()
+            .ok_or_else(|| ManagementError::Unprocessable("This device has no Wi-Fi".into()))
+    }
+}
+
+/// Map a backend failure onto the transports' vocabulary.
+///
+/// `NotAuthorized` becomes `Forbidden` rather than `Internal` on purpose: it
+/// is the one failure here that a person can fix, and it needs to reach a UI
+/// as something other than "something went wrong".
+fn wifi_error(error: WifiError) -> ManagementError {
+    match error {
+        WifiError::NoAdapter => ManagementError::Unprocessable(error.to_string()),
+        WifiError::NotAuthorized => ManagementError::Forbidden(error.to_string()),
+        WifiError::UnknownNetwork => ManagementError::NotFound(error.to_string()),
+        WifiError::Rejected(message) => ManagementError::BadRequest(message),
+        WifiError::Backend(message) => ManagementError::Internal(message),
+    }
 }
 
 #[async_trait]
@@ -1691,6 +1755,106 @@ impl ManagementService for DefaultManagementService {
             snapshot.interfaces,
             listener,
         )
+    }
+
+    // ------------------------------------------------------------------ wifi
+    async fn wifi_scan(&self) -> ManagementResult<()> {
+        self.wifi()?.scan().await.map_err(wifi_error)
+    }
+
+    async fn wifi_networks(&self) -> WifiScanView {
+        // Infallible: a network page's only response to an error is to render
+        // nothing, and "this device has no Wi-Fi" is what an absent backend
+        // truthfully means.
+        let Some(wifi) = &self.wifi else {
+            return WifiScanView {
+                supported: false,
+                radio_enabled: false,
+                networks: Vec::new(),
+                truncated: false,
+                last_scan_age_s: None,
+                join: WifiJoinState::Idle,
+                can_configure: false,
+            };
+        };
+        let snapshot = wifi.networks().await;
+        let (networks, truncated) = aggregate_networks(snapshot.networks);
+        // Checked against the radio only when there is a radio reading to
+        // check it against; see `WifiJoinState::reconciled`.
+        let join = wifi.join_state().await;
+        let join = if snapshot.supported {
+            join.reconciled(&networks)
+        } else {
+            join
+        };
+        WifiScanView {
+            supported: snapshot.supported,
+            radio_enabled: snapshot.radio_enabled,
+            networks,
+            truncated,
+            last_scan_age_s: snapshot.last_scan_age_s,
+            join,
+            can_configure: wifi.can_configure().await,
+        }
+    }
+
+    async fn wifi_saved_networks(&self) -> ManagementResult<Vec<SavedWifiNetwork>> {
+        self.wifi()?.saved().await.map_err(wifi_error)
+    }
+
+    async fn wifi_save(&self, request: WifiJoinRequest) -> ManagementResult<SavedWifiNetwork> {
+        // Validate before the backend, and before the audit row: a rejected
+        // request did not happen, and saying why beats twenty seconds of
+        // association failing for a reason that reads as something else.
+        request
+            .validate()
+            .map_err(|e| ManagementError::BadRequest(e.message().to_string()))?;
+
+        let saved = self.wifi()?.save(&request).await.map_err(wifi_error)?;
+
+        // Best-effort, like every other audit call on this path: failing to
+        // record a change that happened must not report the change as failed.
+        let _ = self
+            .store
+            .append_audit(AuditEvent::new(AuditEventType::WifiNetworkSaved {
+                ssid: saved.ssid.clone(),
+                connected: request.connect,
+            }));
+        // `request` is deliberately not in this line. Its Debug redacts the
+        // password, but naming the field at all invites someone to widen it.
+        info!(
+            ssid = %saved.ssid,
+            connect = request.connect,
+            "saved a Wi-Fi network"
+        );
+        Ok(saved)
+    }
+
+    async fn wifi_connect(&self, id: String) -> ManagementResult<()> {
+        self.wifi()?.connect(&id).await.map_err(wifi_error)
+    }
+
+    async fn wifi_forget(&self, id: String) -> ManagementResult<bool> {
+        let wifi = self.wifi()?;
+        // Read the name before deleting it: afterwards there is nothing left
+        // to look it up from, and an audit row saying only a UUID answers
+        // nobody's question about why the device fell off the network.
+        let ssid = wifi
+            .saved()
+            .await
+            .ok()
+            .and_then(|saved| saved.into_iter().find(|n| n.id == id).map(|n| n.ssid));
+
+        let removed = wifi.forget(&id).await.map_err(wifi_error)?;
+        if removed {
+            let _ =
+                self.store
+                    .append_audit(AuditEvent::new(AuditEventType::WifiNetworkForgotten {
+                        ssid: ssid.clone().unwrap_or_else(|| id.clone()),
+                    }));
+            info!(ssid = ?ssid, "forgot a Wi-Fi network");
+        }
+        Ok(removed)
     }
 
     async fn list_windows(&self) -> ManagementResult<Vec<WindowInfo>> {

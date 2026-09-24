@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDate};
 use lunchbox_api::{
     BrightnessInfo, BrightnessRestrictions, DailyOverride, DisplayMode, DisplayState, EntryView,
-    Event, GroupView, HealthStatus, NetworkStatusView, ServiceStateSnapshot, SessionInfo, StopMode,
-    TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WebListenerView, WindowAction,
-    WindowInfo,
+    Event, GroupView, HealthStatus, NetworkStatusView, SavedWifiNetwork, ServiceStateSnapshot,
+    SessionInfo, StopMode, TokenStatus, UsageStat, VolumeInfo, VolumeRestrictions, WebListenerView,
+    WifiJoinRequest, WifiJoinState, WifiScanView, WifiSecurity, WindowAction, WindowInfo,
 };
 use lunchbox_management::{LaunchOutcome, ManagementError, ManagementResult, ManagementService};
 use lunchbox_util::{EntryId, LimitSubject};
@@ -289,6 +289,62 @@ impl ManagementService for MockSvc {
 
     async fn network_status(&self) -> NetworkStatusView {
         NetworkStatusView::unavailable(WebListenerView::disabled())
+    }
+
+    // Wi-Fi (issue #194). Canned, but not empty: a scan of nothing and a scan
+    // of one saved network exercise different branches of the dispatcher, and
+    // the BLE frame-size test needs a view that actually has a network in it.
+    async fn wifi_scan(&self) -> ManagementResult<()> {
+        Ok(())
+    }
+
+    async fn wifi_networks(&self) -> WifiScanView {
+        WifiScanView {
+            supported: true,
+            radio_enabled: true,
+            networks: vec![lunchbox_api::WifiNetwork {
+                ssid: "mock-network".into(),
+                security: WifiSecurity::WpaPsk,
+                signal_percent: 72,
+                bands_ghz: vec![2, 5],
+                saved: true,
+                active: true,
+            }],
+            truncated: false,
+            last_scan_age_s: Some(4),
+            join: WifiJoinState::Idle,
+            can_configure: true,
+        }
+    }
+
+    async fn wifi_saved_networks(&self) -> ManagementResult<Vec<SavedWifiNetwork>> {
+        Ok(vec![SavedWifiNetwork {
+            id: "mock-uuid".into(),
+            ssid: "mock-network".into(),
+            security: WifiSecurity::WpaPsk,
+            hidden: false,
+            autoconnect: true,
+            active: true,
+        }])
+    }
+
+    async fn wifi_save(&self, request: WifiJoinRequest) -> ManagementResult<SavedWifiNetwork> {
+        Ok(SavedWifiNetwork {
+            id: "mock-uuid".into(),
+            ssid: request.ssid,
+            security: request.security,
+            hidden: request.hidden,
+            autoconnect: true,
+            active: request.connect,
+        })
+    }
+
+    async fn wifi_connect(&self, _id: String) -> ManagementResult<()> {
+        Ok(())
+    }
+
+    async fn wifi_forget(&self, id: String) -> ManagementResult<bool> {
+        Ok(id == "mock-uuid")
     }
 
     async fn enter_admin_mode(&self) -> ManagementResult<()> {

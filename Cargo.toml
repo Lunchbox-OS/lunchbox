@@ -17,6 +17,7 @@ members = [
     "crates/lunchboxd",
     "crates/lunchbox-state-proto",
     "crates/lunchbox-stated",
+    "crates/lunchbox-wifi-forget",
     "crates/lunchbox-branding",
     "crates/lunchbox-widgets",
     "crates/lunchbox-launcher-ui",
@@ -60,6 +61,7 @@ default-members = [
     "crates/lunchboxd",
     "crates/lunchbox-state-proto",
     "crates/lunchbox-stated",
+    "crates/lunchbox-wifi-forget",
     "crates/lunchbox-branding",
     "crates/lunchbox-widgets",
     "crates/lunchbox-launcher-ui",
@@ -223,6 +225,15 @@ sha2 = "0.10"
 # `uaparser` would bring. Output is a label a person reads, never an input to
 # a decision.
 woothee = "0.13"
+
+# Forgetting a Wi-Fi network without letting netplan rewrite /etc/netplan
+# (lunchbox-wifi-forget, issue #194), as root. `yaml-edit` removes one key and
+# keeps every other byte, comments included, which netplan's own delete does
+# not. It is young, so `yaml-rust2`, an independent and widely used parser,
+# checks each edit before it is written. Default features off: neither needs
+# encodings or base64 to read netplan's UTF-8.
+yaml-edit = { version = "0.3", default-features = false }
+yaml-rust2 = { version = "0.13", default-features = false }
 
 # WebSocket client (Steam CEF DevTools / Chrome DevTools Protocol).
 # Default features give a non-TLS ws:// client; we only talk to loopback.

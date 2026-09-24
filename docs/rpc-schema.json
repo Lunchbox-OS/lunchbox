@@ -654,6 +654,66 @@
       }
     },
     {
+      "name": "wifi_scan",
+      "params": [],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "wifi_networks",
+      "params": [],
+      "result": {
+        "type": "WifiScanView"
+      }
+    },
+    {
+      "name": "wifi_saved_networks",
+      "params": [],
+      "result": {
+        "type": "Vec<SavedWifiNetwork>"
+      }
+    },
+    {
+      "name": "wifi_save",
+      "params": [
+        {
+          "name": "request",
+          "required": true,
+          "type": "WifiJoinRequest"
+        }
+      ],
+      "result": {
+        "type": "SavedWifiNetwork"
+      }
+    },
+    {
+      "name": "wifi_connect",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "()"
+      }
+    },
+    {
+      "name": "wifi_forget",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "type": "String"
+        }
+      ],
+      "result": {
+        "type": "bool"
+      }
+    },
+    {
       "name": "enter_admin_mode",
       "params": [],
       "result": {

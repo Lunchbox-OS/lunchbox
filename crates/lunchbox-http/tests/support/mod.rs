@@ -61,6 +61,7 @@ pub fn make_service() -> Arc<dyn ManagementService> {
         last_audio_state: Arc::new(Mutex::new(None)),
         diagnostics: None,
         network: None,
+        wifi: None,
         web_listener: WebListenerHandle::default(),
         web_auth: None,
         // No BLE in this fixture, so no roster of administrators to list

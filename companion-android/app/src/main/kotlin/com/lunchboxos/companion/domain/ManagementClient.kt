@@ -253,6 +253,48 @@ class ManagementClient(private val connection: DeviceConnection) {
     suspend fun networkStatus(): NetworkStatusView =
         decode(call("network_status", RpcParams.networkStatus()))
 
+    // Wi-Fi (issue #194)
+    /**
+     * Ask the device to scan again. Returns at once; the results arrive on the
+     * next [wifiNetworks] poll seconds later.
+     */
+    suspend fun wifiScan() {
+        call("wifi_scan", RpcParams.wifiScan())
+    }
+
+    /**
+     * What is in range, and how the last join is going.
+     *
+     * One call for both because a join takes 3 to 45 seconds — well past this
+     * app's 15-second RPC timeout — so its outcome cannot come back from the
+     * call that started it. This screen is already polling for signal
+     * strengths, so the result rides along.
+     */
+    suspend fun wifiNetworks(): WifiScanView =
+        decode(call("wifi_networks", RpcParams.wifiNetworks()))
+
+    /** Networks the device already knows. Never includes a password. */
+    suspend fun wifiSavedNetworks(): List<SavedWifiNetwork> =
+        decode(call("wifi_saved_networks", RpcParams.wifiSavedNetworks()))
+
+    /**
+     * Remember a network, and join it when [WifiJoinRequest.connect] is set.
+     *
+     * Saving a network the device already knows updates it rather than adding
+     * a second entry with the same name.
+     */
+    suspend fun wifiSave(request: WifiJoinRequest): SavedWifiNetwork =
+        decode(call("wifi_save", RpcParams.wifiSave(request)))
+
+    /** Join a network the device already has a profile for. */
+    suspend fun wifiConnect(id: String) {
+        call("wifi_connect", RpcParams.wifiConnect(id))
+    }
+
+    /** Delete a saved profile. `false` when there was nothing to delete. */
+    suspend fun wifiForget(id: String): Boolean =
+        decode(call("wifi_forget", RpcParams.wifiForget(id)))
+
     /** Relax the kiosk so the device can be set up in place (issue #154). */
     suspend fun enterAdminMode() {
         call("enter_admin_mode", RpcParams.enterAdminMode())

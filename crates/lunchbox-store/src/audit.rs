@@ -117,6 +117,27 @@ pub enum AuditEventType {
     /// allows, rather than that the daemon re-read a file.
     PolicyWritten { entry_count: usize },
 
+    /// An administrator saved a wireless network through the management API
+    /// (issue #194).
+    ///
+    /// `connected` distinguishes "remember this for later", which the web UI
+    /// leads with, from "get on it now" — different acts, and only the second
+    /// explains why the device changed networks a moment later.
+    ///
+    /// **The password is deliberately not here.** An audit row is the last
+    /// place a secret should end up: the table outlives the profile, is read
+    /// by anyone who can reach the API, and is the first thing copied into a
+    /// support request. The SSID is what makes the row useful, and it is
+    /// already public — every device in range hears it announced.
+    WifiNetworkSaved { ssid: String, connected: bool },
+
+    /// An administrator deleted a saved wireless network (issue #194).
+    ///
+    /// Worth its own row because forgetting the network the device is on is
+    /// how a device goes offline, and "it just stopped connecting" is
+    /// otherwise unanswerable after the fact.
+    WifiNetworkForgotten { ssid: String },
+
     /// Client connected
     ClientConnected {
         client_id: String,

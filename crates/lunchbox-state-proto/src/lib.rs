@@ -65,7 +65,17 @@ pub use supervise::Supervision;
 /// gone and `TokenState` lost its `ratcheted` field. A removal, unlike an
 /// addition, is not harmless to an older client: it would fail to decode every
 /// token state for want of the field, and treat every gate as locked.
-pub const PROTO_VERSION: u32 = 3;
+///
+/// 4: the wireless requests arrived (issue #194). Additions are harmless by
+/// the rule above, so this bump is not strictly required -- but it is here
+/// because the custodian's *authority* changed with them: a device running a
+/// version 3 custodian holds no NetworkManager grant, and a client that
+/// assumed otherwise would offer a parent a form that cannot work. The
+/// handshake is the cheapest place to find that out. [`WireErrorKind::Refused`]
+/// arrived in the same version: unlike a new request it is *not* harmless to
+/// an older client, which would fail to decode the reply, and that is one more
+/// reason the two ends must agree on 4.
+pub const PROTO_VERSION: u32 = 4;
 
 /// The system user that owns the state and answers this socket.
 ///
@@ -164,6 +174,41 @@ macro_rules! define_state_request {
                 file: ProtectedFile,
             },
 
+            // Wireless configuration (issue #194). Not `Store` methods and
+            // not files: they change NetworkManager, which the custodian can
+            // reach and lunchboxd's uid cannot usefully write to.
+            //
+            // Deliberately *typed*. The custodian never accepts a raw
+            // NetworkManager settings dictionary over this socket: polkit
+            // cannot narrow the grant to wireless profiles, so the only thing
+            // standing between "change the wifi" and "change any network
+            // setting" is the shape of these variants.
+            WifiSave {
+                request: lunchbox_api::WifiJoinRequest,
+            },
+            WifiConnect {
+                id: String,
+            },
+            WifiForget {
+                id: String,
+            },
+
+            /// How the join the custodian most recently started is going.
+            ///
+            /// The custodian owns the whole join -- start, watch, persist on
+            /// success -- so it is the only thing that knows. Polled, because
+            /// a join takes 3 to 45 seconds and no request may block that
+            /// long.
+            WifiJoinProgress,
+
+            /// Whether the custodian actually holds the NetworkManager grant.
+            ///
+            /// Asked once at startup and answered from the check the custodian
+            /// already ran, for the same reason [`SuperviseReply::armed`]
+            /// exists: a device that reports the feature as present and cannot
+            /// perform it is the worst available shape.
+            WifiAuthority,
+
             /// Turn this connection into a notification stream for policy
             /// changes. Answered by the connection loop, not by `handle`.
             WatchConfig,
@@ -216,6 +261,13 @@ impl StateRequest {
                 | Self::ListAudioOutputs { .. }
                 | Self::GetSetting { .. }
                 | Self::ReadFile { .. }
+                // The two wireless requests that only ask. WifiSave,
+                // WifiConnect and WifiForget are deliberately absent: a
+                // retried join would start a second activation, and a retried
+                // forget would delete a profile somebody re-created in
+                // between.
+                | Self::WifiJoinProgress
+                | Self::WifiAuthority
                 | Self::WatchConfig
                 | Self::Supervise
                 | Self::Heartbeat
@@ -236,6 +288,15 @@ pub enum WireErrorKind {
     Serialization,
     NotFound,
     Io,
+    /// Something the custodian asked for on the client's behalf was refused
+    /// by polkit (issue #194).
+    ///
+    /// Not a `StoreError` flavour -- no store call is ever refused this way --
+    /// but the one wireless failure somebody can act on, so it must not reach
+    /// a parent as "internal error". It is rebuilt as an `Io` error of kind
+    /// `PermissionDenied`, which is how the client tells it apart without
+    /// reading the message.
+    Refused,
 }
 
 impl WireErrorKind {
@@ -244,6 +305,7 @@ impl WireErrorKind {
             StoreError::Database(_) => Self::Database,
             StoreError::Serialization(_) => Self::Serialization,
             StoreError::NotFound(_) => Self::NotFound,
+            StoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Self::Refused,
             StoreError::Io(_) => Self::Io,
         }
     }
@@ -256,6 +318,10 @@ impl WireErrorKind {
             Self::Serialization => StoreError::Serialization(message),
             Self::NotFound => StoreError::NotFound(message),
             Self::Io => StoreError::Io(std::io::Error::other(message)),
+            Self::Refused => StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                message,
+            )),
         }
     }
 }
@@ -326,6 +392,19 @@ pub struct SuperviseReply {
     pub deadline: Duration,
 }
 
+/// What the custodian can do about wireless configuration.
+///
+/// Answered from the polkit check the custodian runs at startup, so a device
+/// missing its rules file says so in the Health page rather than accepting a
+/// password into a form that was never going to work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WifiAuthorityReply {
+    /// Whether a profile can actually be written.
+    pub granted: bool,
+    /// Why it cannot, when it cannot. `None` when `granted`.
+    pub reason: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +456,20 @@ mod tests {
                 key: "k".into(),
                 value: "v".into(),
             },
+            // Wireless (issue #194). A retried join starts a second
+            // activation on a device that may already have joined; a retried
+            // forget deletes a profile somebody re-created in between.
+            StateRequest::WifiSave {
+                request: lunchbox_api::WifiJoinRequest {
+                    ssid: "home".into(),
+                    security: lunchbox_api::WifiSecurity::WpaPsk,
+                    password: Some("12345678".into()),
+                    hidden: false,
+                    connect: true,
+                },
+            },
+            StateRequest::WifiConnect { id: "uuid".into() },
+            StateRequest::WifiForget { id: "uuid".into() },
         ];
         for req in mutating {
             assert!(
@@ -412,6 +505,13 @@ mod tests {
             (
                 StoreError::Io(std::io::Error::other("disk")),
                 WireErrorKind::Io,
+            ),
+            (
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "polkit said no",
+                )),
+                WireErrorKind::Refused,
             ),
         ] {
             let wire: WireResult<u8> = WireResult::from_store(Err(err));
