@@ -214,39 +214,77 @@ gh secret set LUNCHBOX_APT_KEY_PASSPHRASE --env release --repo Lunchbox-OS/lunch
 # (paste the passphrase, then Ctrl-D)
 ```
 
-## How the publish job uses it
+## Before the first release
 
-The signing half of the release job, for reference — the key lands in a
-per-run `GNUPGHOME` under `$RUNNER_TEMP` and never in the workspace:
+A `v*` tag cannot publish until every one of these is done, and fails safely
+until then — at the signing step, before anything is public:
 
-```yaml
-    environment: release          # gates the secrets + requires approval
-    steps:
-      - name: Import the signing subkey
-        env:
-          KEY_B64: ${{ secrets.LUNCHBOX_APT_KEY_B64 }}
-        run: |
-          set -euo pipefail
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          install -d -m 700 "$GNUPGHOME"
-          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
-          echo "$KEY_B64" | base64 -d | gpg --batch --quiet --import
-          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
-```
+1. The [ceremony](#one-time-ceremony) above, and the environment and secrets
+   under [GitHub setup](#github-setup). Create the environment *before* the
+   first tag: GitHub creates a missing environment on first use, with no
+   reviewer.
+2. `repository.key` committed at `dist/apt/repository.key`. The publish job
+   checks every signature it makes against this file, so a secret that is not
+   the key users trust fails the release rather than every device's
+   `apt update`.
+3. A Cloudflare Pages project named **`lunchbox-apt`**, production branch
+   `main`, with **`apt.lunchbox-os.com`** as its custom domain — set up the way
+   `lunchbox-config-editor` and `config.lunchbox-os.com` are. The job deploys
+   to it with the existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+4. A dry run: *Actions → Release → Run workflow* from `main` with `publish`
+   unticked, which builds and signs every package with the Android key but
+   publishes nothing and never reaches the archive key.
 
-and then, wherever a signature is made:
+The first release finds no published index (`InRelease` answers 404) and
+builds one from every release's assets instead of appending; after that each
+release appends.
 
-```sh
-gpg --batch --yes --pinentry-mode loopback \
-    --passphrase "$LUNCHBOX_APT_KEY_PASSPHRASE" \
-    --clearsign -o dists/stable/InRelease dists/stable/Release
-gpg --batch --yes --pinentry-mode loopback \
-    --passphrase "$LUNCHBOX_APT_KEY_PASSPHRASE" \
-    --armor --detach-sign -o "$deb.asc" "$deb"
-```
+## What a release does with it
 
-`--local-user` is unnecessary in CI: the imported keyring holds exactly one
-usable signing key.
+`release.yml`'s `publish` job, which runs in the `release` environment and
+waits for approval before its first step:
+
+| Step | Script | Fails closed on |
+|---|---|---|
+| import the subkey into a per-run `GNUPGHOME` under `$RUNNER_TEMP` | inline | an empty `LUNCHBOX_APT_KEY_B64` |
+| `.sha256` for every asset, `.asc` for each `.deb` | `scripts/ci/sign-release-assets.sh` | a `.asc` that does not verify against `dist/apt/repository.key` |
+| build-provenance attestation for every `.deb` and `.apk` | `actions/attest-build-provenance` | |
+| create the GitHub release — draft, upload, then public | `scripts/ci/publish-release.sh` | replacing an asset of a published release |
+| build and sign the apt index | `scripts/ci/publish-apt.sh` | a published index that does not verify, a changed release asset, an index signature that does not verify against `repository.key` |
+| deploy it to Pages, then `apt-get download` each architecture from the live site | inline | a downloaded `.deb` that differs from the one built |
+
+Everything is signed before anything is public, and the apt index is deployed
+only after the release it points at is public. Prerelease tags (`v0.6.0-rc1`)
+get a signed, attested release but never reach the apt index.
+
+The passphrase reaches `gpg` on stdin (`--passphrase-fd 0`), not on its
+command line. No `--local-user`: the imported keyring holds exactly one usable
+signing key.
+
+To test a change to the apt half without a release, run
+`./scripts/ci/test-publish-apt.sh` (it needs `apt-utils`). It stands the
+arrangement up offline with a throwaway key and runs a real `apt-get` against
+it. CI runs it as the *apt repository* job.
+
+### Recovering the apt index
+
+The published index is the only copy of the accumulated `Packages`. If it is
+lost or wrong, regenerate it from the release assets: *Actions → Release → Run
+workflow*, **from the latest release tag**, with both `publish` and
+`apt_rebuild` ticked. The release step finds everything already uploaded and
+changes nothing. The apt step then downloads every non-prerelease release's
+`.deb` and `.asc`, refuses any whose `.asc` does not verify, and indexes the
+lot.
+
+One thing breaks an index that still verifies: **deleting or replacing an
+asset of a published release.** apt fetches each `.deb` through a redirect to
+its release asset, so that version stops installing. `publish-release.sh` never
+replaces one, and `publish-apt.sh` refuses to index a `.deb` whose bytes differ
+from what it already indexed.
+
+`_redirects` is regenerated on every publish from `github.repository`, so if
+the repository moves again, the next release points every indexed version at
+the new name. No rebuild is needed.
 
 ## Verifying, as a user
 
@@ -256,10 +294,10 @@ usable signing key.
 ### Verifying a downloaded `.deb`
 
 ```sh
-# Authenticity, against the same key the apt instructions install:
-curl -fsSLO https://apt.lunchbox-os.com/repository.key
-gpg --import repository.key
-gpg --verify lunchbox_0.5.1_amd64.deb.asc lunchbox_0.5.1_amd64.deb
+# Authenticity, against the same key the apt instructions install -- and
+# only that key, the way apt checks, without touching your own keyring:
+curl -fsSL https://apt.lunchbox-os.com/repository.key | gpg --dearmor > lunchbox.gpg
+gpgv --keyring ./lunchbox.gpg lunchbox_0.5.1_amd64.deb.asc lunchbox_0.5.1_amd64.deb
 
 # Provenance — which workflow run, from which commit, built this file:
 gh attestation verify lunchbox_0.5.1_amd64.deb -R Lunchbox-OS/lunchbox
@@ -282,9 +320,17 @@ primary leaks:
    holding only the old key sees signature failures on every `apt update` until
    someone installs the new keyring by hand. Announce it in the release notes
    and in `docs/INSTALL.md`.
-4. Re-sign the current index with the new key and redeploy — an old index
-   signed by a revoked key verifies against nothing once devices have the new
-   keyring.
+4. Re-sign the index with the new key and redeploy. An old index signed by a
+   revoked key verifies against nothing once devices have the new keyring.
+   This takes more than an ordinary [rebuild](#recovering-the-apt-index): a
+   rebuild refuses any `.deb` whose `.asc` does not verify against the
+   *current* `repository.key`, and every past `.asc` was made by the old key.
+   Before re-signing them, check each past `.deb` with
+   `gh attestation verify`. The attestation involves no key of ours, so a
+   leaked key cannot forge one, and it is the check that still means
+   something here. Then make each new `.asc` with the new key, replace the old
+   `.asc` asset by hand (`gh release upload --clobber`, `.asc` files only, never
+   a `.deb`), and run the rebuild.
 
 Steps 3 and 4 are why the choice was "no expiry, rotate on compromise" rather
 than a dated key: a rotation is a coordinated event with a manual step on every
