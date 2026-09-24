@@ -1,4 +1,5 @@
-//! The Lunchbox branding, as the two GTK4 front ends consume it.
+//! The Lunchbox branding, as the front ends consume it: the launcher and the
+//! HUD in GTK4, and the media app in egui.
 //!
 //! `assets/branding/tokens.json` is the hand-off from the design canvas and the
 //! one place a colour, a radius or a type size is decided (issue #207).

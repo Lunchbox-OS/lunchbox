@@ -594,21 +594,23 @@ An entry with no `icon` gets one from its mode: `folder-videos` for `browse`,
 ## Playback UI
 
 `lunchbox-media` embeds mpv into its egui shell rather than letting mpv
-spawn its own window. The same fullscreen surface hosts the poster grid
-in browse mode and the video + a touch- and controller-friendly control
-overlay during playback.
+spawn its own window. The same fullscreen surface hosts the library
+screen in browse mode and the video + a touch- and controller-friendly
+control bar during playback: one compartment floating at the bottom of the
+picture, holding Back, the title and position, −10s, play/pause, +10s, the
+seek track and the time left.
 
-Controls auto-hide after ~3 seconds of input silence. Any pointer
+Controls auto-hide after ~4 seconds of input silence. Any pointer
 activity (mouse or touch), key press, or gamepad input summons them
-back. While paused, the overlay stays visible.
+back. While paused, the bar stays visible.
 
 | Action            | Touch / Mouse                  | Keyboard            | Gamepad                         |
 |-------------------|--------------------------------|---------------------|---------------------------------|
 | Play / Pause      | Tap the play button            | `Space`, `K`        | A (south)                       |
-| Back to grid      | Tap the back button            | `Esc`, `Backspace`  | B (east), Start, Select         |
-| Skip −10 seconds  | Tap the « 10s button           | `←`, `J`            | D-pad left, LT                  |
-| Skip +10 seconds  | Tap the 10s » button           | `→`, `L`            | D-pad right, RT                 |
-| Scrub             | Drag the scrubber              | —                   | —                               |
+| Back to library   | Tap the back button            | `Esc`, `Backspace`  | B (east), Start, Select         |
+| Skip −10 seconds  | Tap the rewind button          | `←`, `J`            | D-pad left, LT                  |
+| Skip +10 seconds  | Tap the fast-forward button    | `→`, `L`            | D-pad right, RT                 |
+| Scrub             | Drag along the seek track      | —                   | —                               |
 
 Volume is intentionally not bound in the playback overlay — `lunchbox-hud`
 already exposes global volume controls that work the same everywhere.
@@ -659,12 +661,19 @@ With it on:
 
 - **Re-opening an item resumes it.** The position is handed to mpv with the
   file, so nothing before it is decoded or shown. This applies wherever
-  playback starts — a tile in the grid, the card below, or `play --item`.
-- **Re-opening the library offers to continue.** Browse mode opens with a
-  "Continue watching" card naming the last item and where it stopped; the
-  choices are **Resume** and **Library** (dismiss and browse as usual). Enter /
-  A resumes, Escape / B / BACK dismisses. The card is skipped when the library
-  has never been watched, or when that item is no longer in it.
+  playback starts — a thumbnail in the library, the Continue button below, or
+  `play --item`.
+- **Re-opening the library offers to continue.** When the item watched last was
+  left partway through, browse mode opens with a "keep watching" row above the
+  library: that item's thumbnail, how much of it is left, and a **Continue**
+  button, which has the focus. Enter / A continues; down moves into the
+  library, which drops to one row and leaves that item out. The row goes as
+  soon as anything is played, and is not there at all when the library has
+  never been watched, when the last item was watched to the end, or when it is
+  no longer in the library.
+- **Thumbnails show what has been started.** An item with a saved position
+  carries a yellow strip along the bottom of its thumbnail, as far along as the
+  viewer got.
 - **A finished item is forgotten.** A stop within 30 seconds of the end (and a
   stop within the first 20 seconds) clears the position, so the next play starts
   from the beginning rather than at the credits.

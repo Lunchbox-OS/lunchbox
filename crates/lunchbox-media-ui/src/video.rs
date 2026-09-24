@@ -1,9 +1,10 @@
 //! Shared video-playback UI building blocks.
 //!
-//! Both front-ends draw a transport overlay over the video, and the time
-//! formatting, touch scrubber and key→intent mapping are identical, so they
-//! live here. Each binary keeps its own overlay layout, theme, input model, and
-//! Session- vs `PlayerHandle`-driven playback on top.
+//! Both front-ends draw the same transport controls over the video — one
+//! compartment floating at the bottom of the picture, in the Lunchbox
+//! branding — and share the time formatting and the key→intent mapping, so
+//! they live here. Each binary keeps its own input model and Session- vs
+//! `PlayerHandle`-driven playback on top.
 //!
 //! How the video gets on screen is *not* shared any more:
 //!
@@ -22,24 +23,40 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use egui::{Color32, TextureId};
+use egui::{Color32, Sense, TextureId};
 use glow::HasContext;
 use lunchbox_media_core::Transport;
 
+use crate::theme::{self, Glyph, Scale, Weight};
+
 /// Seconds applied by the ±10s buttons and the seek keys/gamepad bindings.
 pub const SEEK_DELTA_SECONDS: f64 = 10.0;
-/// How long the control overlay stays visible after the last input event.
-pub const CONTROLS_VISIBLE_FOR: Duration = Duration::from_secs(3);
+/// How long the controls stay up after the last input event, while playing.
+/// They never hide while paused.
+pub const CONTROLS_VISIBLE_FOR: Duration = Duration::from_secs(4);
 
 /// How long the "skipped a sponsor" notice stays on screen (issue #159).
 ///
 /// Long enough for a viewer to read why the video jumped, short enough that it
 /// is gone before it becomes part of the picture.
 pub const SKIP_NOTICE_FOR: Duration = Duration::from_secs(3);
-/// Height (logical px) of the bottom control bar, sized for thumb taps.
-const CONTROL_BAR_HEIGHT: f32 = 160.0;
-/// Minimum hit-box size for a touch-friendly button.
-const TOUCH_TARGET: f32 = 72.0;
+
+// The control bar's measurements (MEDIA.md §5), in design pixels.
+
+/// Distance from the sides and the bottom of the picture.
+const BAR_SIDE: f32 = 24.0;
+const BAR_BOTTOM: f32 = 20.0;
+const BAR_PAD: egui::Vec2 = egui::vec2(18.0, 12.0);
+const BAR_GAP: f32 = 16.0;
+const DISC: f32 = 44.0;
+const MAIN_DISC: f32 = 60.0;
+const META_W: f32 = 240.0;
+const TRACK_H: f32 = 18.0;
+const REMAINING_W: f32 = 46.0;
+/// The controls are what a finger aims at on a phone, where the design's
+/// field scales down furthest; below this they would be smaller than a
+/// fingertip.
+const MIN_SCALE: f32 = 0.75;
 
 /// An off-screen GL render target for video: the player renders into an
 /// FBO-backed texture, which is then painted into the egui scene. The FBO +
@@ -206,23 +223,24 @@ pub fn format_time(seconds: f64) -> String {
     }
 }
 
-/// Touch-friendly horizontal slider used for the playback scrubber.
+/// The seek track: a putty bar in an ink rim, yellow up to the position, with
+/// an ink line where the yellow ends. Returns the position the viewer is
+/// dragging it to, while they are.
 ///
-/// Returns `Some(new_value)` if the user is actively dragging this frame; the
-/// caller pushes that value to the source of truth (mpv) immediately. The widget
-/// reads the pointer position directly rather than relying on `egui::Slider`'s
-/// drag-delta logic, which is unreliable on touchscreens, and tracks the finger
-/// straight away so the knob doesn't snap back to the stale value between frames.
-/// `fill` colors the filled track and `knob` the handle.
-pub fn touch_slider(
+/// Reads the pointer's absolute position rather than egui's drag delta, which
+/// on a touchscreen carries the jump from the previous touch's release to the
+/// new touch's start, and tracks the finger straight away so the fill does not
+/// snap back to the stale position between frames.
+fn seek_track(
     ui: &mut egui::Ui,
-    size: egui::Vec2,
+    rect: egui::Rect,
     current: f64,
     range: (f64, f64),
-    fill: Color32,
-    knob: Color32,
+    s: Scale,
 ) -> Option<f64> {
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    // A taller hit area than the 18px track, for a thumb.
+    let hit = rect.expand2(egui::vec2(0.0, s.px(14.0)));
+    let response = ui.interact(hit, ui.id().with("seek-track"), Sense::click_and_drag());
 
     let interacting = response.is_pointer_button_down_on() || response.dragged();
     let new_value = if interacting && range.1 > range.0 {
@@ -243,20 +261,7 @@ pub fn touch_slider(
     } else {
         0.0
     };
-
-    let painter = ui.painter_at(rect);
-    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 12.0));
-    painter.rect_filled(track, 6.0, Color32::from_white_alpha(40));
-
-    if range.1 > range.0 {
-        let filled =
-            egui::Rect::from_min_size(track.min, egui::vec2(track.width() * frac, track.height()));
-        painter.rect_filled(filled, 6.0, fill);
-
-        let knob_x = track.min.x + track.width() * frac;
-        painter.circle_filled(egui::pos2(knob_x, track.center().y), 14.0, knob);
-    }
-
+    theme::paint_progress_bar(ui.painter(), rect, frac, s.px(theme::OUTLINE), true);
     new_value
 }
 
@@ -264,18 +269,6 @@ pub fn touch_slider(
 /// name.
 fn framebuffer_to_gl(fb: glow::Framebuffer) -> i32 {
     fb.0.get() as i32
-}
-
-/// Colors the transport overlay draws with — each front-end supplies its theme.
-pub struct OverlayTheme {
-    /// Title text.
-    pub text: Color32,
-    /// Filled portion of the scrubber track.
-    pub slider_fill: Color32,
-    /// Scrubber knob.
-    pub slider_knob: Color32,
-    /// Button fill; `None` uses egui's default button styling.
-    pub button_fill: Option<Color32>,
 }
 
 /// What the user asked for via the overlay this frame.
@@ -287,157 +280,215 @@ pub enum OverlayAction {
     Leave,
 }
 
-/// Draw the transport overlay (title + back, scrubber, ±10s / play-pause) over
-/// `rect`, driving `transport`, and return whether the user asked to leave.
-/// Shared by both front-ends; only the colors (`theme`) and the leave-handling
-/// differ between them.
+/// Draw the transport controls over `rect` and drive `transport`: one
+/// compartment floating at the bottom of the picture holding Back, the title
+/// and where playback is, −10s, play/pause, +10s, the seek track and the time
+/// left. Returns whether the viewer asked to leave.
+///
+/// Play/pause is drawn selected — yellow, lifted, with the ink offset shadow —
+/// because it is what the remote's centre button does; the D-pad's left and
+/// right seek, as the track would with the focus on it.
 pub fn transport_overlay<T: Transport + ?Sized>(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     transport: &mut T,
     title: &str,
-    theme: &OverlayTheme,
 ) -> OverlayAction {
     let mut action = OverlayAction::None;
-
-    // Header strip — title + back affordance.
-    let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 96.0));
-    ui.painter()
-        .rect_filled(header_rect, 0.0, Color32::from_black_alpha(180));
-    ui.painter().text(
-        header_rect.left_center() + egui::vec2(32.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        title,
-        egui::FontId::proportional(28.0),
-        theme.text,
-    );
-
-    let mut header_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(header_rect.shrink(16.0))
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-    );
-    if button(&mut header_ui, "‹ Back", theme.button_fill).clicked() {
-        action = OverlayAction::Leave;
-    }
-
-    // Bottom control bar.
-    let bar_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.min.x, rect.max.y - CONTROL_BAR_HEIGHT),
-        egui::vec2(rect.width(), CONTROL_BAR_HEIGHT),
-    );
-    ui.painter()
-        .rect_filled(bar_rect, 0.0, Color32::from_black_alpha(180));
+    let s = Scale(Scale::fit(rect.size()).0.max(MIN_SCALE));
+    let bar = bar_rect(rect, s);
+    let painter = ui.painter().clone();
+    theme::paint_compartment(&painter, bar, s);
 
     let position = transport.position().unwrap_or(0.0);
     let duration = transport.duration().unwrap_or(0.0);
 
-    // Scrubber row: elapsed / slider / total.
-    let scrubber_rect = egui::Rect::from_min_size(
-        bar_rect.min + egui::vec2(32.0, 16.0),
-        egui::vec2(bar_rect.width() - 64.0, 40.0),
-    );
-    let mut scrubber_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(scrubber_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    scrubber_ui.label(
-        egui::RichText::new(format_time(position))
-            .monospace()
-            .size(20.0),
-    );
-    scrubber_ui.add_space(12.0);
-    let slider_width = scrubber_rect.width() - 160.0;
-    if let Some(new_pos) = touch_slider(
-        &mut scrubber_ui,
-        egui::vec2(slider_width, 40.0),
-        position,
-        (0.0, duration),
-        theme.slider_fill,
-        theme.slider_knob,
-    ) {
-        let _ = transport.seek_absolute(new_pos);
-    }
-    scrubber_ui.add_space(12.0);
-    scrubber_ui.label(
-        egui::RichText::new(format_time(duration))
-            .monospace()
-            .size(20.0),
+    let inner = bar.shrink2(s.vec(BAR_PAD.x + theme::OUTLINE, BAR_PAD.y + theme::OUTLINE));
+    let mid = inner.center().y;
+    let mut x = inner.left();
+    let mut slot = |width: f32| {
+        let r = egui::Rect::from_min_max(
+            egui::pos2(x, mid - s.px(MAIN_DISC) / 2.0),
+            egui::pos2(x + width, mid + s.px(MAIN_DISC) / 2.0),
+        );
+        x += width + s.px(BAR_GAP);
+        r
+    };
+    let back = slot(s.px(DISC));
+    let meta = slot(s.px(META_W));
+    let rewind = slot(s.px(DISC));
+    let play = slot(s.px(MAIN_DISC));
+    let forward = slot(s.px(DISC));
+    let remaining_w = s.px(REMAINING_W);
+    let track = egui::Rect::from_min_max(
+        egui::pos2(x, mid - s.px(TRACK_H) / 2.0),
+        egui::pos2(
+            inner.right() - remaining_w - s.px(BAR_GAP),
+            mid + s.px(TRACK_H) / 2.0,
+        ),
     );
 
-    // Button row: -10s / play-pause / +10s, centered. Volume is intentionally
-    // absent — the global HUD owns volume, so duplicating it here would confuse.
-    let buttons_rect = egui::Rect::from_min_size(
-        bar_rect.min + egui::vec2(32.0, 72.0),
-        egui::vec2(bar_rect.width() - 64.0, TOUCH_TARGET),
+    if disc_button(ui, &painter, back, s.px(DISC), Glyph::Back, false, s) {
+        action = OverlayAction::Leave;
+    }
+
+    let title_galley = painter.layout(
+        title.to_string(),
+        theme::font(s.px(20.0), Weight::ExtraBold),
+        theme::INK,
+        f32::INFINITY,
     );
-    let mut buttons_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(buttons_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    let title_galley = elide_to(&painter, title, title_galley, meta.width(), s);
+    let time = painter.layout_no_wrap(
+        if duration > 0.0 {
+            format!("{} of {}", format_time(position), format_time(duration))
+        } else {
+            format_time(position)
+        },
+        theme::font(s.px(13.0), Weight::Bold),
+        theme::MUTED,
     );
-    // Spacer that centers the button cluster within the row.
-    let cluster_width = TOUCH_TARGET * 2.0 * 3.0 + 16.0 * 2.0;
-    let lead = ((buttons_rect.width() - cluster_width) / 2.0).max(0.0);
-    buttons_ui.add_space(lead);
-    if button(&mut buttons_ui, "« 10s", theme.button_fill).clicked() {
+    // Baloo 2's line box is tall for its letters; tuck the time up under the
+    // title the way the mockup sets the two.
+    let title_h = title_galley.size().y - s.px(5.0);
+    let block = title_h + time.size().y;
+    let top = mid - block / 2.0;
+    painter.galley(egui::pos2(meta.left(), top), title_galley, theme::INK);
+    painter.galley(egui::pos2(meta.left(), top + title_h), time, theme::MUTED);
+
+    if disc_button(ui, &painter, rewind, s.px(DISC), Glyph::Rewind, false, s) {
         let _ = transport.seek_relative(-SEEK_DELTA_SECONDS);
     }
-    buttons_ui.add_space(16.0);
-    // Glyphs deliberately drawn from the Geometric Shapes block — bundled
-    // NotoEmoji covers them, unlike the Dingbat-block "❚❚".
-    let play_label = if transport.is_paused() {
-        "▶  Play"
+    let glyph = if transport.is_paused() {
+        Glyph::Play
     } else {
-        "▮▮  Pause"
+        Glyph::Pause
     };
-    if button(&mut buttons_ui, play_label, theme.button_fill).clicked() {
+    if disc_button(ui, &painter, play, s.px(MAIN_DISC), glyph, true, s) {
         toggle_pause(transport);
     }
-    buttons_ui.add_space(16.0);
-    if button(&mut buttons_ui, "10s »", theme.button_fill).clicked() {
+    if disc_button(ui, &painter, forward, s.px(DISC), Glyph::Forward, false, s) {
         let _ = transport.seek_relative(SEEK_DELTA_SECONDS);
     }
 
+    if track.width() > 0.0
+        && let Some(new_pos) = seek_track(ui, track, position, (0.0, duration), s)
+    {
+        let _ = transport.seek_absolute(new_pos);
+    }
+
+    let left = painter.layout_no_wrap(
+        format_time((duration - position).max(0.0)),
+        theme::font(s.px(14.0), Weight::Bold),
+        theme::MUTED,
+    );
+    painter.galley(
+        egui::pos2(inner.right() - left.size().x, mid - left.size().y / 2.0),
+        left,
+        theme::MUTED,
+    );
+
     action
+}
+
+/// Where the control bar sits in `rect`: across the bottom, clear of the
+/// edges, tall enough for the 60px play button.
+fn bar_rect(rect: egui::Rect, s: Scale) -> egui::Rect {
+    let height = s.px(MAIN_DISC + 2.0 * (BAR_PAD.y + theme::OUTLINE));
+    egui::Rect::from_min_max(
+        egui::pos2(
+            rect.left() + s.px(BAR_SIDE),
+            rect.bottom() - s.px(BAR_BOTTOM) - height,
+        ),
+        egui::pos2(
+            rect.right() - s.px(BAR_SIDE),
+            rect.bottom() - s.px(BAR_BOTTOM),
+        ),
+    )
+}
+
+/// A round button of `size` centred in `slot`. Returns whether it was tapped.
+/// A pointer over it gives it the yellow of a selection, so a mouse sees what
+/// it is about to press.
+fn disc_button(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    slot: egui::Rect,
+    size: f32,
+    glyph: Glyph,
+    selected: bool,
+    s: Scale,
+) -> bool {
+    let rect = egui::Rect::from_center_size(slot.center(), egui::Vec2::splat(size));
+    let response = ui.interact(
+        rect,
+        ui.id().with(("transport", glyph as u8)),
+        Sense::click(),
+    );
+    let fill = if response.hovered() {
+        theme::YELLOW
+    } else {
+        theme::COMPARTMENT
+    };
+    theme::paint_disc(painter, rect, glyph, fill, selected, s);
+    response.clicked()
+}
+
+/// `galley` laid out on one line, cut to `width` with an ellipsis if it is
+/// wider.
+fn elide_to(
+    painter: &egui::Painter,
+    text: &str,
+    galley: std::sync::Arc<egui::Galley>,
+    width: f32,
+    s: Scale,
+) -> std::sync::Arc<egui::Galley> {
+    if galley.size().x <= width {
+        return galley;
+    }
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_string(),
+        theme::font(s.px(20.0), Weight::ExtraBold),
+        theme::INK,
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    painter.layout_job(job)
 }
 
 /// Paint the notice that a segment was just skipped.
 ///
 /// Deliberately inert: no animation, no button, nothing to dismiss. It sits
 /// above where the control bar would be so it does not collide with the
-/// transport when both are up, and it is drawn whether or not the controls are
-/// visible — the jump it explains happens with the overlay hidden.
-pub fn skip_notice(painter: &egui::Painter, rect: egui::Rect, text: &str, theme: &OverlayTheme) {
+/// controls when both are up, and it is drawn whether or not they are visible —
+/// the jump it explains happens with the controls hidden. An ink chip with
+/// cream type, like a thumbnail's duration.
+pub fn skip_notice(painter: &egui::Painter, rect: egui::Rect, text: &str) {
+    let s = Scale(Scale::fit(rect.size()).0.max(MIN_SCALE));
+    let bar = bar_rect(rect, s);
     let galley = painter.layout_no_wrap(
         text.to_string(),
-        egui::FontId::proportional(22.0),
-        theme.text,
+        theme::font(s.px(18.0), Weight::Bold),
+        theme::CREAM,
     );
-    let anchor = egui::pos2(
-        rect.min.x + 32.0,
-        rect.max.y - CONTROL_BAR_HEIGHT - 32.0 - galley.size().y,
+    let pad = s.vec(14.0, 6.0);
+    let size = galley.size() + 2.0 * pad;
+    let chip = egui::Rect::from_min_size(
+        egui::pos2(bar.left(), bar.top() - s.px(BAR_GAP) - size.y),
+        size,
     );
-    let background =
-        egui::Rect::from_min_size(anchor, galley.size()).expand2(egui::vec2(16.0, 10.0));
-    painter.rect_filled(background, 8.0, Color32::from_black_alpha(180));
-    painter.galley(anchor, galley, theme.text);
+    painter.rect_filled(chip, s.px(10.0), theme::INK);
+    painter.galley(chip.min + pad, galley, theme::CREAM);
 }
 
 /// Toggle play/pause on any transport.
 pub fn toggle_pause<T: Transport + ?Sized>(transport: &mut T) {
     let paused = transport.is_paused();
     let _ = transport.set_paused(!paused);
-}
-
-fn button(ui: &mut egui::Ui, label: &str, fill: Option<Color32>) -> egui::Response {
-    let text = egui::RichText::new(label).size(22.0).strong();
-    let mut button = egui::Button::new(text).corner_radius(12.0);
-    if let Some(fill) = fill {
-        button = button.fill(fill);
-    }
-    ui.add_sized(egui::vec2(TOUCH_TARGET * 2.0, TOUCH_TARGET), button)
 }
 
 /// A transport action derived from a key press.
@@ -476,5 +527,29 @@ pub fn key_intent(key: egui::Key, seek_delta: f64) -> Option<TransportIntent> {
         Key::ArrowRight | Key::L => Some(TransportIntent::Seek(seek_delta)),
         Key::Escape | Key::Backspace | Key::BrowserBack => Some(TransportIntent::Leave),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_sits_where_the_mockup_puts_it() {
+        // media-player.png, on the 1280x664 field under the HUD: 24 from the
+        // sides, 20 from the bottom, 92 tall.
+        let field = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), theme::DESIGN_SIZE);
+        let bar = bar_rect(field, Scale::fit(field.size()));
+        assert_eq!(bar.left(), 24.0);
+        assert_eq!(bar.right(), 1256.0);
+        assert_eq!(bar.bottom(), 644.0);
+        assert_eq!(bar.height(), 92.0);
+    }
+
+    #[test]
+    fn times_read_as_clock_times() {
+        assert_eq!(format_time(252.0), "4:12");
+        assert_eq!(format_time(5088.0), "1:24:48");
+        assert_eq!(format_time(f64::NAN), "--:--");
     }
 }

@@ -1,8 +1,8 @@
 # lunchbox-branding
 
 The Lunchbox look, as Rust: one crate between
-[`assets/branding/tokens.json`](../../assets/branding/tokens.json) and the two
-GTK4 front ends that wear it.
+[`assets/branding/tokens.json`](../../assets/branding/tokens.json) and the
+front ends that wear it: two in GTK4 and one in egui.
 
 ## Why it exists
 
@@ -16,6 +16,12 @@ There are two consumers, which is the whole reason this is a crate rather than a
 module: the launcher (`lunchbox-launcher-ui`'s `theme.rs`, issue #207) and the
 HUD (`lunchbox-hud`'s `theme.rs`, issue #209). The launcher owned the codegen
 first and the HUD would otherwise have had to copy it.
+
+The media app (`lunchbox-media-ui`'s `theme.rs`, issue #224) is the third. It
+is egui, not GTK, so it has no stylesheet: it takes the typed constants and the
+`_RGB` triples, and reads the one CSS-only token it draws (the field's sheen)
+out of `tokens::CSS`. It builds for Android too, which is why this crate must
+keep having no dependencies.
 
 ## What is in it
 

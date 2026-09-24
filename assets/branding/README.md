@@ -24,6 +24,7 @@ separate panel.
 | `icon/lunchbox-{16…1024}.png` | Rendered set. 16 and 24 use the small mark; 32+ the full one. |
 | `icon/avatar-1024.png` | GitHub org/repo avatar: the mark on a cream rounded tile. |
 | `icon/apps/companion*.svg`, `media*.svg` (+ PNGs) | The two sibling apps, delivered with issue #217. **Companion** (Android parent app): the tin with the packed column replaced by a padlock. **Media** (standalone player): the tin with a single compartment and a large play. Each has `-small` (under 32 px), `-mono-white` / `-mono-black` (one color, wells cut out as real holes; the white one is the Android notification icon), and the three Android adaptive layers `-adaptive-foreground` / `-background` / `-monochrome` (108 dp canvas, mark at 60 dp inside the 66 dp safe zone; `-512.png` is the Play Store listing icon). The apps draw these as VectorDrawables translated from the adaptive SVGs, so a change here has to be made there too. |
+| `icon/placeholders/video.svg` (+ `-64.png`, `-256.png`) | The placeholder for a video with no thumbnail of its own, delivered with issue #224: a solid object in the brand palette, no plate. The media app draws it on putty where a poster is missing. The hand-off has one per activity kind; only the one something draws is here. |
 | `tokens.json` | Colors, type, strokes, radii, spacing, shadows, motion — one source of truth. |
 
 The typeface is **Baloo 2**, in `assets/fonts` beside this folder, under the SIL

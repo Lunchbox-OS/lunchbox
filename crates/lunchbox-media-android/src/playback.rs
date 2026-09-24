@@ -11,21 +11,14 @@
 //! into system RAM to be re-uploaded as a texture; on a Fire TV that copy, and
 //! the full-screen passes around it, capped 60fps content at ~20fps (#115).
 //!
-//! The overlay layout, theme and input handling are unchanged.
+//! The controls are the shared `lunchbox-media-ui` ones, the same as the
+//! Linux binary's.
 
 use std::time::{Duration, Instant};
 
 use lunchbox_media_core::PlayerHandle;
 use lunchbox_media_core::sponsorblock::Category;
 use lunchbox_media_ui::video;
-
-/// The shared transport overlay in the Android app's default-theme colors.
-const OVERLAY_THEME: video::OverlayTheme = video::OverlayTheme {
-    text: egui::Color32::WHITE,
-    slider_fill: egui::Color32::LIGHT_BLUE,
-    slider_knob: egui::Color32::WHITE,
-    button_fill: None,
-};
 
 /// How often to repaint while the overlay is on screen, so its elapsed-time
 /// readout ticks. The video is not ours to draw, so nothing else needs a frame.
@@ -120,7 +113,7 @@ impl PlaybackView {
                 let rect = ui.max_rect();
                 Self::paint_letterbox(ui.painter(), rect, video);
                 if controls_visible
-                    && video::transport_overlay(ui, rect, player, title, &OVERLAY_THEME)
+                    && video::transport_overlay(ui, rect, player, title)
                         == video::OverlayAction::Leave
                 {
                     leave = true;
@@ -132,7 +125,6 @@ impl PlaybackView {
                             ui.painter(),
                             rect,
                             &format!("Skipped {}", category.label()),
-                            &OVERLAY_THEME,
                         );
                     }
                     Some(_) => expire_notice = true,

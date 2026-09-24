@@ -9,7 +9,7 @@
 //!   `Stopping`, the host calls `draw`, which uses the shared
 //!   `lunchbox-media-ui::video` compositor to render mpv's current frame
 //!   into an off-screen texture, paints it full-screen, and draws the
-//!   shared transport overlay (in this binary's theme) on top.
+//!   shared transport controls on top.
 //! - Input (touch/click, keyboard, gamepad) is fed into `handle_input`
 //!   before `draw` each frame.
 
@@ -20,16 +20,7 @@ use eframe::egui;
 use lunchbox_media_core::sponsorblock::Category;
 use lunchbox_media_core::{Session, SessionInput};
 
-use lunchbox_media_ui::theme;
 use lunchbox_media_ui::video::{self, VideoCompositor};
-
-/// The shared transport overlay in the Linux binary's theme colors.
-const OVERLAY_THEME: video::OverlayTheme = video::OverlayTheme {
-    text: theme::TEXT,
-    slider_fill: theme::FOCUS_BORDER,
-    slider_knob: theme::FOCUS_BORDER,
-    button_fill: Some(theme::TILE_FOCUSED),
-};
 
 pub struct PlaybackView {
     /// Off-screen GL target mpv renders into, shared with the Android app.
@@ -174,7 +165,7 @@ impl PlaybackView {
                 let controls_visible = self.last_input_at.elapsed() < video::CONTROLS_VISIBLE_FOR
                     || session.is_paused();
                 if controls_visible
-                    && video::transport_overlay(ui, rect, session, &self.item_title, &OVERLAY_THEME)
+                    && video::transport_overlay(ui, rect, session, &self.item_title)
                         == video::OverlayAction::Leave
                 {
                     session.handle_input(SessionInput::StopPlayback);
@@ -186,7 +177,6 @@ impl PlaybackView {
                             ui.painter(),
                             rect,
                             &format!("Skipped {}", category.label()),
-                            &OVERLAY_THEME,
                         );
                     }
                     Some(_) => self.skipped = None,

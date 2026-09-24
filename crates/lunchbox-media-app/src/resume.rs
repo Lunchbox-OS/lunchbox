@@ -381,6 +381,13 @@ impl ResumeTracker {
         self.store.position(item_id)
     }
 
+    /// Where `item_id` was left off, with its length when the player knew it:
+    /// what a browse view needs to draw how much of an item has been watched,
+    /// for an item whose library file gives no duration.
+    pub fn saved(&self, item_id: &str) -> Option<&ItemPosition> {
+        self.store.state().positions.get(item_id)
+    }
+
     /// The most recently watched item, if it is still in the library.
     pub fn last_item_in<'a, I>(&self, known_ids: I) -> Option<&str>
     where
@@ -663,6 +670,23 @@ mod tests {
         let back = ResumeStore::load(dir.path().join("resume.toml")).unwrap();
         assert_eq!(back.position("sintel"), Some(700.0));
         assert_eq!(back.last_item_in(["sintel"]), Some("sintel"));
+    }
+
+    #[test]
+    fn tracker_exposes_the_saved_length_alongside_the_position() {
+        let dir = temp_dir();
+        let mut t = tracker(&dir);
+        t.store.record("sintel", 600.0, Some(1200.0));
+        t.store.record("bunny", 60.0, None);
+        assert_eq!(
+            t.saved("sintel"),
+            Some(&ItemPosition {
+                position_seconds: 600.0,
+                duration_seconds: Some(1200.0),
+            })
+        );
+        assert_eq!(t.saved("bunny").and_then(|p| p.duration_seconds), None);
+        assert_eq!(t.saved("tears-of-steel"), None);
     }
 
     #[test]

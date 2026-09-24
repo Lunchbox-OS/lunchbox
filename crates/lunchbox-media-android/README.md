@@ -40,10 +40,11 @@ the full design and roadmap.
   Both verified on hardware. (Typing directly on the TV's on-screen keyboard is
   intentionally avoided — a `NativeActivity` can't capture soft-keyboard text
   for a D-pad-focused field; see the history doc.)
-- The browse grid is the **shared `lunchbox-media-ui` poster grid** — the same
-  responsive poster-tile view the Linux binary uses, so the two front-ends stay
-  in sync. The Android app supplies the items, poster bytes, and focus input;
-  the crate renders the tiles.
+- The library screen is the **shared `lunchbox-media-ui` library view** — the
+  same branded screen the Linux binary shows, so the two front-ends stay in
+  sync. The Android app supplies the items, poster bytes and resume positions;
+  the crate renders the thumbnails and owns the focus, which the remote's D-pad
+  moves as arrow keys.
 - TV remote / D-pad navigation (Fire TV, Google TV): the Android D-pad maps to
   egui arrow-key focus movement; the app keeps a widget focused at all times
   (auto-focusing the first control on each screen), draws a prominent focus
@@ -52,8 +53,9 @@ the full design and roadmap.
   play/pause (center), and leaves (BACK). Verified on hardware.
 - Settings persisted as TOML to the app's private storage.
 - Per-library **Resume playback** (default off, mirroring the Linux `--resume`):
-  with it on, each item re-opens where it stopped and opening the library shows
-  the shared "Continue watching" card for the last item watched. Positions live
+  with it on, each item re-opens where it stopped, started items show how far
+  through they are, and opening the library shows the shared "keep watching"
+  row for the last item watched, if it was left partway through. Positions live
   in `<filesDir>/resume/<library-id>.toml`; the state model and its policy are
   shared with the Linux binary (`lunchbox-media-app`'s `resume` module). Not yet
   exercised on hardware.
