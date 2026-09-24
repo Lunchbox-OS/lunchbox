@@ -1,66 +1,60 @@
 name: Release
 
-# Tag-driven release pipeline. Pushing a `vX.Y.Z` tag builds the amd64 `.deb`
-# and a signed `.apk` per Android module, then publishes them to a Forgejo
-# release (each asset gets a `.sha256` sidecar).
+# Tag-driven release pipeline. Pushing a `vX.Y.Z` tag builds a `.deb` per
+# architecture and a signed `.apk` per Android module, then -- after a human
+# approves the `release` environment -- signs and attests them, publishes the
+# GitHub release, and publishes the apt repository at apt.lunchbox-os.com.
 #
 # Release flow:
 #   ./scripts/lunchbox version set X.Y.Z
 #   git commit -am "bump to X.Y.Z" && git tag -a vX.Y.Z -m vX.Y.Z
 #   git push && git push --tags
+#   then approve the `publish` job's deployment to `release` in the run.
 #
-# See docs/ai/history/2026-07-04 003 binary-releases.md for the full design.
-#
-# NOT YET PORTED TO GITHUB. The image pulls below now come from GHCR, but every
-# publishing step still targets the Forgejo instance, which still hosts the
-# releases, the apt registry and the F-Droid repo:
-#   * create-release + upload-release-asset.sh talk to the Forgejo release API
-#   * publish-apt.sh pushes into Forgejo's Debian package registry
-# A `v*` tag pushed to GitHub would therefore run these against
-# git.armeafamily.com. Decide where releases and the apt repo live before
-# tagging here.
-#
-# The rename to Lunchbox picked the names the docs now advertise --
-# `apt.lunchbox-os.com` (docs/INSTALL.md) and `lunchbox-os.com/fdroid/repo`
-# -- but neither host is stood up yet. Whoever ports this workflow has to
-# create them (or change the docs), not just swap the URLs in here.
+# See docs/ai/history/2026-07-04 003 binary-releases.md for the build half,
+# docs/release-signing.md for the keys, and
+# docs/ai/history/2026-09-19 005 self-hosted-apt-repo (#204).md for the apt
+# repository.
 #
 # Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
-# as an artifact, and a single `publish` job at the end creates the release and
-# attaches all of them. Nothing reaches a release until every build has passed.
+# as an artifact, and a single `publish` job at the end signs, creates the
+# release and attaches all of them. Nothing reaches a release until every build
+# has passed, and nothing is signed until someone has approved it.
 #
-# Forgejo could not do this -- it does not implement the upload-artifact@v4
-# protocol (its runner reports as GHES and the action hard-fails) -- so there
-# the release had to be created *first* for the parallel build jobs to attach to,
-# which left a window where a later failure published a half-populated release.
-#
-# Secrets required (the CI images come from GHCR on the ambient GITHUB_TOKEN,
-# so there is no REGISTRY_TOKEN any more):
-#   RELEASE_TOKEN               repo-write PAT to create the release + upload
-#                               assets, used only by `publish`. (Not
-#                               FORGEJO_*/GITEA_*/GITHUB_* — Forgejo reserves
-#                               those prefixes for secret names.)
-#   PACKAGE_TOKEN               PAT with the write:package scope, to publish the
-#                               .deb into Forgejo's Debian (apt) package registry.
+# Secrets. Repository-wide:
 #   LUNCHBOX_KEYSTORE_B64       base64 of the Android release keystore
 #   LUNCHBOX_KEYSTORE_PASSWORD  keystore password
 #   LUNCHBOX_KEY_ALIAS          signing key alias
 #   LUNCHBOX_KEY_PASSWORD       signing key password
 #   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
-#                               Edit" permission, to publish the config editor
-#   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages project lives in
+#                               Edit" permission, for the config editor and
+#                               the apt repository
+#   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages projects live in
+# In the `release` environment only, so no other job can read them:
+#   LUNCHBOX_APT_KEY_B64        base64 of the archive signing *subkey* export
+#   LUNCHBOX_APT_KEY_PASSPHRASE its passphrase
+# The release itself is created with the job's own GITHUB_TOKEN; there is no
+# PAT any more.
 
 on:
   push:
     tags:
       - 'v*'
   # Manual dry run: builds the .deb + both signed .apks (exercising signing and
-  # the media armeabi-v7a cargo-ndk cross-compile) WITHOUT creating a Forgejo
-  # release — unless you tick `publish`. Run it before cutting a real vX.Y.Z tag.
+  # the media armeabi-v7a cargo-ndk cross-compile) WITHOUT publishing anything
+  # -- unless you tick `publish`. Run it before cutting a real vX.Y.Z tag.
+  #
+  # Ticking `publish` is for re-running a release, so it must be dispatched
+  # from the tag: the `release` environment admits only v* tags, and the guard
+  # refuses anything else before a build starts.
   workflow_dispatch:
     inputs:
       publish:
-        description: "Create the Forgejo release + upload assets (off = dry run)"
+        description: "Publish the release and the apt repository (run from a v* tag; off = dry run)"
+        type: boolean
+        default: false
+      apt_rebuild:
+        description: "Regenerate the apt index from every release's assets instead of appending to the published one"
         type: boolean
         default: false
 
@@ -78,9 +72,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Only meaningful for a tag push; a manual dry run has no vX.Y.Z ref.
+      - name: Publishing needs a tag
+        if: github.event.inputs.publish == 'true' && github.ref_type != 'tag'
+        run: |
+          echo "::error::publish was ticked on $GITHUB_REF_NAME, which is not a tag. Dispatch the run from the vX.Y.Z tag to publish."
+          exit 1
+
+      # Only meaningful on a tag; a dry run from a branch has no vX.Y.Z ref.
       - name: Tag matches VERSION
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
           file_version="$(./scripts/lunchbox version)"
@@ -241,7 +241,7 @@ jobs:
   # built on every trigger, so a dry run exercises wasm-pack and the npm build.
   #
   # Direct Upload rather than a git integration: Cloudflare never needs access
-  # to the repo, which is on Forgejo and not mirrored anywhere.
+  # to the repo.
   # --------------------------------------------------------------------------
   config-editor:
     name: Config editor (Cloudflare Pages)
@@ -425,16 +425,24 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
-  # publish: the only job that touches a release. It runs after every build leg
-  # has succeeded, downloads their artifacts, then creates the release and
-  # attaches the lot.
+  # publish: the only job that signs anything, touches a release, or can read
+  # the archive signing key. It runs after every build leg has succeeded, and
+  # its first step waits for a required reviewer on the `release` environment,
+  # which also admits only v* tags. See docs/release-signing.md.
   #
-  # This inverts what Forgejo forced. There, `create-release` had to run first
-  # so the parallel build jobs could each attach their own asset, because
-  # Forgejo does not implement the upload-artifact@v4 protocol and there was no
-  # way to hand a built file between jobs. The cost was a window in which a
-  # release existed with some or none of its assets: a build that failed after
-  # `create-release` succeeded left a published, half-populated release behind.
+  # The steps are ordered so that a failure at any point leaves nothing
+  # half-published:
+  #
+  #   1. import the key, sign       no key or the wrong key fails here, before
+  #                                 anything is public
+  #   2. attest provenance          Sigstore, keyless
+  #   3. publish the GitHub release draft, upload, then public, in one call
+  #   4. build + deploy apt index   only now: the index points at step 3's
+  #                                 assets, which 404 until the release is public
+  #   5. smoke-test the live repo   apt-get download through the redirect
+  #
+  # Re-running the job is safe: publish-release.sh completes a draft or adds
+  # only missing assets, and publish-apt.sh skips what is already indexed.
   #
   # It also reverses a deliberate decision recorded on the `deb` matrix --
   # "publish whichever architecture succeeded rather than losing both to one
@@ -444,19 +452,27 @@ jobs:
   # version was not released". `fail-fast: false` stays on both matrices, so a
   # broken leg still reports alongside the others rather than cancelling them.
   #
-  # NOT PORTED: every API call below still speaks Forgejo. Note especially that
-  # `SERVER_URL: ${{ github.server_url }}` now resolves to https://github.com
-  # while the scripts append Forgejo's `/api/v1/...` paths, so these steps would
-  # 404 rather than publish anywhere at all. Fixing that means deciding where
-  # releases and the apt repository live -- both are still on
-  # git.armeafamily.com. Until then a `v*` tag pushed here builds everything and
-  # fails at this job, which is the safe direction to fail in.
+  # One job rather than a release job and an apt job: both need the key, and
+  # each job that names the environment asks for its own approval.
   # --------------------------------------------------------------------------
   publish:
     name: Publish release
     needs: [guard, deb, apk]
     if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write      # create the release and upload its assets
+      id-token: write      # the Sigstore certificate behind the attestation
+      attestations: write  # store the attestation
+    env:
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      APT_URL: https://apt.lunchbox-os.com
+      # The Pages project serving APT_URL. Its production branch must be `main`,
+      # as for the config editor.
+      APT_PAGES_PROJECT: lunchbox-apt
+      WRANGLER_VERSION: "4.125.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -472,67 +488,126 @@ jobs:
       - name: Show what will be published
         run: ls -l dist/pkg
 
-      - name: Create or fetch the release
-        id: rel
+      # Into a per-run GNUPGHOME under RUNNER_TEMP, never the workspace. The
+      # secret is the signing subkey alone: it can sign, and cannot certify,
+      # add subkeys or revoke.
+      - name: Import the archive signing subkey
         env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          SERVER_URL: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          KEY_B64: ${{ secrets.LUNCHBOX_APT_KEY_B64 }}
         run: |
           set -euo pipefail
-          command -v jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
-          api="${SERVER_URL}/api/v1/repos/${REPO}"
-          auth="Authorization: token ${RELEASE_TOKEN}"
-
-          # Tags with a -prerelease suffix (e.g. v0.2.0-rc1) publish as a
-          # prerelease so they aren't shown as "latest" — this is how you cut a
-          # release candidate to test the real signed artifacts, then delete it.
-          case "${TAG#v}" in
-            *-*) prerelease=true ;;
-            *)   prerelease=false ;;
-          esac
-
-          # Create the release; if it already exists (a re-run), fetch it.
-          code="$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST "${api}/releases" \
-            -H "$auth" -H 'Content-Type: application/json' \
-            -d "$(jq -n --arg t "$TAG" --argjson pre "$prerelease" \
-                    '{tag_name:$t, name:$t, draft:false, prerelease:$pre}')" || true)"
-          if [ "$code" = "201" ]; then
-            id="$(jq -r '.id' /tmp/rel.json)"
-          else
-            echo "POST /releases returned $code; fetching existing release for $TAG"
-            id="$(curl -fsS "${api}/releases/tags/${TAG}" -H "$auth" | jq -r '.id')"
+          if [ -z "$KEY_B64" ]; then
+            echo "::error::LUNCHBOX_APT_KEY_B64 is not set in the release environment. See docs/release-signing.md."
+            exit 1
           fi
-          [ -n "$id" ] && [ "$id" != "null" ] || { echo "::error::could not determine release id"; exit 1; }
-          echo "release_id=$id" >> "$GITHUB_OUTPUT"
-          echo "release id=$id"
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
+          echo "$KEY_B64" | base64 -d | gpg --batch --quiet --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
 
-      - name: Upload every asset to the release
+      # .sha256 for every asset, .asc for each .deb, each .asc checked against
+      # dist/apt/repository.key -- a secret that is not the published key
+      # stops the release here.
+      - name: Sign every asset
         env:
-          SERVER_URL: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          RELEASE_ID: ${{ steps.rel.outputs.release_id }}
-        run: ./scripts/ci/upload-release-asset.sh dist/pkg/*.deb dist/pkg/*.apk
+          LUNCHBOX_APT_KEY_PASSPHRASE: ${{ secrets.LUNCHBOX_APT_KEY_PASSPHRASE }}
+        run: ./scripts/ci/sign-release-assets.sh dist/pkg/*.deb dist/pkg/*.apk
 
-      # The apt registry gets the .debs too, so users have an
-      # `apt update`/`apt upgrade` path; the release assets stay the
-      # offline/manual download. One invocation for both arches: the registry
-      # reads `Architecture:` out of each control file and serves both from one
-      # distribution/component, and it signs the repository metadata itself, so
-      # the .deb needs no signing. Prereleases (tags with a `-`, e.g. v0.2.0-rc1)
-      # are skipped so RC builds never reach `apt upgrade` users -- they still
-      # get the signed release asset for manual testing. See docs/INSTALL.md.
-      - name: Publish the .debs to the apt registry
-        if: ${{ !contains(github.ref_name, '-') || github.event.inputs.publish == 'true' }}
+      # Binds each file's digest to this repository, workflow and commit.
+      # Verified with `gh attestation verify FILE -R <owner>/<repo>`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/pkg/*.deb
+            dist/pkg/*.apk
+
+      - name: Publish the GitHub release
         env:
-          SERVER_URL: ${{ github.server_url }}
-          OWNER: ${{ github.repository_owner }}
-          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
-          APT_DIST: stable
-          APT_COMPONENT: main
-        run: ./scripts/ci/publish-apt.sh dist/pkg/*.deb
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/publish-release.sh "$TAG" dist/pkg/*
+
+      # Everything from here is the apt repository, which prereleases (tags
+      # with a -, e.g. v0.2.0-rc1) never reach: RC builds stay out of
+      # `apt upgrade`, and are still downloadable, signed, from their release.
+      - name: Install apt-ftparchive
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils
+
+      # Appends to the published index -- verified against repository.key on
+      # the way in -- unless a rebuild was asked for, or there is no published
+      # index yet (the first release). Only a 404 means "none yet": any other
+      # failure to fetch it fails the step rather than quietly rebuilding.
+      - name: Build the apt repository
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LUNCHBOX_APT_KEY_PASSPHRASE: ${{ secrets.LUNCHBOX_APT_KEY_PASSPHRASE }}
+          REBUILD: ${{ github.event.inputs.apt_rebuild == 'true' }}
+        run: |
+          set -euo pipefail
+          code="$(curl -sS -o /dev/null -w '%{http_code}' "$APT_URL/dists/stable/InRelease" || true)"
+          if [ "$REBUILD" = true ] || [ "$code" = 404 ]; then
+            echo "Regenerating the index from every release (asked for: $REBUILD; published InRelease: HTTP $code)"
+            ./scripts/ci/fetch-release-debs.sh dist/releases
+            ./scripts/ci/publish-apt.sh --out dist/apt-site --rebuild dist/releases dist/pkg/*.deb
+          else
+            ./scripts/ci/publish-apt.sh --out dist/apt-site --previous "$APT_URL" dist/pkg/*.deb
+          fi
+
+      # wrangler 4 needs Node >= 22, which the stock runner does not promise.
+      - uses: actions/setup-node@v4
+        if: ${{ !contains(github.ref_name, '-') }}
+        with:
+          node-version: 22
+
+      - name: Deploy the apt repository to Cloudflare Pages
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy dist/apt-site \
+            --project-name "$APT_PAGES_PROJECT" \
+            --branch main \
+            --commit-dirty=true
+
+      # What a device does, following docs/INSTALL.md: fetch the signed index
+      # from the live site and download this release's .deb for each
+      # architecture through the redirect, then compare with what was built.
+      # Only the Lunchbox source is read, so adding arm64 does not send apt to
+      # the Ubuntu archive for packages it does not carry.
+      - name: Smoke-test the live repository
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          sudo install -d -m 755 /etc/apt/keyrings
+          sudo install -m 644 dist/apt/repository.key /etc/apt/keyrings/lunchbox-os.asc
+          echo "deb [signed-by=/etc/apt/keyrings/lunchbox-os.asc] $APT_URL stable main" \
+            | sudo tee /etc/apt/sources.list.d/lunchbox.list
+          sudo dpkg --add-architecture arm64
+          only=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/lunchbox.list -o Dir::Etc::sourceparts=-)
+          # A new deployment can take a moment to be what the edge serves.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if sudo apt-get "${only[@]}" update -q && apt-cache madison lunchbox | grep -q "| $version |"; then
+              break
+            fi
+            [ "$attempt" -lt 10 ] || { echo "::error::$APT_URL does not offer lunchbox $version"; exit 1; }
+            sleep 15
+          done
+          mkdir -p dist/smoke
+          for deb in dist/pkg/*.deb; do
+            arch="$(dpkg-deb -f "$deb" Architecture)"
+            (cd dist/smoke && apt-get "${only[@]}" download "lunchbox:$arch=$version")
+            got="dist/smoke/$(basename "$deb")"
+            cmp "$got" "$deb" || { echo "::error::$got from $APT_URL differs from the built $deb"; exit 1; }
+            echo "OK: lunchbox:$arch=$version from $APT_URL matches the release asset"
+          done
 
   # --------------------------------------------------------------------------
   # dry-run-note: says, on a manual run with `publish` off, that the builds all
