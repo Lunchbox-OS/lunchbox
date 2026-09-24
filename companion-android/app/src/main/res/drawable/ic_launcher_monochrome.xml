@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Companion mark in one colour, for Android 13 themed icons: the wells are
+     holes, cut with evenOdd because VectorDrawable has no masks. Translated
+     from assets/branding/icon/apps/companion-adaptive-monochrome.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- The mark is drawn on the hand-off's 256-unit grid and placed at 60dp
+         inside the 66dp safe zone: translate(24 24) scale(60/256). -->
+    <group
+        android:translateX="24"
+        android:translateY="24"
+        android:scaleX="0.234375"
+        android:scaleY="0.234375">
+        <path
+            android:pathData="M106,18 H150 A14,14 0 0,1 164,32 V32 A14,14 0 0,1 150,46 H106 A14,14 0 0,1 92,32 V32 A14,14 0 0,1 106,18 Z"
+            android:fillColor="#FF000000" />
+        <path
+            android:pathData="M58,34 H198 A36,36 0 0,1 234,70 V200 A36,36 0 0,1 198,236 H58 A36,36 0 0,1 22,200 V70 A36,36 0 0,1 58,34 Z M64,58 H130 A18,18 0 0,1 148,76 V194 A18,18 0 0,1 130,212 H64 A18,18 0 0,1 46,194 V76 A18,18 0 0,1 64,58 Z M155,171 V146 A10,10 0 0,1 162.5,136.32 V123.47 A20.5,20.5 0 0,1 202.5,123.47 V136.11 A10,10 0 0,1 211,146 V171 A10,10 0 0,1 201,181 H165 A10,10 0 0,1 155,171 Z M171.5,136 V124.61 A11.5,11.5 0 0,1 193.5,124.61 V136 Z"
+            android:fillColor="#FF000000"
+            android:fillType="evenOdd" />
+        <path
+            android:pathData="M82,110 l40,25 -40,25 z"
+            android:fillColor="#FF000000" />
+        <path
+            android:pathData="M177,154 A6,6 0 1,0 189,154 A6,6 0 1,0 177,154 Z"
+            android:fillColor="#FF000000" />
+        <path
+            android:pathData="M183,154 H184 A3,3 0 0,1 187,157 V166 A3,3 0 0,1 184,169 H183 A3,3 0 0,1 180,166 V157 A3,3 0 0,1 183,154 Z"
+            android:fillColor="#FF000000" />
+    </group>
+</vector>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Media mark in one colour, for Android 13 themed icons: the wells are
+     holes, cut with evenOdd because VectorDrawable has no masks. Translated
+     from assets/branding/icon/apps/media-adaptive-monochrome.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- The mark is drawn on the hand-off's 256-unit grid and placed at 60dp
+         inside the 66dp safe zone: translate(24 24) scale(60/256). -->
+    <group
+        android:translateX="24"
+        android:translateY="24"
+        android:scaleX="0.234375"
+        android:scaleY="0.234375">
+        <path
+            android:pathData="M106,18 H150 A14,14 0 0,1 164,32 V32 A14,14 0 0,1 150,46 H106 A14,14 0 0,1 92,32 V32 A14,14 0 0,1 106,18 Z"
+            android:fillColor="#FF000000" />
+        <path
+            android:pathData="M58,34 H198 A36,36 0 0,1 234,70 V200 A36,36 0 0,1 198,236 H58 A36,36 0 0,1 22,200 V70 A36,36 0 0,1 58,34 Z M64,58 H192 A18,18 0 0,1 210,76 V194 A18,18 0 0,1 192,212 H64 A18,18 0 0,1 46,194 V76 A18,18 0 0,1 64,58 Z"
+            android:fillColor="#FF000000"
+            android:fillType="evenOdd" />
+        <path
+            android:pathData="M94,95 l72,40 -72,40 z"
+            android:fillColor="#FF000000" />
+    </group>
+</vector>

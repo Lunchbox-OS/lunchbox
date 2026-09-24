@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Lunchbox Companion, black on transparent">
+<mask id="mc"><rect width="256" height="256" fill="#fff"></rect>
+<rect x="46" y="58" width="102" height="154" rx="18" fill="#000"></rect>
+<path d="M167 136v-12a16 16 0 0 1 31 0v12" fill="none" stroke="#000" stroke-width="9" stroke-linecap="round"></path>
+<rect x="155" y="136" width="56" height="45" rx="10" fill="#000"></rect></mask>
+<g mask="url(#mc)"><rect x="92" y="18" width="72" height="28" rx="14" fill="#000000"></rect><rect x="22" y="34" width="212" height="202" rx="36" fill="#000000"></rect></g>
+<path d="M82 110l40 25-40 25z" fill="#000000"></path><circle cx="183" cy="154" r="6" fill="#000000"></circle><rect x="180" y="154" width="7" height="15" rx="3" fill="#000000"></rect>
+</svg>
