@@ -17,7 +17,7 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 zbus = { workspace = true }
-nix = { workspace = true, features = ["net"] }
+nix = { workspace = true, features = ["net", "time"] }
 async-trait = "0.1"
 dirs = "5.0"
 shell-escape = "0.1"
