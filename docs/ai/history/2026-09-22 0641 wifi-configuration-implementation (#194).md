@@ -184,3 +184,6 @@ removed `00-installer-config.yaml` outright. `WifiCustodian::forget` documents
 it; nothing in this change can prevent it. Before a household relies on the
 button, it wants either a check that `/etc/netplan` is otherwise untouched or a
 recorded decision that this is acceptable.
+
+*Fixed later in the same PR: forgetting no longer goes through NetworkManager's
+delete. See `2026-09-24 1128 netplan-safe-forget (#194).md`.*

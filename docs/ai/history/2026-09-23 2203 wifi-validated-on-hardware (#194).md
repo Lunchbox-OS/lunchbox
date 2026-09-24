@@ -232,6 +232,10 @@ Then the whole feature again from a clean install:
   without their comments, but `00-installer-config.yaml` was **never
   deleted** and its settings were unchanged. The earlier note's deletion did
   not reproduce here. The hazard is milder than recorded, but real.
+  *(Later in the same PR: the deletion reproduces as soon as a later file
+  mentions an interface the installer's file defines, and forgetting no
+  longer goes through NetworkManager's delete at all. See
+  `2026-09-24 1128 netplan-safe-forget (#194).md`.)*
 * **Not fixed, deliberately out of this change:**
   * Several messages and rule headers still say
     `/etc/polkit-1/rules.d/…` where the installer puts
