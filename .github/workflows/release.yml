@@ -1,0 +1,631 @@
+name: Release
+
+# Tag-driven release pipeline. Pushing a `vX.Y.Z` tag builds a `.deb` per
+# architecture and a signed `.apk` per Android module, then -- after a human
+# approves the `release` environment -- signs and attests them, publishes the
+# GitHub release, and publishes the apt repository at apt.lunchbox-os.com.
+#
+# Release flow:
+#   ./scripts/lunchbox version set X.Y.Z
+#   git commit -am "bump to X.Y.Z" && git tag -a vX.Y.Z -m vX.Y.Z
+#   git push && git push --tags
+#   then approve the `publish` job's deployment to `release` in the run.
+#
+# See docs/ai/history/2026-07-04 003 binary-releases.md for the build half,
+# docs/release-signing.md for the keys, and
+# docs/ai/history/2026-09-19 005 self-hosted-apt-repo (#204).md for the apt
+# repository.
+#
+# Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
+# as an artifact, and a single `publish` job at the end signs, creates the
+# release and attaches all of them. Nothing reaches a release until every build
+# has passed, and nothing is signed until someone has approved it.
+#
+# Secrets. Repository-wide:
+#   LUNCHBOX_KEYSTORE_B64       base64 of the Android release keystore
+#   LUNCHBOX_KEYSTORE_PASSWORD  keystore password
+#   LUNCHBOX_KEY_ALIAS          signing key alias
+#   LUNCHBOX_KEY_PASSWORD       signing key password
+#   CLOUDFLARE_API_TOKEN        Cloudflare token with the "Cloudflare Pages:
+#                               Edit" permission, for the config editor and
+#                               the apt repository
+#   CLOUDFLARE_ACCOUNT_ID       Cloudflare account id the Pages projects live in
+# In the `release` environment only, so no other job can read them:
+#   LUNCHBOX_APT_KEY_B64        base64 of the archive signing *subkey* export
+#   LUNCHBOX_APT_KEY_PASSPHRASE its passphrase
+# The release itself is created with the job's own GITHUB_TOKEN; there is no
+# PAT any more.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Manual dry run: builds the .deb + both signed .apks (exercising signing and
+  # the media armeabi-v7a cargo-ndk cross-compile) WITHOUT publishing anything
+  # -- unless you tick `publish`. Run it before cutting a real vX.Y.Z tag.
+  #
+  # Ticking `publish` is for re-running a release, so it must be dispatched
+  # from the tag: the `release` environment admits only v* tags, and the guard
+  # refuses anything else before a build starts.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the release and the apt repository (run from a v* tag; off = dry run)"
+        type: boolean
+        default: false
+      apt_rebuild:
+        description: "Regenerate the apt index from every release's assets instead of appending to the published one"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --------------------------------------------------------------------------
+  # guard: the tag must match the canonical VERSION, and all synced literals
+  # must be in harmony (reuses the #83 guarantee).
+  # --------------------------------------------------------------------------
+  guard:
+    name: Guard (tag == VERSION)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publishing needs a tag
+        if: github.event.inputs.publish == 'true' && github.ref_type != 'tag'
+        run: |
+          echo "::error::publish was ticked on $GITHUB_REF_NAME, which is not a tag. Dispatch the run from the vX.Y.Z tag to publish."
+          exit 1
+
+      # Only meaningful on a tag; a dry run from a branch has no vX.Y.Z ref.
+      - name: Tag matches VERSION
+        if: github.ref_type == 'tag'
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          file_version="$(./scripts/lunchbox version)"
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (=$tag_version) does not match VERSION ($file_version)"
+            exit 1
+          fi
+          echo "Releasing version $file_version"
+
+      - name: Version harmony
+        run: ./scripts/lunchbox version check
+
+  # --------------------------------------------------------------------------
+  # images: build-if-missing the pre-baked CI images and expose their refs. One
+  # call per image, so a job waits only for the image it pulls -- see the note in
+  # ci.yml, and image.yml's own header, for why that is worth the three calls.
+  # --------------------------------------------------------------------------
+  image-base:
+    name: CI image
+    needs: guard
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: base
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-android:
+    name: CI image (Android)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: android
+      base-ref: ${{ needs.image-base.outputs.ref }}
+    permissions:
+      packages: write
+    secrets: inherit
+
+  image-cross:
+    name: CI image (arm64 cross)
+    needs: image-base
+    uses: ./.github/workflows/image.yml
+    with:
+      kind: cross
+      base-ref: ${{ needs.image-base.outputs.ref }}
+      target-arch: arm64
+    permissions:
+      packages: write
+    secrets: inherit
+
+  # --------------------------------------------------------------------------
+  # deb: stage the install tree via install.sh (DESTDIR) and dpkg-deb it, then
+  # (on publish) upload it + a .sha256 to the release.
+  # --------------------------------------------------------------------------
+  deb:
+    # The interpolation in `name:` is required, not cosmetic: two jobs in one
+    # workflow file may not share a name — Forgejo rejects the *entire* file
+    # when they do, and nothing in it runs. scripts/ci/check-workflows.sh
+    # catches that locally.
+    name: Build .deb (${{ matrix.arch }})
+    # Both images: the matrix picks the cross one for arm64 and the base one for
+    # amd64, and a single job cannot depend on a different thing per matrix leg.
+    needs: [guard, image-base, image-cross]
+    runs-on: ubuntu-latest
+    strategy:
+      # Publish whichever architecture succeeded rather than losing both to
+      # one failure: each leg uploads its own asset independently.
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    container:
+      # arm64 is cross-compiled on this amd64 runner and so needs the cross
+      # image; amd64 builds natively in the base one.
+      image: ${{ matrix.arch == 'arm64' && needs.image-cross.outputs.ref || needs.image-base.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Assert this job got the arm64 cross image
+        if: matrix.arch == 'arm64'
+        # First, and before checkout: if this job did not get the cross image,
+        # nothing after it can succeed, and what it fails with points
+        # somewhere else entirely -- `rustc: command not found` when the
+        # container is dropped (an empty image ref), or E0463 "can't find
+        # crate for `core`" when the image expression above falls through: an empty cross-ref makes
+        # `arm64 && '' || base-ref` pick the *base* image, silently. Both were seen on Forgejo run 462 against
+        # a cross image that was published and correct, so the ref itself is
+        # printed: it is the one fact the rest of the log cannot recover.
+        shell: sh
+        env:
+          CROSS_REF: ${{ needs.image-cross.outputs.ref }}
+        run: |
+          echo "cross-ref: '$CROSS_REF'"
+          if [ -z "$CROSS_REF" ]; then
+            echo "::error::needs.image-cross.outputs.ref is empty, so this job is not running in the arm64 cross image. Check that the CI image (arm64 cross) job succeeded and produced a ref."
+            exit 1
+          fi
+          if ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
+            echo "::error::cross-ref is '$CROSS_REF', but this environment has no aarch64-unknown-linux-gnu std (or no rustup on PATH). It is not the image that ref names."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-v2-${{ matrix.arch }}-
+
+      - name: Build .deb
+        # Builds --release, stages via `DESTDIR=… lunchbox install …`, runs
+        # dpkg-deb. Root in the container, so no fakeroot. Output in dist/pkg/.
+        run: ./scripts/lunchbox package deb --arch ${{ matrix.arch }} --out dist/pkg
+
+      - name: Assert the package is labelled for the right architecture
+        # A cross build that silently fell back to the host would otherwise be
+        # published under the wrong Architecture: and installed by apt on
+        # machines that cannot run it.
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(echo dist/pkg/*.deb)"
+          got="$(dpkg-deb -f "$deb" Architecture)"
+          echo "$deb declares Architecture: $got"
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "::error::expected Architecture: ${{ matrix.arch }}, got $got"
+            exit 1
+          }
+
+      # Hand the .deb to `publish` rather than uploading it from here. Nothing
+      # reaches a release until every build leg has succeeded.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/pkg/*.deb
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # config-editor: build the standalone config editor and publish it to
+  # Cloudflare Pages, which serves it at config.lunchbox-os.com.
+  # (Its own subdomain, so lunchbox-os.com is free for a landing and
+  # documentation site later. The hostname lives in the Pages project's custom
+  # domain settings, not here — nothing in this job hardcodes it.)
+  #
+  # Tag-driven like everything else here, so the hosted editor matches the last
+  # released lunchbox rather than whatever is on main — it renders a schema
+  # (`config_version`) that ships with the daemon, and an editor ahead of the
+  # release would offer fields the installed version cannot read.
+  #
+  # Prerelease tags are skipped for the same reason the apt registry skips them:
+  # an RC should not replace the editor people are using. The bundle is still
+  # built on every trigger, so a dry run exercises wasm-pack and the npm build.
+  #
+  # Direct Upload rather than a git integration: Cloudflare never needs access
+  # to the repo.
+  # --------------------------------------------------------------------------
+  config-editor:
+    name: Config editor (Cloudflare Pages)
+    needs: [guard, image-base]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image-base.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      # The Pages project. Its production branch must be `main` for the deploy
+      # below to publish to production rather than to a preview URL.
+      PAGES_PROJECT: lunchbox-config-editor
+      # Pinned for the same reason bpf-linker, cargo-ndk and wasm-pack are: an
+      # unpinned `npx wrangler` adopts whatever upstream published last.
+      WRANGLER_VERSION: "4.125.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-v2-
+
+      # wasm-pack builds crates/lunchbox-config-wasm, then rsbuild writes
+      # lunchbox-webui/dist-standalone/. Never dist/ — that one is compiled into
+      # lunchboxd by rust-embed.
+      #
+      # Building and uploading in one job is forced: Forgejo does not implement
+      # upload-artifact@v4, so `dist-standalone/` cannot be handed from a
+      # Rust-capable job to a Node-capable one. That means the base image has to
+      # satisfy wrangler's Node floor (>= 22) as well as carry the Rust
+      # toolchain, which is one of the reasons it moved to 26.04.
+      - name: Build the standalone bundle
+        run: ./scripts/lunchbox build config-editor
+
+      - name: Deploy to Cloudflare Pages
+        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy \
+            lunchbox-webui/dist-standalone \
+            --project-name "$PAGES_PROJECT" \
+            --branch main \
+            --commit-dirty=true
+
+      - name: Dry run note
+        if: ${{ !((github.event_name == 'push' && !contains(github.ref_name, '-')) || github.event.inputs.publish == 'true') }}
+        run: |
+          echo "Built lunchbox-webui/dist-standalone; not deploying."
+          du -sh lunchbox-webui/dist-standalone
+
+  # --------------------------------------------------------------------------
+  # apk: one signed APK per Android module, built in parallel; each (on publish)
+  # uploads itself + a .sha256. cargo-ndk, the Android Rust targets, and
+  # ANDROID_NDK_HOME are baked into the android image, so there's no toolchain
+  # setup here. Add a matrix row per new Android module.
+  # --------------------------------------------------------------------------
+  apk:
+    name: Build .apk (${{ matrix.module.name }})
+    needs: [guard, image-android]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image-android.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - name: companion
+            dir: companion-android
+            gradle_module: app
+            artifact: lunchbox-companion
+          # media is a NativeActivity app whose Gradle build cross-compiles a
+          # Rust cdylib via cargo-ndk; rust: true gates the cargo cache below.
+          - name: media
+            dir: crates/lunchbox-media-android/android
+            gradle_module: app
+            artifact: lunchbox-media
+            rust: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles(format('{0}/gradle/libs.versions.toml', matrix.module.dir), format('{0}/**/build.gradle.kts', matrix.module.dir)) }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # Rust-native modules only: assembleRelease invokes cargo-ndk, so cache the
+      # cargo registry + target dir. Key matches ci.yml's android-media job so
+      # they share the built deps. (Keeps the companion job from polluting it.)
+      - name: Cache cargo (Rust-native APKs)
+        if: matrix.module.rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: ${{ runner.os }}-cargo-media-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-media-android-
+
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.LUNCHBOX_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::LUNCHBOX_KEYSTORE_B64 is not set; cannot produce a signed release APK"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/lunchbox-release.jks"
+
+      - name: Assemble signed release APK
+        working-directory: ${{ matrix.module.dir }}
+        env:
+          LUNCHBOX_KEYSTORE_FILE: ${{ runner.temp }}/lunchbox-release.jks
+          LUNCHBOX_KEYSTORE_PASSWORD: ${{ secrets.LUNCHBOX_KEYSTORE_PASSWORD }}
+          LUNCHBOX_KEY_ALIAS: ${{ secrets.LUNCHBOX_KEY_ALIAS }}
+          LUNCHBOX_KEY_PASSWORD: ${{ secrets.LUNCHBOX_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :${{ matrix.module.gradle_module }}:assembleRelease
+
+      - name: Stage APK with release name
+        run: |
+          set -euo pipefail
+          src="${{ matrix.module.dir }}/${{ matrix.module.gradle_module }}/build/outputs/apk/release"
+          apk="$(find "$src" -name '*.apk' | head -n1)"
+          [ -n "$apk" ] || { echo "::error::no release APK found under $src"; exit 1; }
+          version="$(./scripts/lunchbox version)"
+          mkdir -p dist/pkg
+          cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
+
+      # Validate dist/fdroid/metadata against the APK we just signed. The
+      # published F-Droid repository is generated on the server that hosts
+      # git.armeafamily.com, which downloads these release assets and this
+      # repo's metadata at the release tag and runs `fdroid update` with nobody
+      # watching — so this is the last place a bad metadata file or a
+      # wrongly-signed APK can surface. `package fdroid` fails if the APK does
+      # not reach the generated index, which is what a mismatched
+      # AllowedAPKSigningKeys looks like (fdroid update warns, drops the APK,
+      # and still exits 0). Runs on dry runs too — that is the point of them.
+      # See dist/fdroid/README.md and docs/ai/history/2026-07-26 003 …spec.md.
+      - name: Validate the F-Droid metadata
+        run: |
+          apt-get update
+          # --no-install-recommends keeps this to ~67 packages / ~78 MB rather
+          # than ~269 / ~300 MB: matplotlib and tk come in as Recommends of
+          # androguard and `fdroid update` does not need them. Installed per job
+          # rather than baked into the android CI image so that every Android CI
+          # run doesn't pay for a release-only check.
+          #
+          # default-jdk-headless because fdroidserver signs the index with
+          # /usr/lib/jvm/default-java/bin/jarsigner and unconditionally prefers
+          # that path over every other JDK present (including the image's
+          # openjdk-21-jdk-headless), so the default has to be a JDK.
+          apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
+          ./scripts/lunchbox package fdroid --apks dist/pkg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.module.artifact }}
+          path: dist/pkg/*.apk
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # publish: the only job that signs anything, touches a release, or can read
+  # the archive signing key. It runs after every build leg has succeeded, and
+  # its first step waits for a required reviewer on the `release` environment,
+  # which also admits only v* tags. See docs/release-signing.md.
+  #
+  # The steps are ordered so that a failure at any point leaves nothing
+  # half-published:
+  #
+  #   1. import the key, sign       no key or the wrong key fails here, before
+  #                                 anything is public
+  #   2. attest provenance          Sigstore, keyless
+  #   3. publish the GitHub release draft, upload, then public, in one call
+  #   4. build + deploy apt index   only now: the index points at step 3's
+  #                                 assets, which 404 until the release is public
+  #   5. smoke-test the live repo   apt-get download through the redirect
+  #
+  # Re-running the job is safe: publish-release.sh completes a draft or adds
+  # only missing assets, and publish-apt.sh skips what is already indexed.
+  #
+  # It also reverses a deliberate decision recorded on the `deb` matrix --
+  # "publish whichever architecture succeeded rather than losing both to one
+  # failure". That is now all-or-nothing. For a release that seems the better
+  # trade: a release carrying the amd64 .deb but not the arm64 one is a trap for
+  # arm64 users, who get "no such package" from apt rather than a clear "this
+  # version was not released". `fail-fast: false` stays on both matrices, so a
+  # broken leg still reports alongside the others rather than cancelling them.
+  #
+  # One job rather than a release job and an apt job: both need the key, and
+  # each job that names the environment asks for its own approval.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Publish release
+    needs: [guard, deb, apk]
+    if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write      # create the release and upload its assets
+      id-token: write      # the Sigstore certificate behind the attestation
+      attestations: write  # store the attestation
+    env:
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      APT_URL: https://apt.lunchbox-os.com
+      # The Pages project serving APT_URL. Its production branch must be `main`,
+      # as for the config editor.
+      APT_PAGES_PROJECT: lunchbox-apt
+      WRANGLER_VERSION: "4.125.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect every built asset
+        uses: actions/download-artifact@v4
+        with:
+          # No `name:`, so this takes every artifact the run produced; the
+          # patterns keep it to the packages.
+          pattern: '{deb-*,apk-*}'
+          merge-multiple: true
+          path: dist/pkg
+
+      - name: Show what will be published
+        run: ls -l dist/pkg
+
+      # Into a per-run GNUPGHOME under RUNNER_TEMP, never the workspace. The
+      # secret is the signing subkey alone: it can sign, and cannot certify,
+      # add subkeys or revoke.
+      - name: Import the archive signing subkey
+        env:
+          KEY_B64: ${{ secrets.LUNCHBOX_APT_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEY_B64" ]; then
+            echo "::error::LUNCHBOX_APT_KEY_B64 is not set in the release environment. See docs/release-signing.md."
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
+          echo "$KEY_B64" | base64 -d | gpg --batch --quiet --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      # .sha256 for every asset, .asc for each .deb, each .asc checked against
+      # dist/apt/repository.key -- a secret that is not the published key
+      # stops the release here.
+      - name: Sign every asset
+        env:
+          LUNCHBOX_APT_KEY_PASSPHRASE: ${{ secrets.LUNCHBOX_APT_KEY_PASSPHRASE }}
+        run: ./scripts/ci/sign-release-assets.sh dist/pkg/*.deb dist/pkg/*.apk
+
+      # Binds each file's digest to this repository, workflow and commit.
+      # Verified with `gh attestation verify FILE -R <owner>/<repo>`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/pkg/*.deb
+            dist/pkg/*.apk
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/publish-release.sh "$TAG" dist/pkg/*
+
+      # Everything from here is the apt repository, which prereleases (tags
+      # with a -, e.g. v0.2.0-rc1) never reach: RC builds stay out of
+      # `apt upgrade`, and are still downloadable, signed, from their release.
+      - name: Install apt-ftparchive
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils
+
+      # Appends to the published index -- verified against repository.key on
+      # the way in -- unless a rebuild was asked for, or there is no published
+      # index yet (the first release). Only a 404 means "none yet": any other
+      # failure to fetch it fails the step rather than quietly rebuilding.
+      - name: Build the apt repository
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LUNCHBOX_APT_KEY_PASSPHRASE: ${{ secrets.LUNCHBOX_APT_KEY_PASSPHRASE }}
+          REBUILD: ${{ github.event.inputs.apt_rebuild == 'true' }}
+        run: |
+          set -euo pipefail
+          code="$(curl -sS -o /dev/null -w '%{http_code}' "$APT_URL/dists/stable/InRelease" || true)"
+          if [ "$REBUILD" = true ] || [ "$code" = 404 ]; then
+            echo "Regenerating the index from every release (asked for: $REBUILD; published InRelease: HTTP $code)"
+            ./scripts/ci/fetch-release-debs.sh dist/releases
+            ./scripts/ci/publish-apt.sh --out dist/apt-site --rebuild dist/releases dist/pkg/*.deb
+          else
+            ./scripts/ci/publish-apt.sh --out dist/apt-site --previous "$APT_URL" dist/pkg/*.deb
+          fi
+
+      # wrangler 4 needs Node >= 22, which the stock runner does not promise.
+      - uses: actions/setup-node@v4
+        if: ${{ !contains(github.ref_name, '-') }}
+        with:
+          node-version: 22
+
+      - name: Deploy the apt repository to Cloudflare Pages
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy dist/apt-site \
+            --project-name "$APT_PAGES_PROJECT" \
+            --branch main \
+            --commit-dirty=true
+
+      # What a device does, following docs/INSTALL.md: fetch the signed index
+      # from the live site and download this release's .deb for each
+      # architecture through the redirect, then compare with what was built.
+      # Only the Lunchbox source is read, so adding arm64 does not send apt to
+      # the Ubuntu archive for packages it does not carry.
+      - name: Smoke-test the live repository
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          sudo install -d -m 755 /etc/apt/keyrings
+          sudo install -m 644 dist/apt/repository.key /etc/apt/keyrings/lunchbox-os.asc
+          echo "deb [signed-by=/etc/apt/keyrings/lunchbox-os.asc] $APT_URL stable main" \
+            | sudo tee /etc/apt/sources.list.d/lunchbox.list
+          sudo dpkg --add-architecture arm64
+          only=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/lunchbox.list -o Dir::Etc::sourceparts=-)
+          # A new deployment can take a moment to be what the edge serves.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if sudo apt-get "${only[@]}" update -q && apt-cache madison lunchbox | grep -q "| $version |"; then
+              break
+            fi
+            [ "$attempt" -lt 10 ] || { echo "::error::$APT_URL does not offer lunchbox $version"; exit 1; }
+            sleep 15
+          done
+          mkdir -p dist/smoke
+          for deb in dist/pkg/*.deb; do
+            arch="$(dpkg-deb -f "$deb" Architecture)"
+            (cd dist/smoke && apt-get "${only[@]}" download "lunchbox:$arch=$version")
+            got="dist/smoke/$(basename "$deb")"
+            cmp "$got" "$deb" || { echo "::error::$got from $APT_URL differs from the built $deb"; exit 1; }
+            echo "OK: lunchbox:$arch=$version from $APT_URL matches the release asset"
+          done
+
+  # --------------------------------------------------------------------------
+  # dry-run-note: says, on a manual run with `publish` off, that the builds all
+  # happened and nothing was published. Replaces the per-job notes the build
+  # jobs used to print.
+  # --------------------------------------------------------------------------
+  dry-run-note:
+    name: Dry run (nothing published)
+    needs: [deb, apk]
+    if: ${{ !(github.event_name == 'push' || github.event.inputs.publish == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: What a real run would have published
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '{deb-*,apk-*}'
+          merge-multiple: true
+          path: dist/pkg
+      - run: |
+          echo "Dry run: built and signed everything below; published nothing."
+          ls -l dist/pkg

@@ -33,15 +33,33 @@ below — continue with the `lunchbox-admin setup-user` step described there.
 
 ## Installing from a standalone `.deb`
 
-If you'd rather not add the apt repository, prebuilt amd64 packages are also
-attached to each
-[release](https://github.com/aarmea/lunchbox/releases).
+If you'd rather not add the apt repository, prebuilt amd64 and arm64 packages
+are also attached to each
+[release](https://github.com/Lunchbox-OS/lunchbox/releases).
 Download the `.deb` for the version you want and install it with `apt`, which
 also pulls in the runtime dependencies (Sway, mpv, BlueZ, …):
 
 ```sh
 sudo apt install ./lunchbox_0.2.0_amd64.deb
 ```
+
+The apt repository checks every package it installs; a downloaded `.deb` is
+checked only if you check it. Each one comes with a `.asc` signature made by the
+same key the repository uses, and a build-provenance attestation that says which
+workflow run built it and from which commit:
+
+```sh
+# Signed by the Lunchbox archive key? Uses the repository's key, not yours.
+curl -fsSL https://apt.lunchbox-os.com/repository.key | gpg --dearmor > lunchbox.gpg
+gpgv --keyring ./lunchbox.gpg lunchbox_0.2.0_amd64.deb.asc lunchbox_0.2.0_amd64.deb
+
+# Built by this repository's release workflow? Needs the GitHub CLI.
+gh attestation verify lunchbox_0.2.0_amd64.deb -R Lunchbox-OS/lunchbox
+```
+
+Either is enough to know the package is ours. How the key is kept, and what
+each check does and does not prove, is in
+[release-signing.md](release-signing.md).
 
 The package installs the binaries, the privileged firewall helper and its
 polkit assets, the `/dev/uinput` udev rule, the Sway kiosk session, and the
