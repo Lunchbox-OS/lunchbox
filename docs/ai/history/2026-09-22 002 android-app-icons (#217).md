@@ -68,8 +68,66 @@ masked group, times the rendered mask, then the unmasked marks on top.
   app.
 - `aapt2 dump resources` shows both APKs carry the new background colour and
   the monochrome drawable.
-- **Not seen on a device.** No phone was attached and the SDK here has no
-  emulator, so no launcher has actually drawn these icons.
+- **Not seen on a device** when this was first written: no phone was
+  attached and the SDK here has no emulator. See the next section.
+
+## Seen on a device
+
+The follow-up prompt, on the branch's pull request (#222):
+
+> validate that the icons look as they expect on device
+
+and then, after the checks below:
+
+> update the history note and fix the media app name
+
+![Left to right: companion and media on a Pixel 10a in colour, the same as themed icons, then both on a moto g power (2021)](2026-09-22-002-android-app-icons/on-device.png)
+
+Both apps were installed from this branch and drawn by two launchers:
+
+- **Pixel 10a, Android 16 (SDK 37), Pixel Launcher.** Colour icons in the
+  app drawer are the marks on cream, whole inside the circle crop, handle
+  tab included. With themed icons on, both draw their monochrome layer and
+  match the right-hand tiles of `icons.png`: the wells are holes, the
+  padlock's shackle pocket is filled back in, the handle tab is solid, and
+  the mark sits at the same size as the system's themed icons.
+- **moto g power (2021), Android 11 (SDK 30), Moto launcher.** Colour icons
+  are right. This Android has no themed icons, so there was no monochrome
+  layer to check.
+
+Things that got in the way, for whoever does this next:
+
+- **The Pixel's companion was a release build** (0.5.1, a different
+  signing key), so the debug APK would not install over it, and
+  uninstalling it would have erased its admin records and claim tokens.
+  Instead, a side-by-side copy was built with an init script that is not
+  part of the repo:
+
+  ```groovy
+  allprojects {
+      plugins.withId('com.android.application') {
+          android { buildTypes { debug { applicationIdSuffix '.icontest' } } }
+      }
+  }
+  ```
+
+  `./gradlew -I suffix.gradle :app:assembleDebug` gives
+  `com.lunchboxos.companion.icontest`. It was installed next to the real
+  one and uninstalled after.
+- **Pixel Launcher themes icons only on the home screen**, not in the app
+  drawer, so each app went on the home screen (long-press, "Add to home
+  screen"). The switch is in Wallpaper & style, Home screen, Icons: pick
+  "Minimal" (Android 16's name for themed icons), then Apply. adb cannot
+  flip it: the launcher's `grid_control` provider needs `BIND_WALLPAPER`,
+  which the shell user doesn't have. The phone was put back to "Default"
+  afterwards.
+
+The drawer also showed the media app's launcher label as `lunchbox-media`.
+That was the crate name, left in `strings.xml` from the app's first
+scaffold (as `shepherd-media`), and it was not an icon problem. It is now
+"Lunchbox Media", which the F-Droid listing and `docs/INSTALL.md` already
+called it; `aapt2 dump badging` and the Pixel's drawer both show the new
+name.
 
 ## Left alone
 
