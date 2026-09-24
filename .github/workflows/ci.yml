@@ -1115,6 +1115,27 @@ jobs:
       - name: Check the cross dependency set covers the build set
         run: ./scripts/ci/check-cross-pkgs.sh
 
+  apt-repository:
+    name: apt repository
+    # release.yml publishes the apt index only on a release tag, where a
+    # mistake is a failed `apt update` on every device. This runs the whole
+    # publish path offline instead -- a throwaway key, synthetic .debs, a local
+    # server standing in for Cloudflare Pages' _redirects, and a real apt-get
+    # following the redirect -- including the refusals that stand between a
+    # bad release and the published index. No container: it needs only
+    # apt-utils on top of the stock runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install apt-ftparchive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils
+
+      - name: Test publish-apt.sh
+        run: ./scripts/ci/test-publish-apt.sh
+
   workflows:
     name: Workflow syntax
     # Static guard: fails if two jobs in one workflow file share a name. Forgejo

@@ -742,6 +742,16 @@ one-time key ceremony with exact `gpg` commands, the `gh` calls that create the
 environment and its secrets, how the publish job uses them, what a user runs to
 verify a download, and what a compromise recovery looks like.
 
+`scripts/ci/publish-apt.sh` builds that repository's index. It runs for real
+only on a release tag, so test a change to it with
+
+```sh
+./scripts/ci/test-publish-apt.sh   # needs apt-utils; no root, no network
+```
+
+which publishes two synthetic releases under a throwaway key and runs a real
+`apt-get update` and `apt-get download` against them. CI runs it too.
+
 ## Contribution guidelines
 
 Lunchbox is licensed under the GPLv3 to preserve end-users' rights.
