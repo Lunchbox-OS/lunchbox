@@ -157,15 +157,6 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// The dark browse palette the views wore before the branding. Kept only until
-/// the last of them has moved over.
-pub const BG: Color32 = Color32::from_rgb(0x10, 0x12, 0x18);
-pub const TILE: Color32 = Color32::from_rgb(0x1c, 0x20, 0x2c);
-pub const TILE_FOCUSED: Color32 = Color32::from_rgb(0x2a, 0x33, 0x4a);
-pub const TEXT: Color32 = Color32::from_rgb(0xea, 0xea, 0xea);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
-pub const FOCUS_BORDER: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
-
 /// Apply the browse theme to a context that shows nothing but the media
 /// screens: Baloo 2, and ink type on the enamel field.
 pub fn install(ctx: &egui::Context) {
