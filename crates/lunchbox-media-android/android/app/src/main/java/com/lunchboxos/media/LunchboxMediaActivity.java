@@ -99,8 +99,18 @@ public class LunchboxMediaActivity extends NativeActivity {
         //
         // Starts filling the window, and is resized to the video's shape by
         // setVideoBounds once a file is open.
-        ViewGroup content = findViewById(android.R.id.content);
-        content.addView(
+        //
+        // It hangs off the decor view, not android.R.id.content, because the
+        // rectangle it is given is in window pixels and only the decor view is
+        // guaranteed to span the window. Below Android 15's enforced
+        // edge-to-edge, the theme's decor layout fits system windows, so the
+        // content frame is padded by the cutout and navigation-bar insets even
+        // though the window itself extends under them (shortEdges). The native
+        // renderer draws the bars from the window's edge, so a view placed from
+        // the content frame's edge came out shifted by the cutout inset: 70px on
+        // a moto g power (issue #225).
+        ViewGroup decor = (ViewGroup) getWindow().getDecorView();
+        decor.addView(
                 videoView,
                 0,
                 new FrameLayout.LayoutParams(
