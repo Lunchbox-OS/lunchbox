@@ -21,11 +21,11 @@ use lunchbox_core::{BeginStopDecision, CoreEngine, CoreEvent};
 use lunchbox_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
     HudLayoutController, LightSensor, NetworkInfoProvider, NoOpDisplayController,
-    StopMode as HostStopMode, VolumeController,
+    StopMode as HostStopMode, VolumeController, WifiController,
 };
 use lunchbox_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxNetworkInfo,
-    LinuxVolumeController, PipeWireAudioRouter, SwayIpcBackend,
+    LinuxVolumeController, LinuxWifiReader, PipeWireAudioRouter, SwayIpcBackend,
 };
 use lunchbox_http::{AppState as HttpAppState, HttpServer};
 use lunchbox_ipc::{IpcServer, ServerMessage};
@@ -1725,11 +1725,11 @@ impl Service {
                     Arc::new(diagnostic_publisher.clone()) as Arc<dyn lunchbox_api::DiagnosticSink>
                 ),
                 network: Some(Arc::new(LinuxNetworkInfo::new()) as Arc<dyn NetworkInfoProvider>),
-                // Wired up once the NetworkManager backend lands (issue
-                // #194). Until then the methods answer "this device has no
-                // Wi-Fi", which is wrong but honest -- better than a form
-                // that accepts a password and drops it.
-                wifi: None,
+                // Reads only for now (issue #194): scanning and listing
+                // need no privilege, while writing a profile needs
+                // `settings.modify.system`, which this uid deliberately does
+                // not hold. The write path arrives with the custodian.
+                wifi: Some(Arc::new(LinuxWifiReader::new()) as Arc<dyn WifiController>),
                 web_listener: web_listener.clone(),
                 web_auth: web_auth.clone(),
             })
