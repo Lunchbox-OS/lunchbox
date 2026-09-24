@@ -28,6 +28,7 @@ import type {
   WifiView,
 } from "../api/types";
 import { Spinner } from "../components/Spinner";
+import { WifiPanel } from "./WifiPanel";
 
 /**
  * Re-read while somebody is looking at the page. An address changes when a
@@ -424,6 +425,13 @@ export function NetworkPage() {
 
       <ChecksCard checks={snapshot?.internet_status ?? []} />
 
+      {/*
+        Above the interface list on purpose (issue #194): somebody who opens
+        this page because the device is on the wrong network is here to change
+        it, not to read an address.
+      */}
+      <WifiPanel />
+
       <Box>
         <Typography variant="subtitle2" color="text.secondary" gutterBottom>
           {reachable.length === 0
@@ -432,11 +440,7 @@ export function NetworkPage() {
         </Typography>
         <Stack spacing={1.5}>
           {reachable.map((iface) => (
-            <InterfaceCard
-              key={iface.name}
-              iface={iface}
-              onCopied={onCopied}
-            />
+            <InterfaceCard key={iface.name} iface={iface} onCopied={onCopied} />
           ))}
         </Stack>
       </Box>
