@@ -63,8 +63,9 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # guard: the tag must match the canonical VERSION, and all synced literals
-  # must be in harmony (reuses the #83 guarantee).
+  # guard: the tag must match the canonical VERSION, all synced literals must
+  # be in harmony (reuses the #83 guarantee), and the tag must not already
+  # carry a release someone published by hand.
   # --------------------------------------------------------------------------
   guard:
     name: Guard (tag == VERSION)
@@ -92,6 +93,16 @@ jobs:
 
       - name: Version harmony
         run: ./scripts/lunchbox version check
+
+      # A release published by hand is sealed empty by release immutability,
+      # and its tag can never be reused -- v0.6.0 went that way. Say so now,
+      # not after every build has run and the upload is refused.
+      - name: The release is not already published by hand
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: ./scripts/ci/check-release-tag.sh "$GITHUB_REF_NAME"
 
   # --------------------------------------------------------------------------
   # images: build-if-missing the pre-baked CI images and expose their refs. One
