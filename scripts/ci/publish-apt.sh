@@ -9,6 +9,7 @@
 #   dists/stable/main/binary-{amd64,arm64}/Packages{,.gz}
 #   repository.key                                 the public half, from the repo
 #   404.html                                       so a missing path is a 404
+#   index.html                                     how to use the repository
 #   _redirects                                     /pool/<v>/<file>.deb -> GitHub
 #
 # The .deb files themselves are never uploaded. Each Packages stanza's
@@ -43,6 +44,9 @@
 #   APT_ASSET_BASE               where _redirects points (default:
 #                                https://github.com/$REPO/releases/download);
 #                                the tag is appended as v<version>
+#   APT_SITE_URL                 where the site is served, for the setup
+#                                commands on index.html (default:
+#                                https://apt.lunchbox-os.com)
 #   APT_PUBLIC_KEY               the key the index must verify against
 #                                (default: dist/apt/repository.key)
 #   LUNCHBOX_APT_KEY_PASSPHRASE  passphrase for the signing key, if it has one
@@ -266,6 +270,86 @@ cp "$public_key" "$site/repository.key"
 # enough for the path the next release reads to decide whether an index
 # exists. A placeholder without one did fool the first release's check.
 printf 'Not found\n' > "$site/404.html"
+
+# A person who opens the site gets the setup commands rather than a 404. They
+# are docs/INSTALL.md's, which stays the reference; the page adds only what the
+# index itself knows -- the signing key's fingerprint and the versions indexed.
+site_url="${APT_SITE_URL:-https://apt.lunchbox-os.com}"
+site_url="${site_url%/}"
+releases_url="${APT_ASSET_BASE%/download}"
+fingerprint="$(gpg --batch --with-colons --show-keys "$public_key" \
+    | awk -F: '$1 == "fpr" { print $10; exit }' \
+    | sed 's/.\{4\}/& /g; s/ $//')"
+versions="$(cat "$dists/$COMPONENT"/binary-*/Packages \
+    | awk '
+        # Per stanza, not per line: apt-ftparchive writes Architecture before
+        # Version, so pairing them line by line gives each architecture the
+        # previous stanza'"'"'s version.
+        function flush() { if (v != "") a[v] = a[v] (a[v] ? ", " : "") arch; v = arch = "" }
+        /^Version: /      { v = $2 }
+        /^Architecture: / { arch = $2 }
+        /^Package: /      { flush() }
+        /^$/              { flush() }
+        END { flush(); for (k in a) print k "\t" a[k] }' \
+    | sort -t$'\t' -k1,1Vr \
+    | awk -F'\t' '{ printf "      <li><code>%s</code> <span>%s</span></li>\n", $1, $2 }')"
+cat > "$site/index.html" <<HTML
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lunchbox apt repository</title>
+  <style>
+    :root { color-scheme: light dark; --fg: #1b1b1b; --muted: #5c5c5c; --bg: #fdfdfb; --code: #f0efe9; --rule: #dcdad2; }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg: #e9e7e1; --muted: #a3a09a; --bg: #161615; --code: #232321; --rule: #3a3936; }
+    }
+    body { margin: 0 auto; max-width: 46rem; padding: 2.5rem 1rem 4rem; font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+    h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.1rem; margin: 2rem 0 .5rem; }
+    p.lede { color: var(--muted); margin-top: 0; }
+    pre, code { font: .9em/1.5 ui-monospace, monospace; background: var(--code); border-radius: 4px; }
+    code { padding: .1em .3em; }
+    pre { padding: .8rem 1rem; overflow-x: auto; }
+    pre code { padding: 0; background: none; }
+    ul { padding-left: 1.2rem; }
+    li span { color: var(--muted); }
+    a { color: inherit; }
+    footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>Lunchbox apt repository</h1>
+  <p class="lede">Signed packages of <a href="https://lunchbox-os.com">Lunchbox</a> for Ubuntu 26.04 and newer.</p>
+
+  <h2>Install</h2>
+<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL ${site_url}/repository.key \\
+  -o /etc/apt/keyrings/lunchbox-os.asc
+echo "deb [signed-by=/etc/apt/keyrings/lunchbox-os.asc] \\
+${site_url} ${SUITE} ${COMPONENT}" \\
+  | sudo tee /etc/apt/sources.list.d/lunchbox.list
+sudo apt update
+sudo apt install lunchbox</code></pre>
+  <p>Then set up the kiosk user with <code>sudo lunchbox-admin setup-user &lt;user&gt;</code>. See the
+  <a href="https://github.com/Lunchbox-OS/lunchbox/blob/main/docs/INSTALL.md">installation guide</a> for the rest.</p>
+
+  <h2>Signing key</h2>
+  <p><a href="repository.key">repository.key</a>, fingerprint:</p>
+<pre><code>${fingerprint}</code></pre>
+
+  <h2>Versions</h2>
+  <ul>
+${versions}
+  </ul>
+  <p>Each package is also on its <a href="${releases_url}">GitHub release</a>, with a
+  <code>.asc</code> signature and a build-provenance attestation.</p>
+
+  <footer>Prereleases are not published here, so <code>apt upgrade</code> tracks stable releases only.</footer>
+</body>
+</html>
+HTML
 
 # pool/<version>/<file> -> <base>/v<version>/<file>. The tag is derived rather
 # than recorded: release.yml refuses a tag that is not v$(VERSION), and VERSION
