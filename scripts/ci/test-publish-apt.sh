@@ -228,6 +228,7 @@ grep -qx "/pool/0.1.0/lunchbox_0.1.0_${a2}.deb $APT_ASSET_BASE/v0.1.0/lunchbox_0
     "$work/site2/_redirects" || fail "redirect should point at the v<version> release asset"
 ok "_redirects maps every pool path to its release asset"
 cmp -s "$work/site2/repository.key" "$APT_PUBLIC_KEY" || fail "repository.key not deployed"
+[[ -f "$work/site2/404.html" ]] || fail "no 404.html: Pages would answer missing paths with a 200"
 deploy "$work/site2"
 
 echo "== apt, through the redirect"

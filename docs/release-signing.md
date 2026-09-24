@@ -231,6 +231,11 @@ until then — at the signing step, before anything is public:
    `main`, with **`apt.lunchbox-os.com`** as its custom domain — set up the way
    `lunchbox-config-editor` and `config.lunchbox-os.com` are. The job deploys
    to it with the existing `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+   The dashboard wants an upload to create the project, so give it a
+   placeholder with an `index.html` **and a top-level `404.html`**. Without a
+   `404.html`, Pages treats the site as a single-page app and answers every
+   path with `index.html` and a 200, so the first release takes the
+   placeholder for a published index and fails its signature check.
 4. A dry run: *Actions → Release → Run workflow* from `main` with `publish`
    unticked, which builds and signs every package with the Android key but
    publishes nothing and never reaches the archive key.
@@ -238,6 +243,28 @@ until then — at the signing step, before anything is public:
 The first release finds no published index (`InRelease` answers 404) and
 builds one from every release's assets instead of appending; after that each
 release appends.
+
+## Cutting a release
+
+```sh
+./scripts/lunchbox version set X.Y.Z      # commit, and merge to main
+git tag -a vX.Y.Z -m vX.Y.Z               # on the merged commit
+git push origin vX.Y.Z
+```
+
+Then approve the `publish` job when the run asks. **The tag comes from git,
+never from the GitHub UI.** Release immutability is on for this repository,
+so a release is sealed the moment it is published: its assets can never be
+added or changed, its tag cannot move or be deleted, and deleting the release
+does not free the tag name. `release.yml` creates the release as a draft,
+attaches every asset, and publishes it last. "Draft a new release → Publish"
+in the UI publishes it first, empty, and that version is gone for good. The
+guard job refuses a tag whose release was published by anyone but
+`github-actions[bot]`. So a mistake costs the version number, but not a
+twenty-minute build that fails at the upload.
+
+v0.6.0 was lost exactly this way, so the first release through this workflow
+is 0.6.1.
 
 ## What a release does with it
 

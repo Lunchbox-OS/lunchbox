@@ -11,6 +11,11 @@ name: Release
 #   git push && git push --tags
 #   then approve the `publish` job's deployment to `release` in the run.
 #
+# Never create or publish the release in the GitHub UI, not even to make the
+# tag. Release immutability is on, so a release published by hand is sealed
+# with no assets, and its tag can never be reused, even after deleting it.
+# v0.6.0 was lost that way. The guard job refuses such a tag before building.
+#
 # See docs/ai/history/2026-07-04 003 binary-releases.md for the build half,
 # docs/release-signing.md for the keys, and
 # docs/ai/history/2026-09-19 005 self-hosted-apt-repo (#204).md for the apt
@@ -63,8 +68,9 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # guard: the tag must match the canonical VERSION, and all synced literals
-  # must be in harmony (reuses the #83 guarantee).
+  # guard: the tag must match the canonical VERSION, all synced literals must
+  # be in harmony (reuses the #83 guarantee), and the tag must not already
+  # carry a release someone published by hand.
   # --------------------------------------------------------------------------
   guard:
     name: Guard (tag == VERSION)
@@ -92,6 +98,16 @@ jobs:
 
       - name: Version harmony
         run: ./scripts/lunchbox version check
+
+      # A release published by hand is sealed empty by release immutability,
+      # and its tag can never be reused -- v0.6.0 went that way. Say so now,
+      # not after every build has run and the upload is refused.
+      - name: The release is not already published by hand
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: ./scripts/ci/check-release-tag.sh "$GITHUB_REF_NAME"
 
   # --------------------------------------------------------------------------
   # images: build-if-missing the pre-baked CI images and expose their refs. One
