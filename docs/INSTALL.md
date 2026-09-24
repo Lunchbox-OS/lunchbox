@@ -1,19 +1,15 @@
 # Installation
 
-Lunchbox can be installed on Linux with a modern Wayland compositor.
-It is currently developed and tested on Ubuntu 26.04.
-
-Lunchbox can be installed from the apt repository (the quick path,
-with automatic upgrades), from a standalone prebuilt `.deb`, or from source (for
-development). `./scripts/lunchbox` can help set up your build environment and
-manage a source installation.
+Lunchbox runs on Linux with a modern Wayland compositor, and is developed and
+tested on Ubuntu 26.04. The quickest way to install it is from its apt
+repository, which also brings upgrades with every release.
 
 ## Installing from the apt repository
 
-Prebuilt amd64 packages are published to Lunchbox's own apt repository, so you
-can install and then `apt upgrade` on future releases. Add the
-repository's signing key and source list once (prereleases are deliberately not
-published here, so `apt upgrade` only tracks stable versions):
+Prebuilt amd64 and arm64 packages are published to Lunchbox's own apt
+repository, so you can install and then `apt upgrade` on future releases. Add
+the repository's signing key and source list once (prereleases are deliberately
+not published here, so `apt upgrade` only tracks stable versions):
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -27,9 +23,25 @@ sudo apt install lunchbox
 ```
 
 `apt` pulls in the runtime dependencies (Sway, mpv, BlueZ, …) from the Ubuntu
-archive; the Lunchbox repository only carries `lunchbox` itself. Post-
-install (package contents, per-user setup) is identical to the standalone `.deb`
-below — continue with the `lunchbox-admin setup-user` step described there.
+archive; the Lunchbox repository only carries `lunchbox` itself.
+
+A package can't know which account is your kiosk user, so per-user setup is
+**not** done automatically. Deploy the example config and add the user to
+Lunchbox's groups with the `lunchbox-admin` CLI the package ships (substitute
+your user for `kiosk`):
+
+```sh
+sudo lunchbox-admin setup-user kiosk
+```
+
+<!--more-->
+<!-- Everything above the "more" marker is also the front page of
+https://apt.lunchbox-os.com: scripts/ci/publish-apt.sh renders it at each
+release. Keep it self-contained. Relative links are rewritten to GitHub. -->
+
+Lunchbox can also be installed from a standalone prebuilt `.deb`, or from source
+(for development). `./scripts/lunchbox` can help set up your build environment
+and manage a source installation.
 
 ## Installing from a standalone `.deb`
 
@@ -61,20 +73,17 @@ Either is enough to know the package is ours. How the key is kept, and what
 each check does and does not prove, is in
 [release-signing.md](release-signing.md).
 
+Then set up your kiosk user exactly as for the apt repository:
+`sudo lunchbox-admin setup-user kiosk`.
+
+## After installing a package
+
 The package installs the binaries, the privileged firewall helper and its
 polkit assets, the `/dev/uinput` udev rule, the Sway kiosk session, and the
 display-manager session entry. Its post-install step creates the
-`lunchbox-firewall` system group and reloads udev/polkit.
-
-A distro package can't know which account is your kiosk user, so per-user setup
-is **not** done automatically. The package ships a `lunchbox-admin` CLI for the
-post-install admin tasks (the same code the from-source `./scripts/lunchbox`
-runs). Deploy the example config and add the user to Lunchbox's groups with one
-command (substitute your user for `kiosk`):
-
-```sh
-sudo lunchbox-admin setup-user kiosk
-```
+`lunchbox-firewall` system group and reloads udev/polkit. `lunchbox-admin` is
+the post-install admin CLI, running the same code as the from-source
+`./scripts/lunchbox`.
 
 If you use YouTube media libraries, also install `yt-dlp`. Lunchbox deliberately
 does not use the apt `yt-dlp` — YouTube changes formats often and the archived

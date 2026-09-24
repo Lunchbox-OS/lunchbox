@@ -289,7 +289,7 @@ command line. No `--local-user`: the imported keyring holds exactly one usable
 signing key.
 
 To test a change to the apt half without a release, run
-`./scripts/ci/test-publish-apt.sh` (it needs `apt-utils`). It stands the
+`./scripts/ci/test-publish-apt.sh` (it needs `apt-utils` and `cmark`). It stands the
 arrangement up offline with a throwaway key and runs a real `apt-get` against
 it. CI runs it as the *apt repository* job.
 

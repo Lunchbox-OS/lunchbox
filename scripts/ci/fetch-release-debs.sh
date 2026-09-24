@@ -24,6 +24,17 @@ mapfile -t tags < <(gh release list --repo "$REPO" --limit 1000 \
     --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName')
 echo "Fetching the .debs of ${#tags[@]} release(s)"
 for tag in "${tags[@]}"; do
+    # A release with no .deb has nothing to index, and `gh release download`
+    # fails on it ("no assets to download") rather than downloading nothing.
+    # v0.6.0 is one: published by hand, sealed empty by release immutability,
+    # and never deletable in a way that frees its tag. Skipping it is right --
+    # there was never a v0.6.0 package for apt to offer.
+    debs="$(gh release view "$tag" --repo "$REPO" --json assets \
+        --jq '[.assets[].name | select(endswith(".deb"))] | length')"
+    if [[ "$debs" -eq 0 ]]; then
+        echo "  $tag: no .deb assets; nothing to index"
+        continue
+    fi
     gh release download "$tag" --repo "$REPO" --dir "$dir/$tag" \
         --pattern '*.deb' --pattern '*.deb.asc'
     echo "  $tag: $(find "$dir/$tag" -name '*.deb' | wc -l) .deb(s)"

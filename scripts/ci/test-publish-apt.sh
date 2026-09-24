@@ -22,7 +22,7 @@
 # tampered published index, a signing key that is not repository.key, and a
 # .deb with no valid .asc in a rebuild.
 #
-# Needs apt-utils (apt-ftparchive), gpg, python3 and curl. No root.
+# Needs apt-utils (apt-ftparchive), cmark, gpg, python3 and curl. No root.
 
 set -euo pipefail
 
@@ -229,6 +229,29 @@ grep -qx "/pool/0.1.0/lunchbox_0.1.0_${a2}.deb $APT_ASSET_BASE/v0.1.0/lunchbox_0
 ok "_redirects maps every pool path to its release asset"
 cmp -s "$work/site2/repository.key" "$APT_PUBLIC_KEY" || fail "repository.key not deployed"
 [[ -f "$work/site2/404.html" ]] || fail "no 404.html: Pages would answer missing paths with a 200"
+
+# index.html: docs/INSTALL.md's opening, above <!--more-->, rendered -- and
+# nothing after it -- plus the key and every version the index holds.
+page="$work/site2/index.html"
+[[ -f "$page" ]] || fail "no index.html"
+grep -q '<code class="language-sh">sudo install -d -m 0755 /etc/apt/keyrings' "$page" \
+    || fail "index.html does not carry INSTALL.md's apt setup commands"
+grep -q 'sudo lunchbox-admin setup-user kiosk' "$page" \
+    || fail "index.html does not carry INSTALL.md's setup-user step"
+! grep -q 'Installing from a standalone' "$page" \
+    || fail "index.html carries INSTALL.md past its <!--more--> marker"
+! grep -q '<h1>Installation</h1>' "$page" \
+    || fail "index.html kept the guide's own heading"
+! grep -q 'raw HTML omitted' "$page" \
+    || fail "the text above <!--more--> has raw HTML, which cmark drops"
+fpr="$(gpg --with-colons --show-keys "$APT_PUBLIC_KEY" | awk -F: '$1 == "fpr" { print $10; exit }')"
+grep -q "$(echo "$fpr" | sed 's/.\{4\}/& /g; s/ $//')" "$page" || fail "index.html does not show the key's fingerprint"
+[[ "$(grep -o '<code>0\.[0-9.]*</code>' "$page" | tr -d '\n')" == "<code>0.2.0</code><code>0.1.0</code>" ]] \
+    || fail "index.html should list 0.2.0 then 0.1.0"
+grep -q "<code>0.1.0</code> <span>$a1, $a2</span>" "$page" \
+    || grep -q "<code>0.1.0</code> <span>$a2, $a1</span>" "$page" \
+    || fail "index.html should list both architectures against 0.1.0"
+ok "index.html renders INSTALL.md above <!--more-->, the key fingerprint, and each version, newest first"
 deploy "$work/site2"
 
 echo "== apt, through the redirect"

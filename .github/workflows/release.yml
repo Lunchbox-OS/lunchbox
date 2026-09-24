@@ -547,11 +547,11 @@ jobs:
       # Everything from here is the apt repository, which prereleases (tags
       # with a -, e.g. v0.2.0-rc1) never reach: RC builds stay out of
       # `apt upgrade`, and are still downloadable, signed, from their release.
-      - name: Install apt-ftparchive
+      - name: Install apt-ftparchive and cmark
         if: ${{ !contains(github.ref_name, '-') }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apt-utils
+          sudo apt-get install -y --no-install-recommends apt-utils cmark
 
       # Appends to the published index -- verified against repository.key on
       # the way in -- unless a rebuild was asked for, or there is no published
@@ -610,7 +610,14 @@ jobs:
           only=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/lunchbox.list -o Dir::Etc::sourceparts=-)
           # A new deployment can take a moment to be what the edge serves.
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if sudo apt-get "${only[@]}" update -q && apt-cache madison lunchbox | grep -q "| $version |"; then
+            # madison pads short versions (`|      0.6.1 |`), which is what failed
+            # v0.6.1's first smoke test against a repository serving it
+            # correctly -- so trim the column and compare exactly. Not
+            # `apt-cache show lunchbox=$version`: that exits 0 even when the
+            # version does not exist.
+            if sudo apt-get "${only[@]}" update -q \
+              && apt-cache "${only[@]}" madison lunchbox \
+                | awk -F'|' -v v="$version" '{ gsub(/ /, "", $2) } $2 == v { found = 1 } END { exit !found }'; then
               break
             fi
             [ "$attempt" -lt 10 ] || { echo "::error::$APT_URL does not offer lunchbox $version"; exit 1; }
