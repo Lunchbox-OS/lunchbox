@@ -547,11 +547,11 @@ jobs:
       # Everything from here is the apt repository, which prereleases (tags
       # with a -, e.g. v0.2.0-rc1) never reach: RC builds stay out of
       # `apt upgrade`, and are still downloadable, signed, from their release.
-      - name: Install apt-ftparchive
+      - name: Install apt-ftparchive and cmark
         if: ${{ !contains(github.ref_name, '-') }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apt-utils
+          sudo apt-get install -y --no-install-recommends apt-utils cmark
 
       # Appends to the published index -- verified against repository.key on
       # the way in -- unless a rebuild was asked for, or there is no published

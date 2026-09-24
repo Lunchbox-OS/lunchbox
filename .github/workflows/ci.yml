@@ -1133,10 +1133,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install apt-ftparchive
+      - name: Install apt-ftparchive and cmark
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apt-utils
+          sudo apt-get install -y --no-install-recommends apt-utils cmark
 
       - name: Test publish-apt.sh
         run: ./scripts/ci/test-publish-apt.sh

@@ -746,7 +746,7 @@ verify a download, and what a compromise recovery looks like.
 only on a release tag, so test a change to it with
 
 ```sh
-./scripts/ci/test-publish-apt.sh   # needs apt-utils; no root, no network
+./scripts/ci/test-publish-apt.sh   # needs apt-utils and cmark; no root, no network
 ```
 
 which publishes two synthetic releases under a throwaway key and runs a real

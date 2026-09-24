@@ -44,9 +44,8 @@
 #   APT_ASSET_BASE               where _redirects points (default:
 #                                https://github.com/$REPO/releases/download);
 #                                the tag is appended as v<version>
-#   APT_SITE_URL                 where the site is served, for the setup
-#                                commands on index.html (default:
-#                                https://apt.lunchbox-os.com)
+#   APT_DOCS_BASE                where index.html's relative links point
+#                                (default: the docs/ directory on GitHub)
 #   APT_PUBLIC_KEY               the key the index must verify against
 #                                (default: dist/apt/repository.key)
 #   LUNCHBOX_APT_KEY_PASSPHRASE  passphrase for the signing key, if it has one
@@ -109,8 +108,8 @@ if [[ -e "$out" ]] && [[ -n "$(ls -A "$out")" ]]; then
     die "--out must be empty or absent: $out"
 fi
 
-for cmd in apt-ftparchive dpkg-deb gpg gpgv curl; do
-    command -v "$cmd" >/dev/null || die "$cmd is required (apt-ftparchive is in apt-utils)"
+for cmd in apt-ftparchive dpkg-deb gpg gpgv curl cmark; do
+    command -v "$cmd" >/dev/null || die "$cmd is required (apt-ftparchive is in apt-utils; cmark renders index.html)"
 done
 
 work="$(mktemp -d)"
@@ -271,15 +270,29 @@ cp "$public_key" "$site/repository.key"
 # exists. A placeholder without one did fool the first release's check.
 printf 'Not found\n' > "$site/404.html"
 
-# A person who opens the site gets the setup commands rather than a 404. They
-# are docs/INSTALL.md's, which stays the reference; the page adds only what the
-# index itself knows -- the signing key's fingerprint and the versions indexed.
-site_url="${APT_SITE_URL:-https://apt.lunchbox-os.com}"
-site_url="${site_url%/}"
-releases_url="${APT_ASSET_BASE%/download}"
+# A person who opens the site gets the setup instructions rather than a 404.
+# They are docs/INSTALL.md's own opening -- everything above its <!--more-->
+# marker -- rendered, so the guide stays the one place they are written. The
+# page adds only what the index itself knows: the signing key's fingerprint
+# and the versions indexed.
+install_md="$repo_root/docs/INSTALL.md"
+[[ "$(grep -cx '<!--more-->' "$install_md")" -eq 1 ]] \
+    || die "$install_md needs exactly one <!--more--> line: index.html is everything above it"
+docs_base="${APT_DOCS_BASE:-https://github.com/${REPO:-Lunchbox-OS/lunchbox}/blob/main/docs}"
+docs_base="${docs_base%/}"
+# The guide's own `# Installation` heading is dropped: the page has its own.
+# cmark leaves raw HTML out, and relative links (to other docs, or to anchors
+# further down the guide) are pointed at the full guide on GitHub.
+excerpt="$(sed '/^<!--more-->$/,$d' "$install_md" \
+    | sed '1{/^# /d}' \
+    | cmark \
+    | sed -E \
+        -e "s|href=\"#|href=\"${docs_base}/INSTALL.md#|g" \
+        -e "s|href=\"([^\":#/][^\":]*)\"|href=\"${docs_base}/\\1\"|g")"
 fingerprint="$(gpg --batch --with-colons --show-keys "$public_key" \
     | awk -F: '$1 == "fpr" { print $10; exit }' \
     | sed 's/.\{4\}/& /g; s/ $//')"
+releases_url="${APT_ASSET_BASE%/download}"
 versions="$(cat "$dists/$COMPONENT"/binary-*/Packages \
     | awk '
         # Per stanza, not per line: apt-ftparchive writes Architecture before
@@ -306,9 +319,8 @@ cat > "$site/index.html" <<HTML
       :root { --fg: #e9e7e1; --muted: #a3a09a; --bg: #161615; --code: #232321; --rule: #3a3936; }
     }
     body { margin: 0 auto; max-width: 46rem; padding: 2.5rem 1rem 4rem; font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-    h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+    h1 { font-size: 1.6rem; margin: 0 0 1rem; }
     h2 { font-size: 1.1rem; margin: 2rem 0 .5rem; }
-    p.lede { color: var(--muted); margin-top: 0; }
     pre, code { font: .9em/1.5 ui-monospace, monospace; background: var(--code); border-radius: 4px; }
     code { padding: .1em .3em; }
     pre { padding: .8rem 1rem; overflow-x: auto; }
@@ -321,19 +333,9 @@ cat > "$site/index.html" <<HTML
 </head>
 <body>
   <h1>Lunchbox apt repository</h1>
-  <p class="lede">Signed packages of <a href="https://lunchbox-os.com">Lunchbox</a> for Ubuntu 26.04 and newer.</p>
-
-  <h2>Install</h2>
-<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
-sudo curl -fsSL ${site_url}/repository.key \\
-  -o /etc/apt/keyrings/lunchbox-os.asc
-echo "deb [signed-by=/etc/apt/keyrings/lunchbox-os.asc] \\
-${site_url} ${SUITE} ${COMPONENT}" \\
-  | sudo tee /etc/apt/sources.list.d/lunchbox.list
-sudo apt update
-sudo apt install lunchbox</code></pre>
-  <p>Then set up the kiosk user with <code>sudo lunchbox-admin setup-user &lt;user&gt;</code>. See the
-  <a href="https://github.com/Lunchbox-OS/lunchbox/blob/main/docs/INSTALL.md">installation guide</a> for the rest.</p>
+${excerpt}
+  <p>The <a href="${docs_base}/INSTALL.md">installation guide</a> continues from here: what the package
+  installs, YouTube support, hardware video decoding, and the Android apps.</p>
 
   <h2>Signing key</h2>
   <p><a href="repository.key">repository.key</a>, fingerprint:</p>
@@ -346,7 +348,7 @@ ${versions}
   <p>Each package is also on its <a href="${releases_url}">GitHub release</a>, with a
   <code>.asc</code> signature and a build-provenance attestation.</p>
 
-  <footer>Prereleases are not published here, so <code>apt upgrade</code> tracks stable releases only.</footer>
+  <footer>Generated from <a href="${docs_base}/INSTALL.md">docs/INSTALL.md</a> and the published index.</footer>
 </body>
 </html>
 HTML
