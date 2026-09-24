@@ -8,6 +8,7 @@
 #   dists/stable/Release, Release.gpg              detached-signed
 #   dists/stable/main/binary-{amd64,arm64}/Packages{,.gz}
 #   repository.key                                 the public half, from the repo
+#   404.html                                       so a missing path is a 404
 #   _redirects                                     /pool/<v>/<file>.deb -> GitHub
 #
 # The .deb files themselves are never uploaded. Each Packages stanza's
@@ -258,6 +259,13 @@ verify "$dists/Release.gpg" "$dists/Release" \
     || die "the new Release.gpg does not verify against $public_key"
 
 cp "$public_key" "$site/repository.key"
+
+# Pages treats a deployment with no top-level 404.html as a single-page app and
+# answers every missing path with a 200 and index.html. This site has no
+# index.html, so it would probably 404 anyway, but "probably" is not good
+# enough for the path the next release reads to decide whether an index
+# exists. A placeholder without one did fool the first release's check.
+printf 'Not found\n' > "$site/404.html"
 
 # pool/<version>/<file> -> <base>/v<version>/<file>. The tag is derived rather
 # than recorded: release.yml refuses a tag that is not v$(VERSION), and VERSION
