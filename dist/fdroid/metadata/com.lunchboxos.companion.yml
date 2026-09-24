@@ -42,4 +42,4 @@ Description: |-
 # an in-place upgrade. Obtain with:
 #     apksigner verify --print-certs FILE.apk | grep 'SHA-256 digest'
 AllowedAPKSigningKeys:
-  - b96abc13004bb75dd4caa412714035e9ce172bf4cb125ea1228163f68636041e
+  - 6959cc58afb8cde34da782a5b57a3028bf04141e8b106b80b69da7650f3b330f
