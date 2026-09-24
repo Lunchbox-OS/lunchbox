@@ -13,9 +13,9 @@ A third guarantee needs no key at all: each `.deb` also carries a
 [build-provenance attestation](#verifying-a-downloaded-deb) signed through
 Sigstore with a short-lived certificate issued to the workflow run.
 
-Not covered here: the **Android release keystore**
-(`LUNCHBOX_KEYSTORE_B64` and friends), which signs the APKs and is a separate
-key with its own lifetime.
+The **Android release keystore**, which signs the APKs, is a separate key with
+its own lifetime. It has [its own section](#the-android-release-keystore) at
+the end.
 
 ## The key
 
@@ -336,3 +336,63 @@ Steps 3 and 4 are why the choice was "no expiry, rotate on compromise" rather
 than a dated key: a rotation is a coordinated event with a manual step on every
 device, and it should happen because something went wrong, not because a date
 passed.
+
+## The Android release keystore
+
+Separate from everything above: an RSA key in a PKCS12 keystore that signs both
+APKs (`com.lunchboxos.companion`, `com.lunchboxos.media`). Android refuses an
+update signed by a different key than the installed app, and the F-Droid
+metadata pins its certificate, so **this key cannot be rotated without every
+user uninstalling the apps**. Losing it is permanent.
+
+| | |
+|---|---|
+| Certificate | `CN=Lunchbox, O=Lunchbox OS, C=US`, RSA 4096, 100-year validity |
+| SHA-256 | `6959cc58afb8cde34da782a5b57a3028bf04141e8b106b80b69da7650f3b330f` |
+| Pinned in | `AllowedAPKSigningKeys` in both `dist/fdroid/metadata/*.yml` |
+| Offline copy | password manager: the `.p12`, its password, the alias |
+| CI copy | repository secrets, not the `release` environment: dry runs from `main` sign APKs too |
+
+It replaced the Shepherd-era key (`CN=Shepherd Launcher`, `b96abc13…041e`)
+when releases moved to GitHub, before any release-signed `com.lunchboxos.*`
+APK had shipped, which was the last point where that stranded nobody.
+
+### Generating one
+
+Only if the key above is lost or compromised. The commands were tested with a
+throwaway keystore through the project's own Gradle release build and
+`apksigner`.
+
+```sh
+umask 077
+read -rsp 'keystore password: ' KS_PASS; echo; export KS_PASS
+
+keytool -genkeypair \
+  -keystore lunchbox-release.p12 -storetype PKCS12 -storepass:env KS_PASS \
+  -alias lunchbox-release \
+  -keyalg RSA -keysize 4096 -sigalg SHA256withRSA \
+  -validity 36500 \
+  -dname 'CN=Lunchbox, O=Lunchbox OS, C=US'
+
+# The value AllowedAPKSigningKeys pins -- the same digest
+# `apksigner verify --print-certs` reports for a signed APK:
+keytool -list -v -keystore lunchbox-release.p12 -storepass:env KS_PASS \
+  | awk '/SHA256:/{gsub(":","",$2); print tolower($2); exit}'
+```
+
+PKCS12 has one password for the store and the key. The Gradle build still
+reads both, so both secrets get the same value:
+
+```sh
+R=Lunchbox-OS/lunchbox
+base64 -w0 lunchbox-release.p12 | gh secret set LUNCHBOX_KEYSTORE_B64 --repo $R
+printf %s "$KS_PASS" | gh secret set LUNCHBOX_KEYSTORE_PASSWORD --repo $R
+printf %s "$KS_PASS" | gh secret set LUNCHBOX_KEY_PASSWORD --repo $R
+gh secret set LUNCHBOX_KEY_ALIAS --repo $R --body lunchbox-release
+
+shred -u lunchbox-release.p12; unset KS_PASS
+```
+
+Then update both `AllowedAPKSigningKeys` pins and the table above in the same
+commit. The release's `apk` job runs `lunchbox package fdroid` against every
+APK it signs, so a pin that does not match the secret fails the release.
