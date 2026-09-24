@@ -62,6 +62,13 @@ export APT_PUBLIC_KEY="$work/repository.key"
 
 # --- Synthetic releases -------------------------------------------------------
 
+# The two architectures publish-apt.sh indexes. The test treats the first as
+# apt's native one and the second as foreign; nothing depends on which is which,
+# or on the architecture of the machine running it.
+arches=(amd64 arm64)
+a1="${arches[0]}"
+a2="${arches[1]}"
+
 releases="$work/releases"
 mkdeb() {
     local version="$1" arch="$2" marker="${3:-}"
@@ -82,7 +89,7 @@ EOF
     rm -rf "$root"
 }
 for v in 0.1.0 0.2.0; do
-    for a in amd64 arm64; do mkdeb "$v" "$a"; done
+    for a in "${arches[@]}"; do mkdeb "$v" "$a"; done
 done
 
 # --- Two servers: "Pages" and "GitHub releases" -------------------------------
@@ -174,8 +181,8 @@ Dir::State::status "$apt_root/state/status";
 Dir::Cache "$apt_root/cache";
 Dir::Log "$apt_root/log";
 Debug::NoLocking "true";
-APT::Architecture "amd64";
-APT::Architectures { "amd64"; "arm64"; };
+APT::Architecture "$a1";
+APT::Architectures { "$a1"; "$a2"; };
 EOF
 # .asc, as docs/INSTALL.md has it: apt reads an armoured key only under that
 # extension, and ignores one named .key as an "unsupported filetype".
@@ -202,9 +209,9 @@ echo "== rebuild: the first release"
 mkdir -p "$work/first"
 cp -a "$releases/v0.1.0" "$work/first/"
 "$publish" --out "$work/site1" --rebuild "$work/first" >/dev/null
-[[ "$(count "$work/site1" amd64)" == 1 && "$(count "$work/site1" arm64)" == 1 ]] \
+[[ "$(count "$work/site1" "$a1")" == 1 && "$(count "$work/site1" "$a2")" == 1 ]] \
     || fail "rebuild of v0.1.0 should index one package per arch"
-grep -qx "Filename: pool/0.1.0/lunchbox_0.1.0_amd64.deb" "$work/site1/dists/stable/main/binary-amd64/Packages" \
+grep -qx "Filename: pool/0.1.0/lunchbox_0.1.0_${a1}.deb" "$work/site1/dists/stable/main/binary-$a1/Packages" \
     || fail "Filename: should be pool/<version>/<file>"
 ok "one package per architecture, at pool/<version>/<file>"
 deploy "$work/site1"
@@ -213,11 +220,11 @@ deploy "$work/site1"
 
 echo "== previous: append the second release"
 "$publish" --out "$work/site2" --previous "$site_url" "$releases"/v0.2.0/*.deb >/dev/null
-[[ "$(count "$work/site2" amd64)" == 2 && "$(count "$work/site2" arm64)" == 2 ]] \
+[[ "$(count "$work/site2" "$a1")" == 2 && "$(count "$work/site2" "$a2")" == 2 ]] \
     || fail "append should leave two packages per arch"
 ok "both releases indexed for both architectures"
 [[ "$(wc -l < "$work/site2/_redirects")" == 4 ]] || fail "expected four redirects"
-grep -qx "/pool/0.1.0/lunchbox_0.1.0_arm64.deb $APT_ASSET_BASE/v0.1.0/lunchbox_0.1.0_arm64.deb 302" \
+grep -qx "/pool/0.1.0/lunchbox_0.1.0_${a2}.deb $APT_ASSET_BASE/v0.1.0/lunchbox_0.1.0_${a2}.deb 302" \
     "$work/site2/_redirects" || fail "redirect should point at the v<version> release asset"
 ok "_redirects maps every pool path to its release asset"
 cmp -s "$work/site2/repository.key" "$APT_PUBLIC_KEY" || fail "repository.key not deployed"
@@ -228,11 +235,11 @@ apt update >"$work/apt.log" 2>&1 || { cat "$work/apt.log" >&2; fail "apt-get upd
 grep -q "stable InRelease" "$work/apt.log" || { cat "$work/apt.log" >&2; fail "apt did not fetch InRelease"; }
 ok "apt-get update accepted the signed index"
 mkdir -p "$work/dl"
-for spec in lunchbox=0.1.0 lunchbox=0.2.0 lunchbox:arm64=0.2.0; do
+for spec in lunchbox=0.1.0 lunchbox=0.2.0 lunchbox:$a2=0.2.0; do
     (cd "$work/dl" && apt download "$spec" >"$work/apt.log" 2>&1) \
         || { cat "$work/apt.log" >&2; fail "apt-get download $spec"; }
 done
-for f in lunchbox_0.1.0_amd64.deb lunchbox_0.2.0_amd64.deb lunchbox_0.2.0_arm64.deb; do
+for f in lunchbox_0.1.0_${a1}.deb lunchbox_0.2.0_${a1}.deb lunchbox_0.2.0_${a2}.deb; do
     v="${f#lunchbox_}"; v="${v%%_*}"
     [[ "$(sha "$work/dl/$f")" == "$(sha "$releases/v$v/$f")" ]] || fail "$f downloaded differs from the release asset"
 done
@@ -243,14 +250,14 @@ ok "apt-get download fetched old and new versions, both arches, byte-identical"
 echo "== idempotence and agreement"
 "$publish" --out "$work/rerun" --previous "$site_url" "$releases"/v0.2.0/*.deb >"$work/out.log"
 grep -q "0 package(s) added" "$work/out.log" || { cat "$work/out.log" >&2; fail "re-run should add nothing"; }
-for a in amd64 arm64; do
+for a in "${arches[@]}"; do
     cmp -s "$work/rerun/dists/stable/main/binary-$a/Packages" "$work/site2/dists/stable/main/binary-$a/Packages" \
         || fail "re-run changed the $a index"
 done
 ok "a re-run of the same release adds nothing"
 
 "$publish" --out "$work/full" --rebuild "$releases" >/dev/null
-for a in amd64 arm64; do
+for a in "${arches[@]}"; do
     diff <(packages "$work/full" "$a" | sort) <(packages "$work/site2" "$a" | sort) >/dev/null \
         || fail "a full rebuild's $a index differs from the appended one"
 done
@@ -261,14 +268,14 @@ ok "a full --rebuild produces the same index as appending"
 
 echo "== refusals"
 mkdir -p "$work/changed"
-cp "$releases/v0.2.0/lunchbox_0.2.0_amd64.deb" "$work/keep.deb"
-mkdeb 0.2.0 amd64 "rebuilt differently"
-mv "$releases/v0.2.0/lunchbox_0.2.0_amd64.deb" "$work/changed/"
-mv "$work/keep.deb" "$releases/v0.2.0/lunchbox_0.2.0_amd64.deb"
+cp "$releases/v0.2.0/lunchbox_0.2.0_${a1}.deb" "$work/keep.deb"
+mkdeb 0.2.0 "$a1" "rebuilt differently"
+mv "$releases/v0.2.0/lunchbox_0.2.0_${a1}.deb" "$work/changed/"
+mv "$work/keep.deb" "$releases/v0.2.0/lunchbox_0.2.0_${a1}.deb"
 expect_fail "a changed release asset" \
-    "$publish" --out "$work/x1" --previous "$site_url" "$work/changed/lunchbox_0.2.0_amd64.deb"
+    "$publish" --out "$work/x1" --previous "$site_url" "$work/changed/lunchbox_0.2.0_${a1}.deb"
 
-echo "Package: evil" >> "$live/dists/stable/main/binary-amd64/Packages"
+echo "Package: evil" >> "$live/dists/stable/main/binary-$a1/Packages"
 expect_fail "a tampered published Packages" \
     "$publish" --out "$work/x2" --previous "$site_url"
 deploy "$work/site2"
@@ -283,7 +290,7 @@ expect_fail "a signing key that is not repository.key" \
     env GNUPGHOME="$work/other-gnupg" "$publish" --out "$work/x4" --previous "$site_url"
 
 mkdir -p "$work/unsigned/v0.3.0"
-cp "$releases/v0.2.0/lunchbox_0.2.0_arm64.deb" "$work/unsigned/v0.3.0/"
+cp "$releases/v0.2.0/lunchbox_0.2.0_${a2}.deb" "$work/unsigned/v0.3.0/"
 expect_fail "a rebuild over a .deb with no .asc" \
     "$publish" --out "$work/x5" --rebuild "$work/unsigned"
 
