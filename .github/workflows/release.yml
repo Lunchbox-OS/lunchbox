@@ -11,6 +11,11 @@ name: Release
 #   git push && git push --tags
 #   then approve the `publish` job's deployment to `release` in the run.
 #
+# Never create or publish the release in the GitHub UI, not even to make the
+# tag. Release immutability is on, so a release published by hand is sealed
+# with no assets, and its tag can never be reused, even after deleting it.
+# v0.6.0 was lost that way. The guard job refuses such a tag before building.
+#
 # See docs/ai/history/2026-07-04 003 binary-releases.md for the build half,
 # docs/release-signing.md for the keys, and
 # docs/ai/history/2026-09-19 005 self-hosted-apt-repo (#204).md for the apt
