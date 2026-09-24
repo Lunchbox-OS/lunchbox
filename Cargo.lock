@@ -3335,6 +3335,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "lunchbox-api",
  "lunchbox-ipc",
  "lunchbox-state-proto",
  "lunchbox-store",
@@ -3346,6 +3347,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "zbus",
 ]
 

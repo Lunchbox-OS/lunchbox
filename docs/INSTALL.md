@@ -467,10 +467,10 @@ This installs:
   Lunchbox needs to stop the device auto-dialling the paired phone (see
   "Keeping the device from dialling the phone" above)
 - A udev rule at `/usr/lib/udev/rules.d/71-lunchbox-uinput.rules` and polkit
-  rules at `/usr/share/polkit-1/rules.d/50-lunchbox-firewall.rules` and
-  `50-lunchbox-session-guard.rules` — vendor directories, so a site override
-  still goes in the matching `/etc` one (see "Who owns the files under /etc"
-  below)
+  rules at `/usr/share/polkit-1/rules.d/50-lunchbox-firewall.rules`,
+  `50-lunchbox-session-guard.rules` and `50-lunchbox-network.rules` — vendor
+  directories, so a site override still goes in the matching `/etc` one (see
+  "Who owns the files under /etc" below)
 - The policy to `/var/lib/lunchboxd/state/kiosk/config.toml`, with a signpost at
   `~kiosk/.config/lunchbox/config.toml` saying where it went
 
@@ -732,6 +732,28 @@ Consequences worth knowing before you debug a device:
   `TerminateSession`, so it cannot be narrowed. The rule's own comments say so
   and say why it is worth it.
 
+  The custodian holds a second grant, for the same reason and with the same
+  caveat. Saving a Wi-Fi network from the management UIs (issue #194) needs
+  `org.freedesktop.NetworkManager.settings.modify.system`, and joining it
+  needs `org.freedesktop.NetworkManager.network-control` as well;
+  `/usr/share/polkit-1/rules.d/50-lunchbox-network.rules` grants both. The
+  second is granted to any active local session anyway, which makes it easy to
+  forget: the custodian has no session, and without it a network can be saved
+  but never joined. Both go to the custodian rather than to the kiosk user
+  because **every activity runs as the kiosk user**, and the first was
+  measured to be sufficient on its own to read back every saved network's
+  password through `GetSecrets` — so granting it there would hand the house
+  WiFi key to every game a child can start. **The rule likewise lets
+  `lunchbox-state` change any NetworkManager setting**, not only wireless
+  ones; what keeps it narrow is the custodian's socket, which accepts a typed
+  join request and two UUIDs and never a settings dictionary.
+
+  Without the rule the device still boots, still shows what is in range, and
+  still joins networks it already knows — activating a saved profile needs
+  only `network-control`, which an active local session already has. What
+  stops working is saving a new one, and the device says so with the `Warning`
+  diagnostic `wifi_config_unavailable`.
+
   Consequence for debugging: on a device you cannot pause or restart `lunchboxd`
   in place. Attaching a debugger that stops it ends the session, exactly as a
   child killing it would.
@@ -910,8 +932,9 @@ local edits an upgrade will preserve or ask you about. That is deliberate.
 
 The udev and polkit rules are not under `/etc` at all any more. They live at
 `/usr/lib/udev/rules.d/71-lunchbox-uinput.rules`,
-`/usr/share/polkit-1/rules.d/50-lunchbox-firewall.rules` and
-`/usr/share/polkit-1/rules.d/50-lunchbox-session-guard.rules`, next to the polkit
+`/usr/share/polkit-1/rules.d/50-lunchbox-firewall.rules`,
+`/usr/share/polkit-1/rules.d/50-lunchbox-session-guard.rules` and
+`/usr/share/polkit-1/rules.d/50-lunchbox-network.rules`, next to the polkit
 action Lunchbox has always installed to `/usr/share/polkit-1/actions/`. Both
 subsystems read their `/etc` directory as well, and a same-named file there
 wins — so that is still where a site override goes, it is simply no longer

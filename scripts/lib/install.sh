@@ -89,6 +89,14 @@ STATED_STATE_ROOT="/var/lib/lunchboxd/state"
 # This rule is the difference between a watchdog that fires and one that only
 # looks like it will.
 SESSION_GUARD_RULES_NAME="50-lunchbox-session-guard.rules"
+# The custodian's other authority (issue #194): writing a NetworkManager
+# profile so a parent can choose a Wi-Fi network from the management UIs. It
+# goes to the custodian's uid rather than the kiosk user's because every
+# activity runs as the kiosk user, and this grant was measured to be sufficient
+# on its own to read back every saved network password. Without the rule the
+# device still joins networks it knows; saving a new one is refused, and
+# lunchboxd raises wifi_config_unavailable naming this file.
+NETWORK_RULES_NAME="50-lunchbox-network.rules"
 
 # The file names lunchbox's protected files have, and what happens to each when
 # a device gains or loses the custodian.
@@ -932,6 +940,9 @@ install_state() {
     local guard_src="$repo_root/dist/polkit/$SESSION_GUARD_RULES_NAME"
     [[ -f "$guard_src" ]] \
         || die "Session watchdog polkit rule missing at $guard_src"
+    local network_src="$repo_root/dist/polkit/$NETWORK_RULES_NAME"
+    [[ -f "$network_src" ]] \
+        || die "Wi-Fi configuration polkit rule missing at $network_src"
 
     info "Installing state custodian to $destdir$STATED_PATH..."
     ensure_dir "$(dirname "$destdir$STATED_PATH")" 0755
@@ -954,6 +965,13 @@ install_state() {
     ensure_dir "$(dirname "$guard_dst")" 0755
     install -m 0644 -o root -g root "$guard_src" "$guard_dst"
 
+    # The same reasoning, for the same uid: this is the custodian's authority,
+    # and a device with the custodian but not this rule shows a Wi-Fi form
+    # that cannot save anything (issue #194).
+    local network_dst="$destdir$POLKIT_RULES_DIR/$NETWORK_RULES_NAME"
+    info "Installing Wi-Fi configuration polkit rule to $network_dst..."
+    install -m 0644 -o root -g root "$network_src" "$network_dst"
+
     # Host mutation only on a real install; under DESTDIR these would change the
     # build host and bake its state into the package.
     #
@@ -963,6 +981,8 @@ install_state() {
     if [[ -z "$destdir" ]]; then
         remove_superseded_copy \
             "$POLKIT_LEGACY_RULES_DIR/$SESSION_GUARD_RULES_NAME" "$guard_dst"
+        remove_superseded_copy \
+            "$POLKIT_LEGACY_RULES_DIR/$NETWORK_RULES_NAME" "$network_dst"
         if ! getent passwd "$STATED_USER" >/dev/null; then
             info "Creating system user: $STATED_USER"
             # No home and no shell: this uid exists to own files and answer one
@@ -975,7 +995,7 @@ install_state() {
             || warn "Could not reload systemd; the state custodian applies at next boot"
 
         if systemctl is-active --quiet polkit 2>/dev/null; then
-            info "Reloading polkit so the session watchdog may end a session"
+            info "Reloading polkit so the custodian may end a session and save a Wi-Fi network"
             systemctl reload polkit 2>/dev/null \
                 || systemctl restart polkit 2>/dev/null \
                 || warn "Could not reload polkit; restart it manually or the session watchdog \
@@ -1694,8 +1714,10 @@ uninstall_state() {
     # behind would be leaving a uid the right to end sessions after the only
     # thing that had a reason to do so is gone.
     remove_path "$destdir$POLKIT_RULES_DIR/$SESSION_GUARD_RULES_NAME"
+    remove_path "$destdir$POLKIT_RULES_DIR/$NETWORK_RULES_NAME"
     # An install from before #177 put the rule in polkit's admin directory.
     remove_path "$destdir$POLKIT_LEGACY_RULES_DIR/$SESSION_GUARD_RULES_NAME"
+    remove_path "$destdir$POLKIT_LEGACY_RULES_DIR/$NETWORK_RULES_NAME"
 
     if [[ -z "$destdir" ]]; then
         systemctl daemon-reload 2>/dev/null || true

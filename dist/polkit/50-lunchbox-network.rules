@@ -1,0 +1,73 @@
+// Polkit rule for choosing a Wi-Fi network from the management UIs (issue #194).
+//
+// A parent whose device has no network reaches for the companion app over BLE
+// -- the one management transport that still works when there is nothing to
+// route -- picks an SSID and types a key. Writing the profile that results
+// needs `org.freedesktop.NetworkManager.settings.modify.system`, and joining
+// it needs `org.freedesktop.NetworkManager.network-control` as well.
+//
+// The second is easy to miss, and was: polkit grants `network-control` to any
+// active local session, so every measurement taken from a logged-in shell
+// passed without it. The custodian has no session. Without the second action
+// NetworkManager refuses `AddAndActivateConnection2` with "Not authorized to
+// control networking" -- so a parent could save a network for later but never
+// join one, which is the one thing a device with no network needs.
+//
+// Ubuntu's own rule grants that action to local, active members of `sudo` or
+// `netdev`. The kiosk user is in neither, and must stay in neither, because
+// **every activity runs as the kiosk user**: a grant to that uid is a grant to
+// every game and browser a child can start.
+//
+// That is not a theoretical worry. It was measured on NetworkManager 1.54.3:
+// with a temporary rule granting nothing but `settings.modify.system`,
+// `GetSecrets` returned the stored passphrase for every saved network. There
+// is no separate polkit action for reading secrets -- `pkaction` lists none --
+// so the write grant *is* the read grant. A child with a shell on the host
+// would learn the house WiFi key, and an activity inside the kiosk's graphical
+// session satisfies `subject.local && subject.active` just as the launcher
+// does. See
+// `docs/ai/history/2026-09-21 004 wifi-against-real-networkmanager (#194).md`.
+//
+// So the grant goes to the state custodian, `lunchbox-stated`, running as
+// `lunchbox-state` -- a uid nothing inside the session can reach: not the
+// directory, not the socket, not the process. `lunchboxd` asks it, over a
+// socket it accepts only from the kiosk session's own cgroup.
+//
+// Install path: /etc/polkit-1/rules.d/50-lunchbox-network.rules
+//
+// ## What this widens, said plainly
+//
+// polkit cannot narrow this action to wireless profiles, so the rule really
+// grants `lunchbox-state` the right to change ANY NetworkManager setting on
+// this machine -- a VPN, the DNS servers, an ethernet profile -- and, per the
+// measurement above, to read back every stored network secret.
+// `network-control` adds the right to bring any connection up or down, which
+// is strictly less than rewriting it, and changes nothing about that sentence.
+//
+// What keeps that acceptable is the shape of the daemon holding it, not the
+// shape of the rule. The custodian has no network of its own
+// (`PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`), no capabilities,
+// spawns nothing, and answers a protocol whose wireless requests are a typed
+// join request and two UUIDs. It **never accepts a NetworkManager settings
+// dictionary over the socket**, so there is no way to ask it to write a
+// setting it was not written to write. That typed boundary is the real
+// permission; this rule is only what lets it act.
+//
+// It reads no secrets either: nothing in Lunchbox calls `GetSecrets`, because
+// no management UI ever shows a saved password. They are write-only from every
+// direction a parent or a child can reach.
+//
+// Without this rule the device still boots, still joins networks it already
+// knows, and still shows what is in range. What stops working is saving a new
+// one. The custodian checks for the rule at startup and `lunchboxd` raises the
+// `Warning` diagnostic `wifi_config_unavailable`, which names this file --
+// because a form that accepts a password and silently drops it is worse than
+// one that says up front it cannot help.
+
+polkit.addRule(function(action, subject) {
+    if ((action.id === "org.freedesktop.NetworkManager.settings.modify.system" ||
+         action.id === "org.freedesktop.NetworkManager.network-control") &&
+        subject.user === "lunchbox-state") {
+        return polkit.Result.YES;
+    }
+});
