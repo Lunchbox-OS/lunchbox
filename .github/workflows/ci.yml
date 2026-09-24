@@ -5,6 +5,11 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  # The merge queue tests each entry on a temporary branch and merges it only
+  # once the required check -- `CI passed`, below -- succeeds there. Without
+  # this trigger nothing runs on that branch, and the queue waits for a check
+  # that never starts.
+  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
@@ -1149,3 +1154,29 @@ jobs:
 
       - name: Check for duplicate job names
         run: ./scripts/ci/check-workflows.sh
+
+  # --------------------------------------------------------------------------
+  # ci-passed: the one check the `main` ruleset requires, for pull requests and
+  # for the merge queue alike. It needs every other job, so the ruleset does not
+  # have to list twenty-odd job and matrix-leg names and go stale whenever one
+  # is added or renamed -- a new job only has to be added to `needs` here.
+  #
+  # `if: always()` because a job whose `needs` failed is otherwise *skipped*,
+  # and a skipped required check counts as passing. So it always runs, and
+  # fails unless every job it needs succeeded or was deliberately skipped.
+  # --------------------------------------------------------------------------
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [image-base, image-android, image-cross, warmup, build, build-arm64, test, e2e, fmt, webui, package, versions, firewall, android-companion, android-media, config-editor, shellcheck, arch-neutral, apt-repository, workflows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' | sort
+          if echo "$RESULTS" | jq -e 'any(.[]; .result != "success" and .result != "skipped")' >/dev/null; then
+            echo "::error::Not every CI job passed; see the list above."
+            exit 1
+          fi
