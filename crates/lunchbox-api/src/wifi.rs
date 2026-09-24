@@ -333,6 +333,34 @@ impl WifiJoinState {
         matches!(self, Self::Connecting { .. })
     }
 
+    /// This state, or [`Self::Idle`] when the radio says it is out of date.
+    ///
+    /// A join's outcome is recorded once, when it settles, and the radio moves
+    /// on without it: NetworkManager autoconnects, a parent disconnects from
+    /// the host, a saved network is forgotten. Reported as it stood, a settled
+    /// state went on saying "no network called X answered" above a list with
+    /// the device connected to X -- seen on a device, minutes after the
+    /// failure. So a settled state the live list contradicts is dropped:
+    ///
+    /// * `Failed` for the network the device is now on, and
+    /// * `Connected` to a network the device is no longer on.
+    ///
+    /// Anything else stands, including a failure for one network while the
+    /// device is on another -- that is still news. `Connecting` is left
+    /// alone; it settles on its own.
+    ///
+    /// `networks` must be a live read. A backend that could not read the
+    /// radio returns nothing, and "nothing is active" would then clear a
+    /// perfectly good `Connected`, so the caller skips this for such a read.
+    pub fn reconciled(self, networks: &[WifiNetwork]) -> Self {
+        let on = |ssid: &str| networks.iter().any(|n| n.active && n.ssid == ssid);
+        match &self {
+            Self::Failed { ssid, .. } if on(ssid) => Self::Idle,
+            Self::Connected { ssid } if !on(ssid) => Self::Idle,
+            _ => self,
+        }
+    }
+
     /// The network this is about, for a UI that shows one line of status.
     pub fn ssid(&self) -> Option<&str> {
         match self {
@@ -829,6 +857,64 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains(r#""state":"connecting""#), "{json}");
+    }
+
+    fn failed(ssid: &str) -> WifiJoinState {
+        WifiJoinState::Failed {
+            ssid: ssid.into(),
+            reason: WifiJoinFailure::of(WifiJoinFailureKind::NotFound),
+        }
+    }
+
+    fn on(ssid: &str) -> WifiNetwork {
+        WifiNetwork {
+            active: true,
+            ..net(ssid, 80, 5)
+        }
+    }
+
+    #[test]
+    fn a_failure_for_the_network_the_device_is_on_is_dropped() {
+        // Seen on a device: "No network called X answered" above a list with
+        // X marked Connected, because NetworkManager autoconnected it after
+        // the join that failed.
+        assert_eq!(
+            failed("home").reconciled(&[on("home"), net("next door", 40, 2)]),
+            WifiJoinState::Idle
+        );
+    }
+
+    #[test]
+    fn a_failure_for_another_network_still_stands() {
+        // The parent tried "cafe" and the device fell back to "home". The
+        // failure is still the thing they need to read.
+        assert_eq!(failed("cafe").reconciled(&[on("home")]), failed("cafe"));
+        assert_eq!(failed("cafe").reconciled(&[]), failed("cafe"));
+    }
+
+    #[test]
+    fn connected_to_a_network_the_device_left_is_dropped() {
+        let connected = WifiJoinState::Connected {
+            ssid: "home".into(),
+        };
+        assert_eq!(
+            connected.clone().reconciled(&[net("home", 80, 5)]),
+            WifiJoinState::Idle
+        );
+        assert_eq!(connected.clone().reconciled(&[on("home")]), connected);
+    }
+
+    #[test]
+    fn a_join_in_progress_is_never_second_guessed() {
+        let connecting = WifiJoinState::Connecting {
+            ssid: "home".into(),
+        };
+        assert_eq!(connecting.clone().reconciled(&[]), connecting);
+        assert_eq!(connecting.clone().reconciled(&[on("home")]), connecting);
+        assert_eq!(
+            WifiJoinState::Idle.reconciled(&[on("home")]),
+            WifiJoinState::Idle
+        );
     }
 
     #[test]

@@ -1779,13 +1779,21 @@ impl ManagementService for DefaultManagementService {
         };
         let snapshot = wifi.networks().await;
         let (networks, truncated) = aggregate_networks(snapshot.networks);
+        // Checked against the radio only when there is a radio reading to
+        // check it against; see `WifiJoinState::reconciled`.
+        let join = wifi.join_state().await;
+        let join = if snapshot.supported {
+            join.reconciled(&networks)
+        } else {
+            join
+        };
         WifiScanView {
             supported: snapshot.supported,
             radio_enabled: snapshot.radio_enabled,
             networks,
             truncated,
             last_scan_age_s: snapshot.last_scan_age_s,
-            join: wifi.join_state().await,
+            join,
             can_configure: wifi.can_configure().await,
         }
     }
