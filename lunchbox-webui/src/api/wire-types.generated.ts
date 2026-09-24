@@ -482,6 +482,29 @@ export type DiagnosticCode =
    */
   | "session_not_guarded"
   /**
+   * This device cannot save a Wi-Fi network, so the management UIs offer the
+   * list but not the form (issue #194).
+   *
+   * Writing a NetworkManager profile needs
+   * `org.freedesktop.NetworkManager.settings.modify.system`, and joining it
+   * `org.freedesktop.NetworkManager.network-control`. The first the
+   * kiosk user deliberately does not hold — every activity runs as that
+   * user, and the grant was measured to be sufficient on its own to read
+   * back every saved network's password. The grant lives with the state
+   * custodian instead, and this is raised when the custodian is there but
+   * the polkit rule is not.
+   *
+   * Deliberately *not* raised on a device with no custodian at all: that
+   * device already says so through [`Self::StateNotProtected`], and one
+   * fact should not set off two alarms. Nor on a device with no wireless
+   * adapter, which is not missing anything.
+   *
+   * `Warning`, not `Critical`: nothing is unsafe, and a device that already
+   * knows its network keeps working. What is lost is the ability to point
+   * it at a new one without a keyboard.
+   */
+  | "wifi_config_unavailable"
+  /**
    * Something at this uid tried to drive the daemon from outside the
    * session and was refused (issue #144). Worth an administrator's
    * attention: an activity probing the management socket is not something
