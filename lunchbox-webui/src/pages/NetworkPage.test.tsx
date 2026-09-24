@@ -24,9 +24,28 @@ import type { NetworkStatusView, ServiceStateSnapshot } from "../api/types";
 const getNetworkStatus = vi.fn();
 const getServiceState = vi.fn();
 
+// The page embeds the Wi-Fi panel (issue #194), which has a client surface of
+// its own. Stubbed to a device with no adapter so these assertions stay about
+// the addressing questions this file exists for; the panel's own behaviour is
+// tested in WifiPanel.test.tsx.
 vi.mock("../api/client", () => ({
   getNetworkStatus: () => getNetworkStatus(),
   getServiceState: () => getServiceState(),
+  getWifiNetworks: () =>
+    Promise.resolve({
+      supported: false,
+      radio_enabled: false,
+      networks: [],
+      truncated: false,
+      last_scan_age_s: null,
+      join: { state: "idle" },
+      can_configure: false,
+    }),
+  getSavedWifiNetworks: () => Promise.resolve([]),
+  scanWifi: () => Promise.resolve(null),
+  saveWifiNetwork: () => Promise.resolve(null),
+  connectWifiNetwork: () => Promise.resolve(null),
+  forgetWifiNetwork: () => Promise.resolve(false),
 }));
 
 const { NetworkPage } = await import("./NetworkPage");
@@ -141,7 +160,12 @@ describe("the network page", () => {
       connectivity: "unknown",
       source: "unavailable",
       truncated: false,
-      management_api: { state: "disabled", addr: null, port: null, error: null },
+      management_api: {
+        state: "disabled",
+        addr: null,
+        port: null,
+        error: null,
+      },
       management_urls: [],
       interfaces: [],
     };

@@ -8,7 +8,7 @@
 
 import axios from "axios";
 import type { RpcMethod, RpcParams, RpcResult } from "./rpc-methods.generated";
-import type { ReasonCode } from "./types";
+import type { ReasonCode, WifiJoinRequest } from "./types";
 import { UNAUTHENTICATED_EVENT } from "../auth/AuthGate";
 
 export class ApiError extends Error {
@@ -79,8 +79,7 @@ axiosInstance.interceptors.response.use(
         window.dispatchEvent(new Event(UNAUTHENTICATED_EVENT));
       }
       const body = err.response.data as
-        | { error?: string; message?: string }
-        | undefined;
+        { error?: string; message?: string } | undefined;
       throw new ApiError(
         err.response.status,
         body?.error ?? "unknown",
@@ -114,7 +113,10 @@ async function call<M extends RpcMethod>(
   method: M,
   params: RpcParams<M>,
 ): Promise<RpcResult<M>> {
-  const res = await axiosInstance.post<RpcResult<M>>("/rpc", { method, params });
+  const res = await axiosInstance.post<RpcResult<M>>("/rpc", {
+    method,
+    params,
+  });
   return res.data;
 }
 
@@ -220,8 +222,7 @@ export const getEntryUsage = (entry_id: string, from?: string, to?: string) =>
 export const getVolume = () => call("get_volume", {});
 export const setVolumePercent = (percent: number) =>
   call("set_volume", { percent });
-export const setVolumeMuted = (muted: boolean) =>
-  call("set_mute", { muted });
+export const setVolumeMuted = (muted: boolean) => call("set_mute", { muted });
 
 // Per-output volume limits
 export const listAudioOutputs = () => call("list_audio_outputs", {});
@@ -270,6 +271,41 @@ export const listDiagnostics = () => call("list_diagnostics", {});
  * serving this page from is listening (issue #182).
  */
 export const getNetworkStatus = () => call("network_status", {});
+
+// Wi-Fi (issue #194)
+/**
+ * Ask for a fresh scan. Returns at once; the results arrive on the next
+ * {@link getWifiNetworks} poll seconds later.
+ */
+export const scanWifi = () => call("wifi_scan", {});
+
+/**
+ * What is in range, plus how the last join is going.
+ *
+ * One call for both on purpose: a join takes anywhere from 3 to 45 seconds,
+ * which outlives every RPC timeout, so its outcome cannot come back from the
+ * call that started it. This page is already polling to refresh signal
+ * strengths, so the result rides along.
+ */
+export const getWifiNetworks = () => call("wifi_networks", {});
+
+/** Networks this device already knows. Never includes a password. */
+export const getSavedWifiNetworks = () => call("wifi_saved_networks", {});
+
+/**
+ * Remember a network, and join it when `connect` is set.
+ *
+ * Saving over a network this device already knows updates it rather than
+ * adding a second entry with the same name.
+ */
+export const saveWifiNetwork = (request: WifiJoinRequest) =>
+  call("wifi_save", { request });
+
+/** Join a network this device already has a profile for. */
+export const connectWifiNetwork = (id: string) => call("wifi_connect", { id });
+
+/** Delete a saved profile. Resolves to `false` if there was nothing to delete. */
+export const forgetWifiNetwork = (id: string) => call("wifi_forget", { id });
 
 /**
  * The whole service snapshot.
