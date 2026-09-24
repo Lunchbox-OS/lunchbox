@@ -35,7 +35,7 @@ selection states and the icon in context. Those are **not** in this repository:
 the app icons in them are third-party artwork (Tux Math, GCompris, ScummVM,
 SuperTuxKart, …) included so the mockups looked real, and they are not part of
 this branding. They are attached to
-<https://github.com/aarmea/lunchbox/issues/207>, and
+<https://github.com/Lunchbox-OS/lunchbox/issues/207>, and
 `docs/ai/history/2026-09-19 004 launcher-branding (#207).md` says what was built
 from them.
 
@@ -140,7 +140,7 @@ Still open:
 
 - **The HUD.** Untouched by #207 and still on its old palette; the bar above is
   the design for it, not a description of it. Tracked as
-  <https://github.com/aarmea/lunchbox/issues/209>, which also lists where the
+  <https://github.com/Lunchbox-OS/lunchbox/issues/209>, which also lists where the
   bar as built and the bar as drawn disagree.
 - **Bedtime** — compartments emptied and dimmed, one left open — is described,
   not drawn. Its floor is built now (a shut category says when it opens), but

@@ -1,4 +1,4 @@
-Issues are tracked on GitHub at <https://github.com/aarmea/lunchbox/issues>.
+Issues are tracked on GitHub at <https://github.com/Lunchbox-OS/lunchbox/issues>.
 
 Issue numbers 1-201 predate this repository and kept the values they had on
 Forgejo, where issues and pull requests shared one sequence. The numbers that

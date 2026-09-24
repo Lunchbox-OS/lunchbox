@@ -11,8 +11,8 @@ Categories:
 License: GPL-3.0-only
 AuthorName: Albert Armea
 WebSite: https://lunchbox-os.com
-SourceCode: https://github.com/aarmea/lunchbox
-IssueTracker: https://github.com/aarmea/lunchbox/issues
+SourceCode: https://github.com/Lunchbox-OS/lunchbox
+IssueTracker: https://github.com/Lunchbox-OS/lunchbox/issues
 
 Name: Lunchbox Companion
 Summary: Manage Lunchbox kiosk devices over Bluetooth LE

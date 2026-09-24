@@ -259,7 +259,7 @@ with no prompting, so a phone with the companion app tracks new releases the way
 ### By sideloading
 
 Every release attaches both APKs. Download the one you want from the
-[releases page](https://github.com/aarmea/lunchbox/releases)
+[releases page](https://github.com/Lunchbox-OS/lunchbox/releases)
 and install it:
 
 ```sh

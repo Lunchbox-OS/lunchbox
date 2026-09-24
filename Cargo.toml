@@ -91,7 +91,7 @@ version = "0.6.0"
 edition = "2024"
 license = "GPL-3.0"
 authors = ["Albert Armea"]
-repository = "https://github.com/aarmea/lunchbox"
+repository = "https://github.com/Lunchbox-OS/lunchbox"
 
 [workspace.dependencies]
 # Internal crates

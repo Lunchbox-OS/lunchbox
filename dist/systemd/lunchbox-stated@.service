@@ -8,7 +8,7 @@
 
 [Unit]
 Description=lunchbox state custodian (user %i)
-Documentation=https://github.com/aarmea/lunchbox/issues/157
+Documentation=https://github.com/Lunchbox-OS/lunchbox/issues/157
 Requires=lunchbox-stated@%i.socket
 After=lunchbox-stated@%i.socket systemd-logind.service
 
