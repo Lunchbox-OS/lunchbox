@@ -38,9 +38,9 @@ apt.lunchbox-os.com            (Cloudflare Pages, ~10 KB per deployment)
 ├── repository.key                                public half of the signing key
 └── _redirects
       /pool/0.5.1/lunchbox_0.5.1_amd64.deb \
-        https://github.com/aarmea/lunchbox/releases/download/v0.5.1/lunchbox_0.5.1_amd64.deb  302
+        https://github.com/Lunchbox-OS/lunchbox/releases/download/v0.5.1/lunchbox_0.5.1_amd64.deb  302
       /pool/0.5.1/lunchbox_0.5.1_arm64.deb \
-        https://github.com/aarmea/lunchbox/releases/download/v0.5.1/lunchbox_0.5.1_arm64.deb  302
+        https://github.com/Lunchbox-OS/lunchbox/releases/download/v0.5.1/lunchbox_0.5.1_arm64.deb  302
 ```
 
 `Packages` carries `Filename: pool/<version>/<file>.deb`, which is what makes

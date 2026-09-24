@@ -182,7 +182,7 @@ is signed.
 ME="$(gh api user --jq .id)"
 
 # Create the environment with yourself as a required reviewer.
-gh api --method PUT repos/aarmea/lunchbox/environments/release --input - <<EOF
+gh api --method PUT repos/Lunchbox-OS/lunchbox/environments/release --input - <<EOF
 {
   "wait_timer": 0,
   "prevent_self_review": false,
@@ -196,7 +196,7 @@ EOF
 
 # Only vX.Y.Z tags may use this environment — a branch cannot reach the key.
 gh api --method POST \
-  repos/aarmea/lunchbox/environments/release/deployment-branch-policies \
+  repos/Lunchbox-OS/lunchbox/environments/release/deployment-branch-policies \
   -f name='v*' -f type=tag
 ```
 
@@ -208,9 +208,9 @@ Then the two secrets (`gh secret set` reads the value from stdin when
 
 ```sh
 base64 -w0 lunchbox-apt-ci.asc \
-  | gh secret set LUNCHBOX_APT_KEY_B64 --env release --repo aarmea/lunchbox
+  | gh secret set LUNCHBOX_APT_KEY_B64 --env release --repo Lunchbox-OS/lunchbox
 
-gh secret set LUNCHBOX_APT_KEY_PASSPHRASE --env release --repo aarmea/lunchbox
+gh secret set LUNCHBOX_APT_KEY_PASSPHRASE --env release --repo Lunchbox-OS/lunchbox
 # (paste the passphrase, then Ctrl-D)
 ```
 
@@ -262,7 +262,7 @@ gpg --import repository.key
 gpg --verify lunchbox_0.5.1_amd64.deb.asc lunchbox_0.5.1_amd64.deb
 
 # Provenance — which workflow run, from which commit, built this file:
-gh attestation verify lunchbox_0.5.1_amd64.deb -R aarmea/lunchbox
+gh attestation verify lunchbox_0.5.1_amd64.deb -R Lunchbox-OS/lunchbox
 ```
 
 The two claims differ: the signature says the key holder released it, the
