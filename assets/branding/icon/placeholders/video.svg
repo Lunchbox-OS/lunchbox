@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Video file">
+<g transform="translate(28 28) scale(8.333)"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5" fill="#1F7A72" stroke="#1C1B18" stroke-width="0.85" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="8" y="7.5" width="8" height="9" rx="1" fill="#F7F5EE" stroke="#1C1B18" stroke-width="0.85" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="4.4" y="7.5" width="1.6" height="2.4" rx=".5" fill="#F7F5EE"/><rect x="4.4" y="13.6" width="1.6" height="2.4" rx=".5" fill="#F7F5EE"/>
+<rect x="18" y="7.5" width="1.6" height="2.4" rx=".5" fill="#F7F5EE"/><rect x="18" y="13.6" width="1.6" height="2.4" rx=".5" fill="#F7F5EE"/></g>
+</svg>

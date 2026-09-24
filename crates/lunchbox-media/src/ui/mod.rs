@@ -1,9 +1,10 @@
-//! egui-based UI: poster grid in `Browsing` state, embedded mpv player
+//! egui-based UI: the library screen in `Browsing` state, embedded mpv player
 //! with a touch- and controller-friendly overlay in `Playing` state.
 
 mod playback;
 
-use lunchbox_media_ui::{grid, prompt, theme};
+use lunchbox_media_ui::library::{self, Hero, LibraryView, Nav};
+use lunchbox_media_ui::theme;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,26 +21,14 @@ use crate::posters::{self, PosterCache};
 use crate::skipping::SkipWatcher;
 use lunchbox_media_cache::VideoCache;
 
-/// How long the "continue watching" offer waits for its item to show up in the
-/// grid before lapsing.
+/// How long the "keep watching" row waits for its item to show up in the
+/// library before lapsing.
 ///
 /// With `--connectivity-check` the grid starts pessimistically empty of remote
 /// items and fills in once the first probe lands (a few seconds). Waiting covers
-/// that; lapsing afterwards keeps a card from appearing over a grid the viewer
-/// has already started using.
+/// that; lapsing afterwards keeps the row from pushing the library down under a
+/// viewer who has already started using it.
 const OFFER_WINDOW: Duration = Duration::from_secs(10);
-
-/// The "continue watching" card in this binary's browse theme.
-const PROMPT_THEME: prompt::PromptTheme = prompt::PromptTheme {
-    // One step darker than the tiles so the card reads as its own surface and
-    // its buttons stay distinguishable from it.
-    panel: theme::BG,
-    text: theme::TEXT,
-    dim_text: theme::TEXT_DIM,
-    button: theme::TILE,
-    button_focused: theme::TILE_FOCUSED,
-    focus_border: theme::FOCUS_BORDER,
-};
 
 /// Why the UI loop returned.
 #[derive(Debug, Clone, Copy)]
@@ -68,10 +57,12 @@ pub fn run(
     let posters = posters::prefetch(session.library());
 
     // With `--resume` on, browse mode opens offering the item watched most
-    // recently — provided it is still in the library.
+    // recently — provided it is still in the library, and was left partway
+    // through: one watched to the end has nothing to continue.
     let resume_offer = match (&start_mode, &resume) {
         (StartMode::Browsing, Some(tracker)) => tracker
             .last_item_in(session.library().items.iter().map(|i| i.id.as_str()))
+            .filter(|id| tracker.start_position(id).is_some())
             .map(|id| id.to_string()),
         _ => None,
     };
@@ -144,9 +135,7 @@ pub fn run(
                 session,
                 posters,
                 gilrs: gilrs::Gilrs::new().ok(),
-                focused: 0,
-                columns: 4,
-                grid_scroll: grid::ScrollState::default(),
+                library: LibraryView::new(),
                 term,
                 signaled: signaled_clone,
                 online,
@@ -158,7 +147,6 @@ pub fn run(
                 resume,
                 resume_offer,
                 resume_offer_until: Instant::now() + OFFER_WINDOW,
-                prompt: prompt::ResumePrompt::new(),
                 skipping,
             }))
         }),
@@ -192,10 +180,8 @@ struct App {
     session: Session,
     posters: PosterCache,
     gilrs: Option<gilrs::Gilrs>,
-    /// Index into the *visible* item list for the current frame.
-    focused: usize,
-    columns: usize,
-    grid_scroll: grid::ScrollState,
+    /// The library screen's focus and scroll.
+    library: LibraryView,
     term: Arc<AtomicBool>,
     signaled: Arc<AtomicBool>,
     /// Latest connectivity status from the background check thread.
@@ -212,19 +198,17 @@ struct App {
     /// playback rather than every frame (which would keep `last_input_at`
     /// fresh and prevent the HUD from ever auto-hiding).
     playing_item: Option<String>,
-    /// Analog left-stick navigation state for the browse grid.
+    /// Analog left-stick navigation state for the library screen.
     stick_nav: StickNav,
     /// Saved playback positions, when `--resume` was passed. `None` turns the
     /// whole feature off: nothing is recorded and nothing is offered.
     resume: Option<ResumeTracker>,
-    /// The item the "continue watching" card is offering, until the viewer
-    /// answers it. `None` once answered (or when there was nothing to offer).
+    /// The item the "keep watching" row offers, until anything is played.
+    /// `None` from then on (or when there was nothing to offer).
     resume_offer: Option<String>,
-    /// How long to wait for that item to appear in the grid before letting the
-    /// offer lapse — see [`OFFER_WINDOW`].
+    /// How long to wait for that item to appear in the library before letting
+    /// the offer lapse — see [`OFFER_WINDOW`].
     resume_offer_until: Instant,
-    /// Focus state of that card.
-    prompt: prompt::ResumePrompt,
     /// SponsorBlock skipping, when a parent enabled it. `None` turns the whole
     /// feature off: nothing is looked up and nothing is skipped.
     skipping: Option<SkipWatcher>,
@@ -379,13 +363,9 @@ impl eframe::App for App {
         }
 
         let visible = self.visible_items();
-        if !visible.is_empty() {
-            self.focused = self.focused.min(visible.len() - 1);
-        }
 
-        // The "continue watching" card is modal: while it is up the grid still
-        // paints (as its backdrop) but takes no input. It only goes up once its
-        // item is actually listed (see `OFFER_WINDOW`).
+        // The "keep watching" row goes up once its item is actually listed
+        // (see `OFFER_WINDOW`).
         let offering = match self.resume_offer.as_deref() {
             Some(id) if visible.iter().any(|item| item.id == id) => true,
             Some(_) if Instant::now() < self.resume_offer_until => false,
@@ -395,23 +375,45 @@ impl eframe::App for App {
             }
             None => false,
         };
-        if !offering {
-            self.handle_browse_input(ctx, &visible, &gamepad_events);
-        }
+        self.handle_browse_input(ctx, &gamepad_events);
+
+        let resume = self.resume.as_ref();
+        let hero = offering
+            .then(|| {
+                let item = visible
+                    .iter()
+                    .find(|i| Some(i.id.as_str()) == self.resume_offer.as_deref())?;
+                let saved = resume?.saved(&item.id)?;
+                Some(Hero {
+                    item,
+                    position: saved.position_seconds,
+                    duration: item
+                        .duration_seconds
+                        .map(|d| d as f64)
+                        .or(saved.duration_seconds),
+                })
+            })
+            .flatten();
         let title = self.session.library().title.clone();
         let posters = &self.posters;
-        let selected = grid::draw(
+        let chosen = self.library.draw(
             ui,
-            &mut self.grid_scroll,
-            &title,
-            &visible,
-            &mut self.focused,
-            &mut self.columns,
-            &|id| posters.get(id).cloned(),
+            &library::Library {
+                title: &title,
+                items: &visible,
+                hero,
+                poster: &|id| posters.get(id).cloned(),
+                progress: &|item| {
+                    let saved = resume?.saved(&item.id)?;
+                    let duration = item
+                        .duration_seconds
+                        .map(|d| d as f64)
+                        .or(saved.duration_seconds);
+                    library::watched_fraction(saved.position_seconds, duration)
+                },
+            },
         );
-        if offering {
-            self.draw_resume_prompt(ui, &visible, &gamepad_events);
-        } else if let Some(id) = selected {
+        if let Some(id) = chosen {
             self.start_item(&id);
         }
 
@@ -420,48 +422,22 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn handle_browse_input(
-        &mut self,
-        ctx: &egui::Context,
-        visible: &[Item],
-        gamepad_events: &[gilrs::EventType],
-    ) {
-        let n = visible.len();
-        if n == 0 {
-            return;
+    /// Gamepad and Escape for the library screen. The arrow keys and Enter are
+    /// the library view's own.
+    fn handle_browse_input(&mut self, ctx: &egui::Context, gamepad_events: &[gilrs::EventType]) {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.session.handle_input(SessionInput::ExitSession);
         }
-        let cols = self.columns.max(1);
-
-        ctx.input(|input| {
-            if input.key_pressed(egui::Key::ArrowRight) {
-                self.move_focus(1, n);
-            }
-            if input.key_pressed(egui::Key::ArrowLeft) {
-                self.move_focus_back(1);
-            }
-            if input.key_pressed(egui::Key::ArrowDown) {
-                self.move_focus(cols, n);
-            }
-            if input.key_pressed(egui::Key::ArrowUp) {
-                self.move_focus_back(cols);
-            }
-            if input.key_pressed(egui::Key::Enter) {
-                self.activate(visible);
-            }
-            if input.key_pressed(egui::Key::Escape) {
-                self.session.handle_input(SessionInput::ExitSession);
-            }
-        });
 
         for ev in gamepad_events {
             use gilrs::{Button, EventType};
             if let EventType::ButtonPressed(btn, _) = ev {
                 match btn {
-                    Button::DPadLeft => self.move_focus_back(1),
-                    Button::DPadRight => self.move_focus(1, n),
-                    Button::DPadUp => self.move_focus_back(cols),
-                    Button::DPadDown => self.move_focus(cols, n),
-                    Button::South => self.activate(visible),
+                    Button::DPadLeft => self.library.navigate(Nav::Left),
+                    Button::DPadRight => self.library.navigate(Nav::Right),
+                    Button::DPadUp => self.library.navigate(Nav::Up),
+                    Button::DPadDown => self.library.navigate(Nav::Down),
+                    Button::South => self.library.activate(),
                     Button::East => self.session.handle_input(SessionInput::ExitSession),
                     _ => {}
                 }
@@ -479,12 +455,12 @@ impl App {
                 ctx.request_repaint_after(StickNav::REPEAT_INTERVAL);
             }
             if let Some(dir) = dir {
-                match dir {
-                    NavDir::Up => self.move_focus_back(cols),
-                    NavDir::Down => self.move_focus(cols, n),
-                    NavDir::Left => self.move_focus_back(1),
-                    NavDir::Right => self.move_focus(1, n),
-                }
+                self.library.navigate(match dir {
+                    NavDir::Up => Nav::Up,
+                    NavDir::Down => Nav::Down,
+                    NavDir::Left => Nav::Left,
+                    NavDir::Right => Nav::Right,
+                });
             }
         }
     }
@@ -500,30 +476,14 @@ impl App {
         ))
     }
 
-    fn move_focus(&mut self, step: usize, len: usize) {
-        self.focused = (self.focused + step).min(len.saturating_sub(1));
-    }
-
-    fn move_focus_back(&mut self, step: usize) {
-        self.focused = self.focused.saturating_sub(step);
-    }
-
-    fn activate(&mut self, visible: &[Item]) {
-        let Some(item) = visible.get(self.focused) else {
-            return;
-        };
-        let info = lunchbox_media_core::PlatformInfo::current();
-        if resolve_source(item, &info).is_none() {
-            return;
-        }
-        let id = item.id.clone();
-        self.start_item(&id);
-    }
-
     /// Start `item_id`, from its saved position when `--resume` is on. Every
     /// path into playback goes through here so resuming isn't tied to one of
-    /// them (tap, Enter, gamepad, or the "continue watching" card).
+    /// them (tap, Enter, gamepad, or the "keep watching" row).
+    ///
+    /// Playing anything retires the "keep watching" row: it is how the
+    /// library opens, not something to come back to.
     fn start_item(&mut self, item_id: &str) {
+        self.resume_offer = None;
         let start = self
             .resume
             .as_ref()
@@ -531,71 +491,5 @@ impl App {
         self.session.set_start_position(start);
         self.session
             .handle_input(SessionInput::SelectItem(item_id.to_string()));
-    }
-
-    /// Draw the "continue watching" card over the grid and act on the answer.
-    fn draw_resume_prompt(
-        &mut self,
-        ui: &mut egui::Ui,
-        visible: &[Item],
-        gamepad_events: &[gilrs::EventType],
-    ) {
-        let Some(item_id) = self.resume_offer.clone() else {
-            return;
-        };
-        // The caller only draws while the item is listed; this is belt and
-        // braces so the borrow below can't fail.
-        let Some(item) = visible.iter().find(|i| i.id == item_id) else {
-            return;
-        };
-
-        // Gamepad: the card's own handling covers pointer and keyboard (which
-        // is what a remote's D-pad arrives as), so only the pad maps here.
-        let mut action = prompt::PromptAction::None;
-        for ev in gamepad_events {
-            use gilrs::{Button, EventType};
-            if let EventType::ButtonPressed(btn, _) = ev {
-                match btn {
-                    Button::DPadLeft => self.prompt.move_focus(-1),
-                    Button::DPadRight => self.prompt.move_focus(1),
-                    Button::South => action = self.prompt.focused_action(),
-                    Button::East => action = prompt::PromptAction::Dismiss,
-                    _ => {}
-                }
-            }
-        }
-
-        let position = self
-            .resume
-            .as_ref()
-            .and_then(|tracker| tracker.start_position(&item_id));
-        let duration = item.duration_seconds.map(|d| d as f64);
-        let drawn = self.prompt.draw(
-            ui,
-            ui.max_rect(),
-            &item.title,
-            position,
-            duration,
-            &PROMPT_THEME,
-        );
-        if action == prompt::PromptAction::None {
-            action = drawn;
-        }
-
-        match action {
-            prompt::PromptAction::None => {}
-            prompt::PromptAction::Resume => {
-                self.resume_offer = None;
-                self.start_item(&item_id);
-            }
-            prompt::PromptAction::Dismiss => {
-                self.resume_offer = None;
-                // Leave the grid focus on the item that was offered: it is
-                // still the most likely thing the viewer wants.
-                if let Some(idx) = visible.iter().position(|i| i.id == item_id) {
-                    self.focused = idx;
-                }
-            }
-        }
     }
 }

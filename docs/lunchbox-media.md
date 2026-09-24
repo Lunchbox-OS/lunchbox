@@ -659,12 +659,19 @@ With it on:
 
 - **Re-opening an item resumes it.** The position is handed to mpv with the
   file, so nothing before it is decoded or shown. This applies wherever
-  playback starts — a tile in the grid, the card below, or `play --item`.
-- **Re-opening the library offers to continue.** Browse mode opens with a
-  "Continue watching" card naming the last item and where it stopped; the
-  choices are **Resume** and **Library** (dismiss and browse as usual). Enter /
-  A resumes, Escape / B / BACK dismisses. The card is skipped when the library
-  has never been watched, or when that item is no longer in it.
+  playback starts — a thumbnail in the library, the Continue button below, or
+  `play --item`.
+- **Re-opening the library offers to continue.** When the item watched last was
+  left partway through, browse mode opens with a "keep watching" row above the
+  library: that item's thumbnail, how much of it is left, and a **Continue**
+  button, which has the focus. Enter / A continues; down moves into the
+  library, which drops to one row and leaves that item out. The row goes as
+  soon as anything is played, and is not there at all when the library has
+  never been watched, when the last item was watched to the end, or when it is
+  no longer in the library.
+- **Thumbnails show what has been started.** An item with a saved position
+  carries a yellow strip along the bottom of its thumbnail, as far along as the
+  viewer got.
 - **A finished item is forgotten.** A stop within 30 seconds of the end (and a
   stop within the first 20 seconds) clears the position, so the next play starts
   from the beginning rather than at the credits.

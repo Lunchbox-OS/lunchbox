@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # Android player backend is plugged in separately (libmpv via JNI, later).
 lunchbox-media-core = { path = "../lunchbox-media-core", default-features = false }
 lunchbox-media-app = { path = "../lunchbox-media-app" }
-# Shared egui browse UI (poster grid), used by both the Linux binary and here.
+# Shared egui library screen and player controls, used by both the Linux binary and here.
 lunchbox-media-ui = { path = "../lunchbox-media-ui" }
 
 log = { workspace = true }
@@ -43,7 +43,7 @@ eframe = { version = "0.34", default-features = false, features = [
     "android-native-activity",
 ] }
 egui = "0.34"
-# Image loader for the shared poster grid (decodes the bytes:// poster URIs).
+# Image loader for the shared library screen (decodes the bytes:// poster URIs).
 egui_extras = { version = "0.34", features = ["image"] }
 glow = "0.17"
 url = "2.5"

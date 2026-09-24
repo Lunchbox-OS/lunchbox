@@ -4,8 +4,9 @@ Linux binary for the `lunchbox-media` library-launcher. Wraps
 `lunchbox-media-core` with:
 
 - A `clap`-based CLI exposing `validate`, `play`, and `browse` subcommands.
-- An `egui` + `eframe` shell that hosts both the browse-mode poster grid
-  and a touch- and controller-friendly playback view. mpv is composited
+- An `egui` + `eframe` shell that hosts both the browse-mode library screen
+  (`lunchbox-media-ui`'s, in the Lunchbox branding) and a touch- and
+  controller-friendly playback view. mpv is composited
   into the same window via `libmpv2`'s OpenGL render context, so a
   single surface owns all input (touch, mouse, keyboard, gamepad).
 - An asynchronous poster prefetcher that keeps the network out of the core.
@@ -21,7 +22,8 @@ Linux binary for the `lunchbox-media` library-launcher. Wraps
   categories there is no watcher and nothing reaches the network.
 - The `--resume` option (default off): per-library playback positions kept under
   `$XDG_STATE_HOME/lunchbox/media/resume/`, so an item re-opens where it stopped
-  and browse mode offers to continue the last one watched. The state model is
+  and browse mode offers to continue the last one watched if it was left
+  partway through. The state model is
   shared with the Android app (`lunchbox-media-app`'s `resume` module); see
   `docs/lunchbox-media.md`.
 

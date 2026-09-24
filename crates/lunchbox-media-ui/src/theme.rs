@@ -166,14 +166,15 @@ pub const TEXT: Color32 = Color32::from_rgb(0xea, 0xea, 0xea);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
 pub const FOCUS_BORDER: Color32 = Color32::from_rgb(0xff, 0xd1, 0x66);
 
-/// Apply the browse theme (dark background, focus-friendly text) to a context.
+/// Apply the browse theme to a context that shows nothing but the media
+/// screens: Baloo 2, and ink type on the enamel field.
 pub fn install(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut style = (*ctx.global_style()).clone();
-    style.visuals.dark_mode = true;
-    style.visuals.override_text_color = Some(TEXT);
-    style.visuals.window_fill = BG;
-    style.visuals.panel_fill = BG;
-    style.spacing.item_spacing = egui::vec2(16.0, 16.0);
+    style.visuals = egui::Visuals::light();
+    style.visuals.override_text_color = Some(INK);
+    style.visuals.window_fill = ENAMEL;
+    style.visuals.panel_fill = ENAMEL;
     ctx.set_global_style(style);
 }
 

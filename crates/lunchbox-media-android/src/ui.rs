@@ -1,6 +1,6 @@
 //! The egui application: a library switcher, a settings page for managing
-//! libraries and their caching options, an add-library form, and a browse grid
-//! (the shared `lunchbox-media-ui` poster grid, same as the Linux binary).
+//! libraries and their caching options, an add-library form, and the library
+//! screen (the shared `lunchbox-media-ui` view, same as the Linux binary).
 //!
 //! `MediaApp` is cross-platform `eframe::App` code so it can run on the host via
 //! the `desktop_preview` example for fast iteration, and on Android via the
@@ -22,22 +22,12 @@ use lunchbox_media_core::{
     ClassifiedUri, Library, Platform, PlatformInfo, PlayerEvent, PlayerHandle, PosterRef,
     RetryBudget, Source, resolve_source,
 };
-use lunchbox_media_ui::{grid, prompt};
+use lunchbox_media_ui::library::{self, Hero, LibraryView};
 use url::Url;
 
 use crate::playback::PlaybackView;
 use crate::resolve::{ResolveError, resolve};
 use crate::video_cache::VideoCache;
-
-/// The "continue watching" card in the app's TV theme (see [`tv_visuals`]).
-const PROMPT_THEME: prompt::PromptTheme = prompt::PromptTheme {
-    panel: egui::Color32::from_rgb(0x1c, 0x20, 0x2c),
-    text: egui::Color32::WHITE,
-    dim_text: egui::Color32::from_rgb(0xa0, 0xa4, 0xb0),
-    button: egui::Color32::from_rgb(0x2a, 0x33, 0x4a),
-    button_focused: egui::Color32::from_rgb(0x46, 0x8c, 0xf0),
-    focus_border: egui::Color32::WHITE,
-};
 
 /// The item currently playing.
 struct PlayingItem {
@@ -220,16 +210,13 @@ enum GridState {
 }
 
 /// The grid's current target library and its resolution state, plus the
-/// browse focus/scroll state for the shared poster grid (reset per library).
+/// library screen's focus and scroll (reset per library).
 struct GridView {
     library_id: String,
     state: GridState,
-    /// Index of the focused tile, moved by D-pad / arrow keys.
-    focused: usize,
-    /// Columns the grid laid out last frame (set by `grid::draw`); used to step
-    /// focus by a row.
-    columns: usize,
-    scroll: grid::ScrollState,
+    /// The shared library screen, which owns its focus (moved by the D-pad,
+    /// which arrives as arrow keys) and its scroll.
+    view: LibraryView,
     /// Saved playback positions for this library, attached once its contents
     /// resolve. `None` when its "Resume playback" option is off — which is what
     /// turns the whole feature off: nothing is recorded and nothing offered.
@@ -238,11 +225,8 @@ struct GridView {
     /// has been attached yet — the library has to resolve first, so it cannot
     /// be done when the view is created.
     state_attached: bool,
-    /// The item the "continue watching" card is offering, until the viewer
-    /// answers it.
+    /// The item the "keep watching" row offers, until anything is played.
     resume_offer: Option<String>,
-    /// Focus state of that card.
-    prompt: prompt::ResumePrompt,
 }
 
 /// Mutable buffer behind the add-library form.
@@ -352,9 +336,12 @@ impl MediaApp {
         cache_dir: PathBuf,
     ) -> Self {
         cc.egui_ctx.set_visuals(tv_visuals());
-        // The shared poster grid renders thumbnails via egui's image widget,
+        // The shared library screen renders thumbnails via egui's image widget,
         // which needs egui_extras' loaders installed on the context.
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // The library screen and the player set their type in Baloo 2; the
+        // app's own screens keep egui's faces and the TV visuals above.
+        lunchbox_media_ui::theme::install_fonts(&cc.egui_ctx);
         let (settings, status) = match AppSettings::load(&settings_path) {
             Ok(s) => (s, None),
             Err(e) => (
@@ -669,7 +656,7 @@ impl MediaApp {
             && let GridState::Loaded(lib) = &mut g.state
         {
             lib.items.reverse();
-            g.focused = 0;
+            g.view = LibraryView::new();
         }
 
         // Same for "Resume playback" and "Skip sponsors", which are attached
@@ -1049,13 +1036,10 @@ impl MediaApp {
         self.grid = Some(GridView {
             library_id: library_id.to_string(),
             state,
-            focused: 0,
-            columns: 4,
-            scroll: grid::ScrollState::default(),
+            view: LibraryView::new(),
             resume: None,
             state_attached: false,
             resume_offer: None,
-            prompt: prompt::ResumePrompt::new(),
         });
     }
 
@@ -1108,8 +1092,11 @@ impl MediaApp {
         let mut tracker = ResumeTracker::new(store);
         let ids: Vec<&str> = lib.items.iter().map(|i| i.id.as_str()).collect();
         tracker.retain_known(ids.iter().copied());
+        // Only an item left partway through: one watched to the end has
+        // nothing to continue.
         g.resume_offer = tracker
             .last_item_in(ids.iter().copied())
+            .filter(|id| tracker.start_position(id).is_some())
             .map(str::to_string);
         g.resume = Some(tracker);
     }
@@ -1221,7 +1208,7 @@ impl MediaApp {
             .unwrap_or_else(|| library_id.to_string());
 
         // Loading / failed render simply; a loaded library uses the shared
-        // poster grid (the same view as the Linux binary).
+        // library screen (the same view as the Linux binary).
         let loaded = matches!(
             self.grid.as_ref().map(|g| &g.state),
             Some(GridState::Loaded(_))
@@ -1248,65 +1235,56 @@ impl MediaApp {
             self.attach_library_state(library_id);
         }
 
-        // Move the focus index with the D-pad / arrow keys (the grid tiles are
-        // custom-painted, so they don't use egui's own focus), then draw. The
-        // center button (Enter) and a tap both select the focused/clicked item.
-        // While the "continue watching" card is up it is modal: the grid still
-        // paints as its backdrop but takes no input.
-        let offering = self.grid.as_ref().is_some_and(|g| g.resume_offer.is_some());
+        // The library screen reads the D-pad (arrow keys) and the centre button
+        // (Enter) itself, and a tap plays what it lands on.
         let mut selected: Option<String> = None;
         {
             let posters = &self.posters;
             if let Some(g) = self.grid.as_mut()
                 && let GridState::Loaded(lib) = &g.state
             {
-                let n = lib.items.len();
-                if n > 0 {
-                    let cols = g.columns.max(1);
-                    if !offering {
-                        ui.input(|i| {
-                            if i.key_pressed(egui::Key::ArrowRight) {
-                                g.focused = (g.focused + 1).min(n - 1);
-                            }
-                            if i.key_pressed(egui::Key::ArrowLeft) {
-                                g.focused = g.focused.saturating_sub(1);
-                            }
-                            if i.key_pressed(egui::Key::ArrowDown) {
-                                g.focused = (g.focused + cols).min(n - 1);
-                            }
-                            if i.key_pressed(egui::Key::ArrowUp) {
-                                g.focused = g.focused.saturating_sub(cols);
-                            }
-                        });
-                    }
-                    g.focused = g.focused.min(n - 1);
-                    if !offering
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some(item) = lib.items.get(g.focused)
-                        && resolve_source(item, &PlatformInfo::current()).is_some()
-                    {
-                        selected = Some(item.id.clone());
-                    }
-                    let clicked = grid::draw(
-                        ui,
-                        &mut g.scroll,
-                        &title,
-                        &lib.items,
-                        &mut g.focused,
-                        &mut g.columns,
-                        &|id| match posters.get(id) {
+                let resume = g.resume.as_ref();
+                let hero = g
+                    .resume_offer
+                    .as_deref()
+                    .and_then(|id| lib.items.iter().find(|i| i.id == id))
+                    .and_then(|item| {
+                        let saved = resume?.saved(&item.id)?;
+                        Some(Hero {
+                            item,
+                            position: saved.position_seconds,
+                            duration: item
+                                .duration_seconds
+                                .map(|d| d as f64)
+                                .or(saved.duration_seconds),
+                        })
+                    });
+                selected = g.view.draw(
+                    ui,
+                    &library::Library {
+                        title: &title,
+                        items: &lib.items,
+                        hero,
+                        poster: &|id| match posters.get(id) {
                             Some(PosterSlot::Ready(b)) => Some(b.clone()),
                             _ => None,
                         },
-                    );
-                    if !offering && clicked.is_some() {
-                        selected = clicked;
-                    }
+                        progress: &|item| {
+                            let saved = resume?.saved(&item.id)?;
+                            let duration = item
+                                .duration_seconds
+                                .map(|d| d as f64)
+                                .or(saved.duration_seconds);
+                            library::watched_fraction(saved.position_seconds, duration)
+                        },
+                    },
+                );
+                if selected.is_some() {
+                    // Playing anything retires the "keep watching" row: it is
+                    // how the library opens, not something to come back to.
+                    g.resume_offer = None;
                 }
             }
-        }
-        if offering && let Some(id) = self.draw_resume_prompt(ui) {
-            selected = Some(id);
         }
         if let Some(id) = selected {
             self.start_playback(ui.ctx(), &id);
@@ -1314,48 +1292,6 @@ impl MediaApp {
             self.maybe_prefetch_focused(ui.ctx());
         }
         None
-    }
-
-    /// Draw the "continue watching" card over the grid. Returns the item to
-    /// play when the viewer accepts the offer.
-    ///
-    /// The card handles its own pointer and keyboard input — and on a TV the
-    /// remote's D-pad and centre button arrive as arrow keys and Enter — so
-    /// there is nothing extra to wire up here.
-    fn draw_resume_prompt(&mut self, ui: &mut egui::Ui) -> Option<String> {
-        let rect = ui.max_rect();
-        let g = self.grid.as_mut()?;
-        let item_id = g.resume_offer.clone()?;
-        let GridState::Loaded(lib) = &g.state else {
-            return None;
-        };
-        let item = lib.items.iter().find(|i| i.id == item_id)?;
-        let title = item.title.clone();
-        let duration = item.duration_seconds.map(|d| d as f64);
-        let position = g
-            .resume
-            .as_ref()
-            .and_then(|tracker| tracker.start_position(&item_id));
-
-        match g
-            .prompt
-            .draw(ui, rect, &title, position, duration, &PROMPT_THEME)
-        {
-            prompt::PromptAction::None => None,
-            prompt::PromptAction::Resume => {
-                g.resume_offer = None;
-                Some(item_id)
-            }
-            prompt::PromptAction::Dismiss => {
-                g.resume_offer = None;
-                // Leave the grid focus on the item that was offered: it is
-                // still the most likely thing the viewer wants.
-                if let Some(idx) = lib.items.iter().position(|i| i.id == item_id) {
-                    g.focused = idx;
-                }
-                None
-            }
-        }
     }
 
     /// Resolve the platform source for `item_id` in the loaded library, prefer a
@@ -1735,11 +1671,16 @@ impl MediaApp {
             return;
         }
         // The focused index and item count (grid must be loaded and non-empty).
-        let (focused, n) = match self.grid.as_ref().map(|g| &g.state) {
-            Some(GridState::Loaded(lib)) if !lib.items.is_empty() => {
-                (self.grid.as_ref().unwrap().focused, lib.items.len())
+        let focused = self.grid.as_ref().and_then(|g| match &g.state {
+            GridState::Loaded(lib) => {
+                let id = g.view.focused_item()?;
+                Some((lib.items.iter().position(|i| i.id == id)?, lib.items.len()))
             }
-            _ => {
+            _ => None,
+        });
+        let (focused, n) = match focused {
+            Some(found) => found,
+            None => {
                 self.prefetch_focus = None;
                 return;
             }
@@ -2091,11 +2032,6 @@ impl eframe::App for MediaApp {
             // dismiss it ourselves below.
             let popup_was_open = egui::Popup::is_any_open(ui.ctx());
 
-            // Same idea for the "continue watching" card: it consumes BACK to
-            // dismiss itself, so BACK must not also leave the library behind it.
-            let prompt_was_open = matches!(self.screen, Screen::Grid(_))
-                && self.grid.as_ref().is_some_and(|g| g.resume_offer.is_some());
-
             // Only the add-library form has text fields; clear the flag so it
             // never lingers true on a screen that can't have a focused field.
             self.text_field_focused = false;
@@ -2121,8 +2057,6 @@ impl eframe::App for MediaApp {
                 // BACK first dismisses an open popup (the Source dropdown) rather
                 // than leaving the screen behind it.
                 egui::Popup::close_all(ui.ctx());
-            } else if next.is_none() && back && prompt_was_open {
-                // Already dismissed by the card itself; swallow the press.
             } else if next.is_none() && back && self.text_field_focused {
                 // BACK from inside a text field leaves the field, not the screen;
                 // a second BACK then navigates up as usual. Focus falls back to
