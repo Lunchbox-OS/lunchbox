@@ -60,7 +60,7 @@ jobs:
     # this and produced an invalid `:tag`-only ref. GitHub does propagate it;
     # kept job-level so the two forges behave identically.
     env:
-      CI_IMAGE_NAME: ghcr.io/aarmea/lunchbox-ci
+      CI_IMAGE_NAME: ghcr.io/lunchbox-os/lunchbox-ci
     steps:
       - uses: actions/checkout@v4
 
