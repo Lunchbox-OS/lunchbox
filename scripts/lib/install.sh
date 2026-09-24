@@ -97,6 +97,12 @@ SESSION_GUARD_RULES_NAME="50-lunchbox-session-guard.rules"
 # device still joins networks it knows; saving a new one is refused, and
 # lunchboxd raises wifi_config_unavailable naming this file.
 NETWORK_RULES_NAME="50-lunchbox-network.rules"
+# How the custodian forgets a network on a netplan system (issue #194): a root
+# oneshot, started per profile, that removes the one definition instead of
+# letting NetworkManager's delete rewrite every file in /etc/netplan. The same
+# rules file grants the custodian `start` on this template and nothing else.
+WIFI_FORGET_PATH="/usr/libexec/lunchbox-wifi-forget"
+WIFI_FORGET_UNIT="lunchbox-wifi-forget@.service"
 
 # The file names lunchbox's protected files have, and what happens to each when
 # a device gains or loses the custodian.
@@ -924,16 +930,19 @@ install_state() {
 
     require_root
 
-    local bin_src
+    local bin_src forget_src
     bin_src="$(get_target_dir "$release")/lunchbox-stated"
-    if [[ ! -x "$bin_src" ]]; then
+    forget_src="$(get_target_dir "$release")/lunchbox-wifi-forget"
+    local src
+    for src in "$bin_src" "$forget_src"; do
+        [[ -x "$src" ]] && continue
         if [[ "$release" == "true" ]]; then
-            die "lunchbox-stated not found at $bin_src; run 'lunchbox build --release' first"
+            die "$(basename "$src") not found at $src; run 'lunchbox build --release' first"
         else
-            die "lunchbox-stated not found at $bin_src; run 'cargo build --bin lunchbox-stated' first"
+            die "$(basename "$src") not found at $src; run 'cargo build --bin $(basename "$src")' first"
         fi
-    fi
-    for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT"; do
+    done
+    for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT" "$WIFI_FORGET_UNIT"; do
         [[ -f "$repo_root/dist/systemd/$unit" ]] \
             || die "systemd unit missing at $repo_root/dist/systemd/$unit"
     done
@@ -947,8 +956,11 @@ install_state() {
     info "Installing state custodian to $destdir$STATED_PATH..."
     ensure_dir "$(dirname "$destdir$STATED_PATH")" 0755
     install -m 0755 -o root -g root "$bin_src" "$destdir$STATED_PATH"
+    # Runs as root, started by the custodian through the rule installed below.
+    info "Installing Wi-Fi forget helper to $destdir$WIFI_FORGET_PATH..."
+    install -m 0755 -o root -g root "$forget_src" "$destdir$WIFI_FORGET_PATH"
 
-    for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT"; do
+    for unit in "$STATED_SOCKET_UNIT" "$STATED_SERVICE_UNIT" "$WIFI_FORGET_UNIT"; do
         info "Installing $unit to $destdir$STATED_UNIT_DIR/..."
         ensure_dir "$destdir$STATED_UNIT_DIR" 0755
         install -m 0644 -o root -g root "$repo_root/dist/systemd/$unit" \
@@ -1710,6 +1722,8 @@ uninstall_state() {
     remove_path "$destdir$STATED_PATH"
     remove_path "$destdir$STATED_UNIT_DIR/$STATED_SOCKET_UNIT"
     remove_path "$destdir$STATED_UNIT_DIR/$STATED_SERVICE_UNIT"
+    remove_path "$destdir$WIFI_FORGET_PATH"
+    remove_path "$destdir$STATED_UNIT_DIR/$WIFI_FORGET_UNIT"
     # The authority goes with the daemon that held it (issue #172). Leaving it
     # behind would be leaving a uid the right to end sessions after the only
     # thing that had a reason to do so is gone.

@@ -1,0 +1,62 @@
+# Forget one saved Wi-Fi network, for the state custodian (issue #194).
+#
+# The instance is the profile's UUID. The custodian starts
+# `lunchbox-wifi-forget@<uuid>.service` over systemd's D-Bus API, which
+# `dist/polkit/50-lunchbox-network.rules` lets it do for this template and the
+# `start` verb only. See `crates/lunchbox-wifi-forget/README.md`.
+#
+# Why this runs as root instead of the custodian asking NetworkManager to
+# delete the profile: on Ubuntu, NetworkManager's delete makes netplan rewrite
+# every file in /etc/netplan from what it parsed, which strips every comment
+# and can unlink a file lunchbox never wrote (measured, docs/ai/history
+# 2026-09-21 004). Removing just the one definition means writing
+# /etc/netplan, which is root's; and telling NetworkManager afterwards means
+# LoadConnections, which NetworkManager's D-Bus policy admits from root alone.
+#
+# It is strictly less than what the custodian already holds: the
+# `settings.modify.system` grant lets it delete any profile, and this deletes
+# one Wi-Fi profile by UUID.
+
+[Unit]
+Description=Forget a saved Wi-Fi network for lunchbox (%i)
+Documentation=https://github.com/Lunchbox-OS/lunchbox/issues/194
+# NetworkManager is what finally drops the profile, and the only thing that
+# makes this worth running.
+Requisite=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/lunchbox-wifi-forget %i
+TimeoutStartSec=60
+
+# Sandboxing. What it touches, traced on 26.04: the netplan YAML under
+# /etc/netplan (and /run/netplan, if a definition is there), the files
+# `netplan/configure --networkmanager-only` regenerates under /run, a lock under
+# /run/lock, and the system bus. Nothing else.
+ProtectSystem=strict
+ReadWritePaths=/etc/netplan /run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Root still, but only root's ownership of files: keeping a rewritten file's
+# owner, and writing into directories root owns.
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0077

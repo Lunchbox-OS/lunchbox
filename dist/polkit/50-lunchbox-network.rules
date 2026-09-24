@@ -57,9 +57,23 @@
 // no management UI ever shows a saved password. They are write-only from every
 // direction a parent or a child can reach.
 //
+// ## Forgetting a network, which goes through systemd
+//
+// The second rule lets the custodian start `lunchbox-wifi-forget@<uuid>.service`
+// and nothing else: `start`, not stop or restart or enable, and a unit name
+// whose instance must be a canonical UUID. That unit runs as root and removes
+// one Wi-Fi definition from /etc/netplan.
+//
+// It exists because NetworkManager's own delete cannot be used on Ubuntu: it
+// makes netplan rewrite every file in /etc/netplan from what it parsed, which
+// strips every comment and can unlink a file Lunchbox never wrote -- the
+// installer's `00-installer-config.yaml`, once. It is strictly less than the
+// first rule already grants, which lets this uid delete any profile at all.
+// See `crates/lunchbox-wifi-forget/README.md`.
+//
 // Without this rule the device still boots, still joins networks it already
 // knows, and still shows what is in range. What stops working is saving a new
-// one. The custodian checks for the rule at startup and `lunchboxd` raises the
+// one, and forgetting one. The custodian checks for the rule at startup and `lunchboxd` raises the
 // `Warning` diagnostic `wifi_config_unavailable`, which names this file --
 // because a form that accepts a password and silently drops it is worse than
 // one that says up front it cannot help.
@@ -68,6 +82,16 @@ polkit.addRule(function(action, subject) {
     if ((action.id === "org.freedesktop.NetworkManager.settings.modify.system" ||
          action.id === "org.freedesktop.NetworkManager.network-control") &&
         subject.user === "lunchbox-state") {
+        return polkit.Result.YES;
+    }
+});
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        subject.user === "lunchbox-state" &&
+        action.lookup("verb") === "start" &&
+        /^lunchbox-wifi-forget@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.service$/
+            .test(action.lookup("unit"))) {
         return polkit.Result.YES;
     }
 });

@@ -748,11 +748,22 @@ Consequences worth knowing before you debug a device:
   ones; what keeps it narrow is the custodian's socket, which accepts a typed
   join request and two UUIDs and never a settings dictionary.
 
+  Forgetting a network does not use NetworkManager's delete on Ubuntu. That
+  delete makes netplan rewrite every file in `/etc/netplan` from what it
+  parsed, which strips every comment and can remove a file outright — the
+  installer's `00-installer-config.yaml`, once. Instead the custodian starts
+  `lunchbox-wifi-forget@<uuid>.service`, a root oneshot
+  (`/usr/libexec/lunchbox-wifi-forget`) that removes that one definition and
+  leaves every other byte of every file alone. The same rules file lets the
+  custodian **start** that unit template, and nothing else in systemd. If the
+  helper cannot remove a definition safely, it changes nothing and says why in
+  `journalctl -u lunchbox-wifi-forget@<uuid>`.
+
   Without the rule the device still boots, still shows what is in range, and
   still joins networks it already knows — activating a saved profile needs
   only `network-control`, which an active local session already has. What
-  stops working is saving a new one, and the device says so with the `Warning`
-  diagnostic `wifi_config_unavailable`.
+  stops working is saving a new one and forgetting one, and the device says so
+  with the `Warning` diagnostic `wifi_config_unavailable`.
 
   Consequence for debugging: on a device you cannot pause or restart `lunchboxd`
   in place. Attaching a debugger that stops it ends the session, exactly as a
@@ -923,8 +934,9 @@ local edits an upgrade will preserve or ask you about. That is deliberate.
   verified as it is written. A preserved local copy would carry an unverified
   config across upgrades forever, which is why site config belongs in
   `/etc/sway/lunchbox.conf.d/*.conf` — left unmanaged on purpose — instead.
-- `/etc/systemd/system/lunchbox-stated@.{service,socket}` are Lunchbox's units,
-  pinned against the daemon's own constants by a test in the repository. A
+- `/etc/systemd/system/lunchbox-stated@.{service,socket}` and
+  `lunchbox-wifi-forget@.service` are Lunchbox's units, pinned against the
+  daemons' own constants and the polkit rule by tests in the repository. A
   surviving local edit would break the state custodian quietly.
 - `/etc/systemd/system/bluetooth.service.d/10-lunchbox-bluetooth-experimental.conf`
   is written by the postinst, because its `ExecStart` has to name *this*
