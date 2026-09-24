@@ -10,7 +10,7 @@ manage a source installation.
 
 ## Installing from the apt repository
 
-Prebuilt amd64 packages are published to Lunchbox's own apt repository, so you
+Prebuilt amd64 and arm64 packages are published to Lunchbox's own apt repository, so you
 can install and then `apt upgrade` on future releases. Add the
 repository's signing key and source list once (prereleases are deliberately not
 published here, so `apt upgrade` only tracks stable versions):
