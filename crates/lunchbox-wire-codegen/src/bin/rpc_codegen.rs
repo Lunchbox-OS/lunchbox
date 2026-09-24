@@ -434,7 +434,13 @@ fn kotlin_json_value(param: &Param, expr: &str, defs: &Map<String, Value>) -> St
                  kotlin_json_value to encode it",
                 param.name
             ),
-            RustType::Named(name) if is_kotlin_enum(name, defs) => {
+            // An enum or a data class both render as a `@Serializable`
+            // declaration with a generated serializer, and both have to go
+            // through it: `JsonPrimitive` takes a String, Number or Boolean,
+            // and handing it anything else fails to compile with
+            // "Cannot access 'constructor(): JsonPrimitive': it is protected",
+            // which names neither the parameter nor the method.
+            RustType::Named(name) if is_kotlin_serializable(name, defs) => {
                 format!("LunchboxJson.encodeToJsonElement({name}.serializer(), {value})")
             }
             // Everything else is a primitive, or a newtype over a string that
@@ -450,14 +456,25 @@ fn kotlin_json_value(param: &Param, expr: &str, defs: &Map<String, Value>) -> St
     }
 }
 
-/// Whether the wire schema describes `name` as an enum, which `kotlin_types`
-/// renders as an `enum class` needing its serializer — as opposed to a newtype
+/// Whether `kotlin_types` renders `name` as a declaration with a generated
+/// serializer — an `enum class` or a `data class` — as opposed to a newtype
 /// over a string, which it renders as a transparent `typealias`.
-fn is_kotlin_enum(name: &str, defs: &Map<String, Value>) -> bool {
+///
+/// The data-class half arrived with the first RPC method to take a struct
+/// parameter (`wifi_save`, issue #194). Until then every parameter was a
+/// primitive or an enum, so the struct case had no coverage and the generator
+/// emitted `JsonPrimitive(request)` — which does not compile, and says so in
+/// terms that name neither the method nor the field.
+fn is_kotlin_serializable(name: &str, defs: &Map<String, Value>) -> bool {
     let Some(def) = defs.get(name) else {
         return false;
     };
-    def.get("enum").is_some() || def.get("oneOf").is_some()
+    if def.get("enum").is_some() || def.get("oneOf").is_some() {
+        return true;
+    }
+    // A struct: an object with properties. A newtype over a string has
+    // `"type": "string"` and no properties, and stays a typealias.
+    def.get("type").and_then(Value::as_str) == Some("object") && def.get("properties").is_some()
 }
 
 // ---------------------------------------------------------------------------
