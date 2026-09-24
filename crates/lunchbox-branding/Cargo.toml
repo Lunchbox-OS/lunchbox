@@ -3,7 +3,7 @@ name = "lunchbox-branding"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The Lunchbox design tokens, as Rust, for the launcher and the HUD"
+description = "The Lunchbox design tokens, as Rust, for the launcher, the HUD and the media app"
 
 [dependencies]
 

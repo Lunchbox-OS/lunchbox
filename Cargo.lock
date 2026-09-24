@@ -3296,6 +3296,7 @@ version = "0.5.1"
 dependencies = [
  "egui",
  "glow",
+ "lunchbox-branding",
  "lunchbox-media-core",
 ]
 
