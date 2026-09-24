@@ -3,7 +3,7 @@ name = "lunchbox-firewall-bpf"
 # Excluded from the workspace (see below), so it can't use version.workspace.
 # Kept in sync with the repo-root VERSION file by `lunchbox version set` and
 # checked by `lunchbox version check`. Don't hand-edit — bump via the tool.
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 license = "GPL-3.0"
 publish = false
