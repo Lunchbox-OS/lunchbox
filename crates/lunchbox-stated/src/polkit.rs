@@ -109,6 +109,16 @@ pub async fn may_end_sessions(conn: &zbus::Connection) -> Authority {
 }
 
 async fn check(conn: &zbus::Connection) -> Result<bool> {
+    check_action(conn, ACTION).await
+}
+
+/// Ask polkit whether this daemon holds `action`, without interaction.
+///
+/// Shared with the wireless grant (issue #194), which asks the same question
+/// about a different action. `is_challenge` counts as a refusal: it means
+/// polkit would prompt, and with no interaction allowed and no agent to prompt
+/// with, that is a refusal wearing a different word.
+pub async fn check_action(conn: &zbus::Connection, action: &str) -> Result<bool> {
     let unique = conn
         .unique_name()
         .context("this connection has no unique name to identify it by")?
@@ -121,8 +131,8 @@ async fn check(conn: &zbus::Connection) -> Result<bool> {
         details: HashMap::from([("name", Value::from(unique))]),
     };
     let result = authority
-        .check_authorization(&subject, ACTION, HashMap::new(), 0, "")
+        .check_authorization(&subject, action, HashMap::new(), 0, "")
         .await
-        .context("asking polkit about org.freedesktop.login1.manage")?;
+        .with_context(|| format!("asking polkit about {action}"))?;
     Ok(result.is_authorized && !result.is_challenge)
 }
