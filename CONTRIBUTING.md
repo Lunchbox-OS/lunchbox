@@ -728,6 +728,20 @@ Then commit `VERSION`, `Cargo.toml`, `Cargo.lock`, and
 `lunchbox-webui/package*.json` together. CI runs `lunchbox version check` to
 fail the build if any literal is edited by hand and drifts out of sync.
 
+### Release signing
+
+Two separate keys sign what a release publishes. The **Android release
+keystore** signs the APKs (`LUNCHBOX_KEYSTORE_B64` and the three secrets beside
+it, used by the `apk` job). The **archive signing key** signs the apt
+repository index at <https://apt.lunchbox-os.com> and the detached `.asc`
+beside each `.deb`; it is an Ed25519 key whose signing subkey — and only its
+signing subkey — lives in the `release` environment's secrets.
+
+[docs/release-signing.md](./docs/release-signing.md) is the runbook: the
+one-time key ceremony with exact `gpg` commands, the `gh` calls that create the
+environment and its secrets, how the publish job uses them, what a user runs to
+verify a download, and what a compromise recovery looks like.
+
 ## Contribution guidelines
 
 Lunchbox is licensed under the GPLv3 to preserve end-users' rights.
