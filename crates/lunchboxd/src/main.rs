@@ -20,8 +20,8 @@ use lunchbox_config::load_config;
 use lunchbox_core::{BeginStopDecision, CoreEngine, CoreEvent};
 use lunchbox_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
-    HudLayoutController, LightSensor, NetworkInfoProvider, NoOpDisplayController,
-    StopMode as HostStopMode, VolumeController,
+    HudLayoutController, LightSensor, NetworkInfoProvider, StopMode as HostStopMode,
+    VolumeController,
 };
 use lunchbox_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxNetworkInfo,
@@ -255,6 +255,8 @@ struct ReloadTargets {
     file_manager: tokio::sync::watch::Sender<Arc<lunchbox_config::FileManagerConfig>>,
     /// The global HUD edge (issue #244).
     hud_layout: Arc<HudLayout>,
+    /// Docking (issue #245).
+    display: Arc<DisplayManager>,
 }
 
 impl ReloadTargets {
@@ -272,6 +274,10 @@ impl ReloadTargets {
             .file_manager
             .send(Arc::new(policy.service.file_manager.clone()));
         self.hud_layout.set_global(policy.hud_orientation).await;
+        let display = &policy.service.display;
+        self.display
+            .configure(display.docking_enabled, display.mirror_audio)
+            .await;
     }
 }
 
@@ -1563,29 +1569,23 @@ impl Service {
         let brightness = self.brightness.clone();
         let light_sensor = self.light_sensor.clone();
         let store = self.store.clone();
-        // External monitor / docking controller (issue #87). When docking is
-        // disabled in config, a no-op controller is used so the management RPCs
-        // still resolve. When enabled, the real `DisplayManager` is also handed
-        // to a hotplug watcher and initialized below, and to the HiDPI workaround
-        // so the two output-mutating controllers coordinate (the HiDPI apply /
-        // restore re-asserts the mirror).
+        // External monitor / docking controller (issue #87). Built whether or
+        // not docking is enabled, so a config reload can turn it on or off
+        // (issue #245); while it is off the manager leaves the outputs alone.
+        // It is handed to a hotplug watcher and initialized below, and to the
+        // HiDPI workaround so the two output-mutating controllers coordinate
+        // (the HiDPI apply / restore re-asserts the mirror).
         let display_cfg = { engine.lock().await.policy().service.display.clone() };
-        let (display_svc, display_manager): (
-            Arc<dyn DisplayController>,
-            Option<Arc<DisplayManager>>,
-        ) = if display_cfg.docking_enabled {
-            let mgr = Arc::new(DisplayManager::new(
-                Arc::new(SwayIpcBackend),
-                Arc::new(WlMirrorLauncher::new()),
-                Arc::new(PipeWireAudioRouter::new()),
-                display_cfg.mirror_audio,
-                ipc_ref.clone(),
-                event_tx.clone(),
-            ));
-            (mgr.clone() as Arc<dyn DisplayController>, Some(mgr))
-        } else {
-            (Arc::new(NoOpDisplayController), None)
-        };
+        let display_manager = Arc::new(DisplayManager::new(
+            Arc::new(SwayIpcBackend),
+            Arc::new(WlMirrorLauncher::new()),
+            Arc::new(PipeWireAudioRouter::new()),
+            display_cfg.docking_enabled,
+            display_cfg.mirror_audio,
+            ipc_ref.clone(),
+            event_tx.clone(),
+        ));
+        let display_svc = display_manager.clone() as Arc<dyn DisplayController>;
 
         // The hidpi manager owns both the IPC server handle and the SSE
         // broadcast channel so it can fan `HudScaleChanged` events out to
@@ -1596,7 +1596,7 @@ impl Service {
         let hidpi = Arc::new(XwaylandHidpi::new(
             ipc_ref.clone(),
             event_tx.clone(),
-            display_manager.clone(),
+            Some(display_manager.clone()),
         ));
 
         // HUD placement (issue #171). Same shape and the same reasons as the
@@ -1638,6 +1638,7 @@ impl Service {
             host: host.clone(),
             file_manager: file_manager_tx,
             hud_layout: hud_layout.clone(),
+            display: display_manager.clone(),
         };
 
         // The web listener's real state (issue #182), created before the
@@ -2101,10 +2102,10 @@ impl Service {
 
         // Initialize the display arrangement (detect primary, mirror any already
         // connected external) and watch for hotplug events (issue #87).
-        if let Some(mgr) = display_manager {
-            let init_mgr = mgr.clone();
+        {
+            let init_mgr = display_manager.clone();
             tokio::spawn(async move { init_mgr.initialize().await });
-            display_watch::spawn(mgr, shutdown_rx.clone()).await;
+            display_watch::spawn(display_manager.clone(), shutdown_rx.clone()).await;
         }
 
         // The peer allow-list was decided at construction, before there was
