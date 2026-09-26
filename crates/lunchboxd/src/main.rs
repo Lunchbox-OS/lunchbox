@@ -119,6 +119,7 @@ mod system_events;
 use display::{DisplayManager, WlMirrorLauncher};
 use hidpi::XwaylandHidpi;
 use hud_layout::HudLayout;
+use policy_reloads::PolicyReloads;
 
 /// How often to re-read the PipeWire audio topology (issue #124).
 ///
@@ -1795,16 +1796,40 @@ impl Service {
         // Automatic-brightness poll loop: sample the light sensor on a timer
         // and let the service decide whether to nudge the backlight. Runs only
         // when a sensor exists; ticks are cheap no-ops while auto is off.
+        // The sampling interval follows config reloads (issue #246); the curve
+        // and limits are read from the live policy on every tick already.
         if light_sensor_opt.is_some() {
             let svc_for_auto = svc_concrete.clone();
             let mut auto_shutdown_rx = shutdown_rx.clone();
-            let poll_interval = auto_brightness_policy.poll_interval;
+            let mut poll_interval = auto_brightness_policy.poll_interval;
+            let engine_for_auto = engine.clone();
+            let mut reloads = PolicyReloads::subscribe(&event_tx);
             tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(poll_interval);
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let ticker_for = |period| {
+                    let mut ticker = tokio::time::interval(period);
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    ticker
+                };
+                let mut ticker = ticker_for(poll_interval);
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => svc_for_auto.auto_brightness_tick().await,
+                        reload = reloads.next() => match reload {
+                            Some(()) => {
+                                let next = engine_for_auto
+                                    .lock()
+                                    .await
+                                    .policy()
+                                    .auto_brightness
+                                    .poll_interval;
+                                if next != poll_interval {
+                                    info!(poll_secs = next.as_secs(), "Auto-brightness poll interval changed");
+                                    poll_interval = next;
+                                    ticker = ticker_for(next);
+                                }
+                            }
+                            None => break,
+                        },
                         _ = auto_shutdown_rx.changed() => {
                             if *auto_shutdown_rx.borrow() {
                                 break;
