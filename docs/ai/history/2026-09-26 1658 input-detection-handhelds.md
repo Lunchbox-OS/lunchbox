@@ -92,3 +92,42 @@ classifying, since (1) and (2) depend on the other devices present.
 
 Not verified on the handheld itself: the dev machine is a QEMU VM. The
 classification is unit-tested against the Legion Go S device set above.
+
+## Follow-up in the same PR: other reload bugs of the same shape (#188, #243)
+
+Prompt: "hm #188 seems related to keeping the input monitor alive -- does this
+change address that too?", then "check to see if there are any other latent
+bugs that have the same shape", then "file issues for 1-4 and the docs gap",
+then "fix #188 and #243 -- do both here in this PR, maybe there's some logic
+that can be shared between the implementations".
+
+The audit compared everything lunchboxd derives from the boot policy against
+what `handle_config_reload` refreshes. It filed #243 (Steam preload, readiness
+gate and `[service.steam]`), #244 (global HUD orientation), #245
+(`[service.display]`), #246 (auto-brightness poll interval) and #247 (settings
+that need a restart, undocumented).
+
+What the fixes share:
+
+* `Policy::internet_check_targets()` gives one list of targets. The monitor
+  probes it and the engine reports it, so the two can't drift apart. #188 was
+  exactly that drift.
+* `PolicyReloads` (`crates/lunchboxd/src/policy_reloads.rs`) wakes a
+  background task on `PolicyReloaded`, treating a lagged subscription as a
+  reload. Tasks re-read the policy from the engine when woken, so the engine
+  stays the only place the policy lives. Both monitors use it.
+* Steam has a different shape and doesn't use it: its gate has to be in place
+  before the post-reload snapshot goes out. So boot and reload both call one
+  `apply_steam_policy`, and the reload calls it under the same engine lock as
+  the policy swap. A task woken afterwards would let the launcher briefly show
+  the ungated entry.
+
+Verified #188 end to end in the headless session. Boot with `[service.internet]
+check = "tcp://127.0.0.1:9"` and `interval_seconds = 3600`, then edit the file to
+a local listener: `service_state` reports it available within a second. Editing
+it back reports `:9` unavailable and drops the old target. #243 is not verified
+end to end: Steam isn't installed on the dev VM, and `LinuxHost` spawns a real
+client, so there is no unit test either.
+
+Left out: #188's suggestion of a "not checked yet" state for a target that has
+not been probed. It changes the wire format and every display of the status.
