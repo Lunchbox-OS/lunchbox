@@ -69,6 +69,12 @@ pub fn connected_inputs() -> Option<HashSet<InputDeviceType>> {
     scan_connected_inputs()
 }
 
+/// Runs for the life of the daemon whatever the policy says, because a config
+/// reload can add the first `requires_input` entry (issue #236). A monitor
+/// built only for a policy that had one at boot never ran for an entry added
+/// later, leaving the engine with no detection report and the gate failing
+/// open. It re-scans as soon as a reload lands, and does not open
+/// `/dev/input` while no entry sets `requires_input`.
 pub struct InputMonitor {
     /// Whether we've already logged that detection is unavailable, so the
     /// periodic fallback re-scan doesn't spam the log every cycle.
@@ -76,14 +82,10 @@ pub struct InputMonitor {
 }
 
 impl InputMonitor {
-    /// Build a monitor only if some entry actually depends on an input device.
-    /// When no entry sets `requires_input`, there is nothing to gate, so we
-    /// avoid opening `/dev/input` entirely.
-    pub fn from_policy(policy: &Policy) -> Option<Self> {
-        let any_required = policy.entries.iter().any(|e| !e.requires_input.is_empty());
-        any_required.then_some(Self {
+    pub fn new() -> Self {
+        Self {
             warned_unavailable: false,
-        })
+        }
     }
 
     pub async fn run(
@@ -92,6 +94,10 @@ impl InputMonitor {
         ipc: Arc<IpcServer>,
         event_tx: broadcast::Sender<Event>,
     ) {
+        // Subscribed before the first scan, so a reload that lands while it
+        // runs is still seen.
+        let mut events = event_tx.subscribe();
+
         // Initial scan so the very first gating decision reflects real hardware.
         self.rescan_and_apply(&engine, &ipc, &event_tx).await;
 
@@ -129,19 +135,37 @@ impl InputMonitor {
                 _ = fallback.tick() => {
                     self.rescan_and_apply(&engine, &ipc, &event_tx).await;
                 }
-                else => break,
+                event = events.recv() => match event {
+                    Ok(Event { payload: EventPayload::PolicyReloaded { .. }, .. }) => {
+                        debug!("Re-scanning input devices after a config reload");
+                        self.rescan_and_apply(&engine, &ipc, &event_tx).await;
+                    }
+                    Ok(_) => {}
+                    // A missed event may have been a reload; a scan is cheap.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        self.rescan_and_apply(&engine, &ipc, &event_tx).await;
+                    }
+                    // The daemon is shutting down.
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
             }
         }
     }
 
     /// Scan `/dev/input`, push the connected set into the engine, and broadcast
-    /// a fresh state snapshot if the set changed.
+    /// a fresh state snapshot if the set changed. Does nothing while no entry
+    /// sets `requires_input`: there is nothing to gate, so `/dev/input` is not
+    /// opened.
     async fn rescan_and_apply(
         &mut self,
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
     ) {
+        if !any_entry_requires_input(engine.lock().await.policy()) {
+            return;
+        }
+
         // evdev enumeration opens and ioctls each device node; keep that off the
         // async runtime's worker threads.
         let scan = match tokio::task::spawn_blocking(scan_connected_inputs).await {
@@ -188,6 +212,10 @@ impl InputMonitor {
             let _ = event_tx.send(event);
         }
     }
+}
+
+fn any_entry_requires_input(policy: &Policy) -> bool {
+    policy.entries.iter().any(|e| !e.requires_input.is_empty())
 }
 
 /// Install an inotify-backed watcher on `/dev/input`. The returned watcher must

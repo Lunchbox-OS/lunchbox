@@ -57,7 +57,9 @@ The Lunchbox background service.
   When an entry declares `requires_input`, enumerates `/dev/input` via `evdev`
   to see which device types (mouse/touch/keyboard/gamepad) are connected, feeds
   the set into the engine, and re-broadcasts availability on hotplug (a `notify`
-  watch on `/dev/input` plus a slow fallback re-scan). Gates fail open when
+  watch on `/dev/input` plus a slow fallback re-scan). Runs for the daemon's
+  whole life and re-scans on config reload, so an entry that gains
+  `requires_input` by reload is gated at once. Gates fail open when
   `/dev/input` isn't readable. A keyboard or mouse that a game controller
   emulates on its own USB device — a handheld's built-in controller — does not
   count, and on a machine with such a controller built in (not on a removable

@@ -255,7 +255,7 @@ struct Service {
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
     internet_monitor: Option<internet::InternetMonitor>,
-    input_monitor: Option<input_devices::InputMonitor>,
+    input_monitor: input_devices::InputMonitor,
     media_prefetcher: media::MediaPrefetcher,
     /// What is currently wrong with this device, for an administrator (issue
     /// #143). Swept periodically and on config reload.
@@ -1090,9 +1090,11 @@ impl Service {
         // Initialize internet connectivity monitor (if configured)
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
-        // Initialize input-device dependency monitor (issue #96). Only runs when
-        // some entry declares `requires_input`.
-        let input_monitor = input_devices::InputMonitor::from_policy(engine.policy());
+        // Initialize input-device dependency monitor (issue #96). Constructed
+        // unconditionally, so a reload that adds the first `requires_input`
+        // entry has something to reach (issue #236); it scans only while some
+        // entry declares one.
+        let input_monitor = input_devices::InputMonitor::new();
         // Background media prefetch (issue #127). Constructed unconditionally,
         // including with no media entries configured: it re-reads policy each
         // sweep, so a reload that adds a media entry has something to reach.
@@ -2027,7 +2029,8 @@ impl Service {
         // types are connected and re-broadcasts availability on hotplug so
         // input-gated entries (e.g. a typing tutor requiring a keyboard) show and
         // hide as hardware is attached/removed.
-        if let Some(monitor) = self.input_monitor {
+        {
+            let monitor = self.input_monitor;
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
