@@ -40,7 +40,7 @@ import NoteAddIcon from "@mui/icons-material/NoteAdd";
 import RedoIcon from "@mui/icons-material/Redo";
 import SaveIcon from "@mui/icons-material/Save";
 import UndoIcon from "@mui/icons-material/Undo";
-import { ConfigDocProvider, useConfigDoc } from "./doc/ConfigDocProvider";
+import { ConfigDocProvider, useConfigDoc, useConfigDocLive } from "./doc/ConfigDocProvider";
 import { FilePickerProvider, type FilePicker } from "./pick/FilePicker";
 import type { Subject } from "./doc/patches";
 import { focusFor, type FocusRequest } from "./navigation";
@@ -104,11 +104,6 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
     view,
     report,
     document: doc,
-    dirty,
-    undo,
-    redo,
-    canUndo,
-    canRedo,
     openFrom,
     save,
     startBlank,
@@ -138,16 +133,6 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
     opened.current = true;
     void openFrom(source);
   }, [autoOpen, ready, openFrom, source]);
-
-  // Re-read the device, losing anything unsaved. Only offered for a source
-  // that can be re-read without a file picker, which is what `autoOpen`
-  // already means.
-  const reload = useCallback(() => {
-    if (dirty && !window.confirm("Discard your unsaved changes and re-read the device?")) {
-      return;
-    }
-    void openFrom(source);
-  }, [dirty, openFrom, source]);
 
   // The one thing that is about the deployment rather than the source: this
   // browser's inability to overwrite a file it opened is a local-files
@@ -230,9 +215,7 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
             // device now" — after an edit over SSH, or a save from another
             // browser.
             <Tooltip describeChild title="Re-read this device's config, discarding unsaved changes">
-              <Button size="small" startIcon={<RefreshIcon />} onClick={reload}>
-                Reload
-              </Button>
+              <ReloadButton source={source} />
             </Tooltip>
           )}
           {IS_STANDALONE && (
@@ -266,15 +249,9 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
               New
             </Button>
           )}
-          <Button
-            size="small"
-            variant="contained"
-            startIcon={<SaveIcon />}
-            disabled={!isLocalFiles && !dirty}
-            onClick={() => void onSave()}
-          >
+          <SaveButton needsChanges={!isLocalFiles} onSave={() => void onSave()}>
             {source.canSaveInPlace(doc) ? "Save" : "Download"}
-          </Button>
+          </SaveButton>
           {isLocalFiles && source.canSaveInPlace(doc) && (
             <Button size="small" onClick={() => save(source, true)}>
               Save as…
@@ -283,20 +260,7 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
 
           <Divider orientation="vertical" flexItem sx={{ mx: 1 }} />
 
-          <Tooltip title="Undo">
-            <span>
-              <IconButton size="small" onClick={undo} disabled={!canUndo} aria-label="Undo">
-                <UndoIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Tooltip title="Redo">
-            <span>
-              <IconButton size="small" onClick={redo} disabled={!canRedo} aria-label="Redo">
-                <RedoIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
+          <UndoRedo />
 
           <Box sx={{ flex: 1 }} />
 
@@ -304,7 +268,7 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
             <DescriptionIcon fontSize="small" color="disabled" />
             <Typography variant="body2" color="text.secondary">
               {doc.name ?? "Untitled"}
-              {dirty ? " •" : ""}
+              <DirtyMark />
             </Typography>
             <Chip
               size="small"
@@ -392,4 +356,80 @@ function ConfigShell({ source = fileSource, autoOpen = false, onClose }: ConfigA
       </Snackbar>
     </Box>
   );
+}
+
+// The toolbar's per-edit state, each in a component of its own. They read
+// `useConfigDocLive`, which changes on every keystroke; if the shell read it,
+// every keystroke would re-render the whole editor beneath it (issue #235).
+
+/**
+ * Re-read the device, losing anything unsaved. Only offered for a source that
+ * can be re-read without a file picker, which is what `autoOpen` already means.
+ */
+function ReloadButton({ source }: { source: ConfigSource }) {
+  const { openFrom } = useConfigDoc();
+  const { dirty } = useConfigDocLive();
+  const reload = () => {
+    if (dirty && !window.confirm("Discard your unsaved changes and re-read the device?")) {
+      return;
+    }
+    void openFrom(source);
+  };
+  return (
+    <Button size="small" startIcon={<RefreshIcon />} onClick={reload}>
+      Reload
+    </Button>
+  );
+}
+
+function SaveButton({
+  needsChanges,
+  onSave,
+  children,
+}: {
+  /** Disabled while there is nothing unsaved. */
+  needsChanges: boolean;
+  onSave: () => void;
+  children: React.ReactNode;
+}) {
+  const { dirty } = useConfigDocLive();
+  return (
+    <Button
+      size="small"
+      variant="contained"
+      startIcon={<SaveIcon />}
+      disabled={needsChanges && !dirty}
+      onClick={onSave}
+    >
+      {children}
+    </Button>
+  );
+}
+
+function UndoRedo() {
+  const { undo, redo } = useConfigDoc();
+  const { canUndo, canRedo } = useConfigDocLive();
+  return (
+    <>
+      <Tooltip title="Undo">
+        <span>
+          <IconButton size="small" onClick={undo} disabled={!canUndo} aria-label="Undo">
+            <UndoIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+      <Tooltip title="Redo">
+        <span>
+          <IconButton size="small" onClick={redo} disabled={!canRedo} aria-label="Redo">
+            <RedoIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+    </>
+  );
+}
+
+function DirtyMark() {
+  const { dirty } = useConfigDocLive();
+  return dirty ? " •" : null;
 }

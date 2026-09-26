@@ -17,10 +17,11 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirro
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { StreamLanguage } from "@codemirror/language";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
-import { useConfigDoc } from "../doc/ConfigDocProvider";
+import { useConfigDoc, useConfigDocLive } from "../doc/ConfigDocProvider";
 
 export function RawTomlPane() {
-  const { text, replaceText } = useConfigDoc();
+  const { replaceText } = useConfigDoc();
+  const { text } = useConfigDocLive();
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const [draft, setDraft] = useState<string | null>(null);

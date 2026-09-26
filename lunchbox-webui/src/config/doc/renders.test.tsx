@@ -73,20 +73,32 @@ vi.mock("../wasm/lunchbox_config", () => ({
   versions: () => JSON.stringify({ config_version: 1, crate_version: "0.0.0" }),
 }));
 
-const { ConfigDocProvider, useConfigDoc } = await import("./ConfigDocProvider");
+const { ConfigDocProvider, useConfigDoc, useConfigDocLive } = await import("./ConfigDocProvider");
 const { set } = await import("./patches");
 
 type Doc = ReturnType<typeof useConfigDoc>;
+type Live = ReturnType<typeof useConfigDocLive>;
 
-/** Counts its own renders, and hands out the context it last saw. */
-function probe() {
+/** Counts the renders of a component that reads only `useConfigDoc`. */
+function formProbe() {
   const seen = { renders: 0, doc: null as Doc | null };
-  function Probe() {
+  function Form() {
     seen.renders += 1;
     seen.doc = useConfigDoc();
     return null;
   }
-  return { seen, Probe };
+  return { seen, Form };
+}
+
+/** The same, for a component that reads `useConfigDocLive`. */
+function liveProbe() {
+  const seen = { renders: 0, live: null as Live | null };
+  function Toolbar() {
+    seen.renders += 1;
+    seen.live = useConfigDocLive();
+    return null;
+  }
+  return { seen, Toolbar };
 }
 
 /** Renders the provider and waits for the (stubbed) module to load. */
@@ -104,29 +116,55 @@ afterEach(() => {
 });
 
 describe("an edit", () => {
-  it("renders the editor once, not once for the version and again for the text", async () => {
-    const { seen, Probe } = probe();
-    await mount(<Probe />);
-    expect(seen.doc?.ready).toBe(true);
+  it("renders what shows the text once, not once for the version and again for the text", async () => {
+    const form = formProbe();
+    const toolbar = liveProbe();
+    await mount(
+      <>
+        <form.Form />
+        <toolbar.Toolbar />
+      </>,
+    );
+    expect(form.seen.doc?.ready).toBe(true);
 
-    seen.renders = 0;
-    act(() => seen.doc!.apply(set("entries", [])));
+    toolbar.seen.renders = 0;
+    act(() => form.seen.doc!.apply(set("entries", [])));
 
-    expect(seen.renders).toBe(1);
-    expect(seen.doc!.text).toContain("entries");
+    expect(toolbar.seen.renders).toBe(1);
+    expect(toolbar.seen.live!.text).toContain("entries");
+    expect(toolbar.seen.live!.canUndo).toBe(true);
+  });
+
+  it("leaves the forms alone until the projection they draw from changes", async () => {
+    const form = formProbe();
+    await mount(<form.Form />);
+
+    form.seen.renders = 0;
+    act(() => form.seen.doc!.apply(set("entries", [])));
+    expect(form.seen.renders).toBe(0);
+
+    act(() => vi.advanceTimersByTime(1000));
+    expect(form.seen.renders).toBe(1);
   });
 
   it("keeps the text in step through undo and redo", async () => {
-    const { seen, Probe } = probe();
-    await mount(<Probe />);
+    const form = formProbe();
+    const toolbar = liveProbe();
+    await mount(
+      <>
+        <form.Form />
+        <toolbar.Toolbar />
+      </>,
+    );
 
-    act(() => seen.doc!.apply(set("entries", [])));
-    const edited = seen.doc!.text;
+    act(() => form.seen.doc!.apply(set("entries", [])));
+    const edited = toolbar.seen.live!.text;
 
-    act(() => seen.doc!.undo());
-    expect(seen.doc!.text).toBe("config_version = 1\n");
+    act(() => form.seen.doc!.undo());
+    expect(toolbar.seen.live!.text).toBe("config_version = 1\n");
+    expect(toolbar.seen.live!.canRedo).toBe(true);
 
-    act(() => seen.doc!.redo());
-    expect(seen.doc!.text).toBe(edited);
+    act(() => form.seen.doc!.redo());
+    expect(toolbar.seen.live!.text).toBe(edited);
   });
 });

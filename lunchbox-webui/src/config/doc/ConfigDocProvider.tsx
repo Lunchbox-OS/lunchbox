@@ -38,6 +38,14 @@ function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * Everything but what changes on every keystroke.
+ *
+ * The forms draw from `view` and `report`, which are debounced, so an edit
+ * alone changes nothing here. That is what lets a keystroke re-render only the
+ * field being typed in rather than the whole editor (issue #235); what does
+ * change per edit is in `ConfigDocLive`, for the few controls that show it.
+ */
 interface ConfigDocContextValue {
   /** Null until the wasm module has loaded. */
   ready: boolean;
@@ -54,13 +62,9 @@ interface ConfigDocContextValue {
   view: RawConfig | null;
   /** Validation result, refreshed on the same debounce as `view`. */
   report: Report | null;
-  /** The live document text — exactly what would be saved. */
-  text: string;
 
   /** Metadata about where this document came from. */
   document: ConfigDocument;
-  /** True when the text differs from what was last opened or saved. */
-  dirty: boolean;
 
   apply: (patch: Patch, coalesceKey?: string) => void;
   endGesture: () => void;
@@ -68,10 +72,12 @@ interface ConfigDocContextValue {
 
   undo: () => void;
   redo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
 
-  /** Per-day availability spans, computed by the same code the daemon uses. */
+  /**
+   * Per-day availability spans, computed by the same code the daemon uses.
+   * Changes identity when `view` does, so it agrees with the windows drawn
+   * from the view beside it.
+   */
   availabilityFor: (
     subject: { kind: "entry" | "group"; id: string },
   ) => AvailabilityView | null;
@@ -85,11 +91,32 @@ interface ConfigDocContextValue {
   clearError: () => void;
 }
 
+/** What changes on every accepted edit. Read it only where it is shown. */
+interface ConfigDocLive {
+  /** The live document text — exactly what would be saved. */
+  text: string;
+  /** True when the text differs from what was last opened or saved. */
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
 const ConfigDocContext = createContext<ConfigDocContextValue | null>(null);
+const ConfigDocLiveContext = createContext<ConfigDocLive | null>(null);
 
 export function useConfigDoc(): ConfigDocContextValue {
   const ctx = useContext(ConfigDocContext);
   if (!ctx) throw new Error("useConfigDoc must be used inside ConfigDocProvider");
+  return ctx;
+}
+
+/**
+ * The per-edit half of the document. A component that reads this re-renders
+ * on every keystroke anywhere in the editor, so keep such components small.
+ */
+export function useConfigDocLive(): ConfigDocLive {
+  const ctx = useContext(ConfigDocLiveContext);
+  if (!ctx) throw new Error("useConfigDocLive must be used inside ConfigDocProvider");
   return ctx;
 }
 
@@ -208,9 +235,10 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
         return null;
       }
     },
-    // Recomputed whenever the document changes; callers memoize on `version`.
+    // Reads the document through the ref, so nothing here names `view`; it is
+    // what the identity should follow, all the same.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [version],
+    [view],
   );
 
   const openFrom = useCallback(async (source: ConfigSource) => {
@@ -262,16 +290,12 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       versions,
       view,
       report,
-      text,
       document,
-      dirty: text !== document.text,
       apply,
       endGesture,
       replaceText,
       undo,
       redo,
-      canUndo: docRef.current?.canUndo() ?? false,
-      canRedo: docRef.current?.canRedo() ?? false,
       availabilityFor,
       openFrom,
       save,
@@ -279,14 +303,28 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       error,
       clearError: () => setError(null),
     }),
-    // `version` is in the deps because canUndo/canRedo read through the ref,
-    // which React cannot observe on its own.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
-      ready, loadError, versions, view, report, text, document, version, error,
+      ready, loadError, versions, view, report, document, error,
       apply, endGesture, replaceText, undo, redo, availabilityFor, openFrom, save, startBlank,
     ],
   );
 
-  return <ConfigDocContext.Provider value={value}>{children}</ConfigDocContext.Provider>;
+  const live = useMemo<ConfigDocLive>(
+    () => ({
+      text,
+      dirty: text !== document.text,
+      canUndo: docRef.current?.canUndo() ?? false,
+      canRedo: docRef.current?.canRedo() ?? false,
+    }),
+    // `version` is in the deps because canUndo/canRedo read through the ref,
+    // which React cannot observe on its own.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [text, document, version],
+  );
+
+  return (
+    <ConfigDocContext.Provider value={value}>
+      <ConfigDocLiveContext.Provider value={live}>{children}</ConfigDocLiveContext.Provider>
+    </ConfigDocContext.Provider>
+  );
 }
