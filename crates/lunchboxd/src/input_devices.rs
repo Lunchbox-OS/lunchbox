@@ -290,6 +290,30 @@ impl DeviceCaps {
     }
 }
 
+/// One device the scan could open: what it is called and what it can do.
+///
+/// The scan records every device before deciding what any of them count as,
+/// because whether a device counts can depend on the others around it.
+#[derive(Debug, Clone, Default)]
+struct ScannedDevice {
+    name: String,
+    caps: DeviceCaps,
+}
+
+/// Which input device types a set of scanned devices adds up to.
+fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
+    let mut connected = HashSet::new();
+    for device in devices {
+        let mut types = HashSet::new();
+        device.caps.classify_into(&mut types);
+        if !types.is_empty() {
+            debug!(name = %device.name, ?types, "Classified input device");
+        }
+        connected.extend(types);
+    }
+    connected
+}
+
 /// Enumerate `/dev/input` and return the set of connected input device types.
 ///
 /// Returns `None` when not a single device could be enumerated — `evdev`
@@ -299,26 +323,13 @@ impl DeviceCaps {
 /// open. `Some(set)` (even an empty set) means devices were readable and the
 /// set is authoritative.
 fn scan_connected_inputs() -> Option<HashSet<InputDeviceType>> {
-    let mut connected = HashSet::new();
-    let mut seen_any = false;
-    for (path, dev) in evdev::enumerate() {
-        seen_any = true;
-        let caps = DeviceCaps::from_device(&dev);
-        let before = connected.len();
-        caps.classify_into(&mut connected);
-        if connected.len() != before {
-            debug!(
-                path = %path.display(),
-                name = %dev.name().unwrap_or(""),
-                "Classified input device"
-            );
-        }
-        if connected.len() == 4 {
-            // All four types seen; no need to keep opening devices.
-            break;
-        }
-    }
-    seen_any.then_some(connected)
+    let devices: Vec<ScannedDevice> = evdev::enumerate()
+        .map(|(_path, dev)| ScannedDevice {
+            name: dev.name().unwrap_or("").to_string(),
+            caps: DeviceCaps::from_device(&dev),
+        })
+        .collect();
+    (!devices.is_empty()).then(|| classify(&devices))
 }
 
 #[cfg(test)]
