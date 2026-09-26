@@ -113,6 +113,7 @@ mod input_devices;
 mod internet;
 mod media;
 mod pairing_display;
+mod policy_reloads;
 mod system_events;
 
 use display::{DisplayManager, WlMirrorLauncher};

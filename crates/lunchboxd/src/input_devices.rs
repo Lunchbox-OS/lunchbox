@@ -34,6 +34,8 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, info, warn};
 
+use crate::policy_reloads::PolicyReloads;
+
 /// Directory the kernel exposes input event devices under.
 const INPUT_DIR: &str = "/dev/input";
 
@@ -96,7 +98,7 @@ impl InputMonitor {
     ) {
         // Subscribed before the first scan, so a reload that lands while it
         // runs is still seen.
-        let mut events = event_tx.subscribe();
+        let mut reloads = PolicyReloads::subscribe(&event_tx);
 
         // Initial scan so the very first gating decision reflects real hardware.
         self.rescan_and_apply(&engine, &ipc, &event_tx).await;
@@ -135,18 +137,12 @@ impl InputMonitor {
                 _ = fallback.tick() => {
                     self.rescan_and_apply(&engine, &ipc, &event_tx).await;
                 }
-                event = events.recv() => match event {
-                    Ok(Event { payload: EventPayload::PolicyReloaded { .. }, .. }) => {
+                reload = reloads.next() => match reload {
+                    Some(()) => {
                         debug!("Re-scanning input devices after a config reload");
                         self.rescan_and_apply(&engine, &ipc, &event_tx).await;
                     }
-                    Ok(_) => {}
-                    // A missed event may have been a reload; a scan is cheap.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        self.rescan_and_apply(&engine, &ipc, &event_tx).await;
-                    }
-                    // The daemon is shutting down.
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    None => break,
                 },
             }
         }
