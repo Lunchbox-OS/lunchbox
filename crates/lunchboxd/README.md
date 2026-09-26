@@ -60,7 +60,8 @@ The Lunchbox background service.
   watch on `/dev/input` plus a slow fallback re-scan). Gates fail open when
   `/dev/input` isn't readable. A keyboard or mouse that a game controller
   emulates on its own USB device — a handheld's built-in controller — does not
-  count (issue #236).
+  count, and on a machine with such a controller built in (not on a removable
+  port), neither does the i8042 AT keyboard (issue #236).
 
 ## Usage
 

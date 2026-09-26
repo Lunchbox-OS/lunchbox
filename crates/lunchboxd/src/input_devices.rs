@@ -304,6 +304,13 @@ struct ScannedDevice {
     /// The sysfs directory of the USB device this node belongs to, when it is
     /// on USB (see [`usb_device_of`]).
     usb_device: Option<PathBuf>,
+    /// Whether the firmware marks that USB device's port as one a user plugs
+    /// things into. Firmware that does not know says so, which reads as
+    /// `false` here.
+    usb_removable: bool,
+    /// Whether the node is on the i8042 controller — the PS/2 keyboard and
+    /// pointer wired inside a laptop or handheld, never one attached later.
+    on_i8042: bool,
 }
 
 /// The sysfs directory of the USB device an input node belongs to, or `None`
@@ -327,6 +334,12 @@ fn usb_device_of(node: &Path, bus: BusType) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Whether sysfs marks a USB device as sitting on a user-facing port.
+fn usb_removable(usb_device: &Path) -> bool {
+    std::fs::read_to_string(usb_device.join("removable"))
+        .is_ok_and(|removable| removable.trim() == "removable")
+}
+
 /// Which input device types a set of scanned devices adds up to.
 ///
 /// A keyboard or mouse that shares its USB device with a gamepad is the
@@ -335,6 +348,14 @@ fn usb_device_of(node: &Path, bus: BusType) -> Option<PathBuf> {
 /// two full keyboards and a mouse alongside its gamepad, all on one USB
 /// device, as do the Steam Deck and ROG Ally — so counting them would satisfy
 /// `requires_input = "keyboard"` on a handheld with nothing attached.
+///
+/// The same handhelds also have an i8042 AT keyboard, which claims a full
+/// keymap whether or not any keys are wired to it. On a laptop that is the
+/// real keyboard, so it is only discounted on a handheld, recognised by a
+/// controller that emulates a keyboard or mouse on a USB device the firmware
+/// does not call removable — a built-in one. The one machine this misreads is
+/// a laptop with a Steam Controller's receiver in a port its firmware does
+/// not describe, which loses its built-in keyboard while the receiver is in.
 fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
     let controllers: HashSet<&Path> = devices
         .iter()
@@ -342,15 +363,29 @@ fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
         .filter_map(|device| device.usb_device.as_deref())
         .collect();
 
+    let classified: Vec<(&ScannedDevice, HashSet<InputDeviceType>, bool)> = devices
+        .iter()
+        .map(|device| {
+            let mut types = HashSet::new();
+            device.caps.classify_into(&mut types);
+            let emulated = device
+                .usb_device
+                .as_deref()
+                .is_some_and(|usb| controllers.contains(usb));
+            (device, types, emulated)
+        })
+        .collect();
+
+    let handheld = classified.iter().any(|(device, types, emulated)| {
+        *emulated
+            && !device.usb_removable
+            && (types.contains(&InputDeviceType::Keyboard)
+                || types.contains(&InputDeviceType::Mouse))
+    });
+
     let mut connected = HashSet::new();
-    for device in devices {
-        let mut types = HashSet::new();
-        device.caps.classify_into(&mut types);
-        if device
-            .usb_device
-            .as_deref()
-            .is_some_and(|usb| controllers.contains(usb))
-        {
+    for (device, mut types, emulated) in classified {
+        if emulated || (handheld && device.on_i8042) {
             types.remove(&InputDeviceType::Keyboard);
             types.remove(&InputDeviceType::Mouse);
         }
@@ -372,10 +407,16 @@ fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
 /// set is authoritative.
 fn scan_connected_inputs() -> Option<HashSet<InputDeviceType>> {
     let devices: Vec<ScannedDevice> = evdev::enumerate()
-        .map(|(path, dev)| ScannedDevice {
-            name: dev.name().unwrap_or("").to_string(),
-            caps: DeviceCaps::from_device(&dev),
-            usb_device: usb_device_of(&path, dev.input_id().bus_type()),
+        .map(|(path, dev)| {
+            let bus = dev.input_id().bus_type();
+            let usb_device = usb_device_of(&path, bus);
+            ScannedDevice {
+                name: dev.name().unwrap_or("").to_string(),
+                caps: DeviceCaps::from_device(&dev),
+                usb_removable: usb_device.as_deref().is_some_and(usb_removable),
+                usb_device,
+                on_i8042: bus == BusType::BUS_I8042,
+            }
         })
         .collect();
     (!devices.is_empty()).then(|| classify(&devices))
@@ -483,6 +524,7 @@ mod tests {
                     ..Default::default()
                 },
                 usb_device: usb.clone(),
+                ..Default::default()
             },
             ScannedDevice {
                 name: "Legion Go S".into(),
@@ -491,6 +533,7 @@ mod tests {
                     ..Default::default()
                 },
                 usb_device: usb.clone(),
+                ..Default::default()
             },
             ScannedDevice {
                 name: "wch.cn Legion Go S Mouse".into(),
@@ -500,6 +543,7 @@ mod tests {
                     ..Default::default()
                 },
                 usb_device: usb.clone(),
+                ..Default::default()
             },
             ScannedDevice {
                 name: "wch.cn Legion Go S Keyboard".into(),
@@ -508,8 +552,22 @@ mod tests {
                     ..Default::default()
                 },
                 usb_device: usb,
+                ..Default::default()
             },
         ]
+    }
+
+    /// The i8042 keyboard a laptop types on, and a handheld has with no keys.
+    fn at_keyboard() -> ScannedDevice {
+        ScannedDevice {
+            name: "AT Translated Set 2 keyboard".into(),
+            caps: DeviceCaps {
+                has_typing_keys: true,
+                ..Default::default()
+            },
+            on_i8042: true,
+            ..Default::default()
+        }
     }
 
     fn usb_keyboard(usb_device: &str) -> ScannedDevice {
@@ -520,7 +578,54 @@ mod tests {
                 ..Default::default()
             },
             usb_device: Some(PathBuf::from(usb_device)),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn handheld_at_keyboard_is_not_a_keyboard() {
+        let mut devices = legion_go_s_controller();
+        devices.push(at_keyboard());
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad])
+        );
+    }
+
+    #[test]
+    fn laptop_at_keyboard_counts_beside_a_plain_gamepad() {
+        // An external pad that emulates nothing says nothing about the
+        // machine it is plugged into.
+        let devices = [
+            at_keyboard(),
+            ScannedDevice {
+                caps: DeviceCaps {
+                    has_gamepad_btn: true,
+                    ..Default::default()
+                },
+                usb_device: Some(PathBuf::from("/sys/devices/pci0000:00/usb1/1-3")),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
+    }
+
+    #[test]
+    fn laptop_at_keyboard_counts_beside_a_removable_emulating_controller() {
+        // A Steam Controller in a port the firmware calls removable emulates a
+        // keyboard too, but is not built in.
+        let mut devices = legion_go_s_controller();
+        for device in &mut devices {
+            device.usb_removable = true;
+        }
+        devices.push(at_keyboard());
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
     }
 
     #[test]
