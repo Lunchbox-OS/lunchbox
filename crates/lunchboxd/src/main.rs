@@ -1081,13 +1081,6 @@ impl Service {
             diagnostics.raise(Self::interrupted_session_diagnostic(&recovered, &label));
         }
 
-        // Apply Steam config to the host before any preload so the CEF debug
-        // flag is created (only) when interstitial auto-dismiss is enabled.
-        host.configure_steam(
-            engine.policy().service.steam.auto_dismiss.clone(),
-            engine.policy().service.steam.launch_timeout,
-        );
-
         // Initialize internet connectivity monitor. Constructed unconditionally,
         // so a reload that adds the first check has something to reach (issue
         // #188); it probes nothing while the policy checks nothing.
@@ -1515,21 +1508,13 @@ impl Service {
         let _monitor_handle = self.host.start_monitor();
 
         // Preload Steam if any Steam entries are configured so it is ready
-        // when a user launches a game (skips Steam's startup sequence)
-        let has_steam = self
-            .engine
-            .policy()
-            .entries
-            .iter()
-            .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
-        if has_steam {
-            info!("Steam entries detected, preloading Steam in background");
-            // Hide Steam activities until the preloaded client finishes its
-            // initial load (issue #76). Seeded here so the very first served
-            // snapshot already gates Steam; the host's readiness watcher flips
-            // it to ready (see HostEvent::KindReadinessChanged).
+        // when a user launches a game (skips Steam's startup sequence), and
+        // hide Steam activities until the preloaded client finishes its initial
+        // load (issue #76). Seeded here so the very first served snapshot
+        // already gates Steam; the host's readiness watcher flips it to ready
+        // (see HostEvent::KindReadinessChanged).
+        if Self::apply_steam_policy(&self.host, self.engine.policy()) {
             self.engine.set_kind_readiness(EntryKindTag::Steam, false);
-            self.host.preload_steam();
         }
 
         // Get channels
@@ -2231,6 +2216,7 @@ impl Service {
                     while config_change_rx.try_recv().is_ok() {}
                     Self::handle_config_reload(
                         &engine,
+                        &host,
                         &ipc_ref,
                         &event_tx,
                         &config_path,
@@ -2373,8 +2359,35 @@ impl Service {
         let _ = tx.send(event);
     }
 
+    /// Bring the host's Steam setup in line with `policy`: at boot, and again
+    /// on every config reload (issue #243).
+    ///
+    /// Returns whether Steam was preloaded just now, in which case the caller
+    /// must gate Steam entries until the host reports the client ready (issue
+    /// #76). Decided at boot alone, a Steam entry the boot policy did not have
+    /// was shown before Steam had loaded, or was launched with Steam not
+    /// started at all, and `[service.steam]` changes never reached the host.
+    fn apply_steam_policy(host: &LinuxHost, policy: &lunchbox_config::Policy) -> bool {
+        // Before any preload, so the CEF debug flag is created (only) when
+        // interstitial auto-dismiss is enabled.
+        host.configure_steam(
+            policy.service.steam.auto_dismiss.clone(),
+            policy.service.steam.launch_timeout,
+        );
+        let has_steam = policy
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
+        let started = has_steam && host.preload_steam();
+        if started {
+            info!("Steam entries detected, preloading Steam in background");
+        }
+        started
+    }
+
     async fn handle_config_reload(
         engine: &Arc<Mutex<CoreEngine>>,
+        host: &LinuxHost,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
@@ -2402,7 +2415,14 @@ impl Service {
         match loaded {
             Ok(policy) => {
                 let entry_count = {
-                    let event = engine.lock().await.reload_policy(policy);
+                    let mut eng = engine.lock().await;
+                    let event = eng.reload_policy(policy);
+                    // Under the same lock as the reload, so the snapshot
+                    // broadcast below already hides a Steam entry this reload
+                    // brought in before Steam has loaded.
+                    if Self::apply_steam_policy(host, eng.policy()) {
+                        eng.set_kind_readiness(EntryKindTag::Steam, false);
+                    }
                     if let CoreEvent::PolicyReloaded { entry_count } = event {
                         entry_count
                     } else {
