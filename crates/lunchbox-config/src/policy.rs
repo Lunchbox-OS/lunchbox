@@ -245,6 +245,27 @@ impl Policy {
         self.entries.iter().find(|e| &e.id == id)
     }
 
+    /// Every internet check this policy asks to be probed, deduplicated, in
+    /// order: the service-wide check first, then each internet-gated entry's
+    /// own. An entry's check that is not `required` gates nothing, so it is not
+    /// listed. The probe and the status it reports are both built from this
+    /// one list, so they cannot disagree about which targets exist.
+    pub fn internet_check_targets(&self) -> Vec<&InternetCheckTarget> {
+        let mut targets: Vec<&InternetCheckTarget> = Vec::new();
+        let service = self.service.internet.check.as_ref();
+        let entries = self
+            .entries
+            .iter()
+            .filter(|entry| entry.internet.required)
+            .filter_map(|entry| entry.internet.check.as_ref());
+        for target in service.into_iter().chain(entries) {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
+    }
+
     /// Get group by ID
     pub fn get_group(&self, id: &GroupId) -> Option<&Group> {
         self.groups.iter().find(|g| &g.id == id)
@@ -1634,6 +1655,46 @@ pub(crate) fn default_warning_thresholds() -> Vec<WarningThreshold> {
 mod tests {
     use super::*;
     use chrono::{Local, TimeZone};
+
+    #[test]
+    fn internet_check_targets_lists_service_then_required_entries_once() {
+        let policy = crate::parse_config(
+            r#"
+            config_version = 1
+
+            [service.internet]
+            check = "tcp://service.example:443"
+
+            [[entries]]
+            id = "a"
+            label = "A"
+            kind = { type = "process", command = "/bin/a" }
+            internet = { required = true, check = "tcp://a.example:443" }
+
+            [[entries]]
+            id = "same-as-service"
+            label = "B"
+            kind = { type = "process", command = "/bin/b" }
+            internet = { required = true, check = "tcp://service.example:443" }
+
+            [[entries]]
+            id = "not-required"
+            label = "C"
+            kind = { type = "process", command = "/bin/c" }
+            internet = { required = false, check = "tcp://c.example:443" }
+            "#,
+        )
+        .unwrap();
+        let targets: Vec<&str> = policy
+            .internet_check_targets()
+            .into_iter()
+            .map(|target| target.original.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            ["tcp://service.example:443", "tcp://a.example:443"]
+        );
+    }
 
     #[test]
     fn test_availability_always() {

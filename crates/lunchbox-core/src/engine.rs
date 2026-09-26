@@ -415,25 +415,8 @@ impl CoreEngine {
     /// known status. Targets that have never been checked are reported as
     /// unavailable. The list is empty when no checks are configured.
     pub fn internet_status_views(&self) -> Vec<InternetStatusView> {
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut targets: Vec<&InternetCheckTarget> = Vec::new();
-
-        if let Some(target) = self.policy.service.internet.check.as_ref()
-            && seen.insert(target.original.as_str())
-        {
-            targets.push(target);
-        }
-
-        for entry in &self.policy.entries {
-            if entry.internet.required
-                && let Some(target) = entry.internet.check.as_ref()
-                && seen.insert(target.original.as_str())
-            {
-                targets.push(target);
-            }
-        }
-
-        targets
+        self.policy
+            .internet_check_targets()
             .into_iter()
             .map(|target| InternetStatusView {
                 target: target.original.clone(),

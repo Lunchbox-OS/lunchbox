@@ -21,20 +21,11 @@ pub struct InternetMonitor {
 
 impl InternetMonitor {
     pub fn from_policy(policy: &Policy) -> Option<Self> {
-        let mut targets = Vec::new();
-
-        if let Some(check) = policy.service.internet.check.clone() {
-            targets.push(check);
-        }
-
-        for entry in &policy.entries {
-            if entry.internet.required
-                && let Some(check) = entry.internet.check.clone()
-                && !targets.contains(&check)
-            {
-                targets.push(check);
-            }
-        }
+        let targets: Vec<InternetCheckTarget> = policy
+            .internet_check_targets()
+            .into_iter()
+            .cloned()
+            .collect();
 
         if targets.is_empty() {
             return None;
