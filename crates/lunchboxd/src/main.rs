@@ -255,7 +255,7 @@ struct Service {
     ipc: Arc<IpcServer>,
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
-    internet_monitor: Option<internet::InternetMonitor>,
+    internet_monitor: internet::InternetMonitor,
     input_monitor: input_devices::InputMonitor,
     media_prefetcher: media::MediaPrefetcher,
     /// What is currently wrong with this device, for an administrator (issue
@@ -1088,7 +1088,9 @@ impl Service {
             engine.policy().service.steam.launch_timeout,
         );
 
-        // Initialize internet connectivity monitor (if configured)
+        // Initialize internet connectivity monitor. Constructed unconditionally,
+        // so a reload that adds the first check has something to reach (issue
+        // #188); it probes nothing while the policy checks nothing.
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
         // Initialize input-device dependency monitor (issue #96). Constructed
@@ -2002,11 +2004,12 @@ impl Service {
         // System event watcher (logind + NetworkManager). Always running so the
         // suspend cover (issue #73) works regardless of internet gating: it
         // broadcasts SystemSuspending/SystemResumed and asks for a fresh state
-        // snapshot on resume via `resume_rx`. When an internet monitor is
-        // configured it also nudges it to re-check immediately on resume /
-        // network change instead of waiting for the next poll interval.
+        // snapshot on resume via `resume_rx`. It also nudges the internet
+        // monitor to re-check immediately on resume / network change instead
+        // of waiting for the next poll interval.
         let (resume_tx, mut resume_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let recheck_tx = if let Some(monitor) = self.internet_monitor {
+        let recheck_tx = {
+            let monitor = self.internet_monitor;
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
@@ -2022,8 +2025,6 @@ impl Service {
                     .await;
             });
             Some(recheck_tx)
-        } else {
-            None
         };
 
         // Input-device dependency monitor (issue #96): tracks which input device
