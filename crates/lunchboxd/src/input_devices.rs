@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use evdev::{AbsoluteAxisCode, BusType, Device, KeyCode, PropType, RelativeAxisCode};
 use lunchbox_api::{Event, EventPayload, InputDeviceType};
+use lunchbox_bridge::VIRTUAL_DEVICE_NAME_PREFIX;
 use lunchbox_config::Policy;
 use lunchbox_core::CoreEngine;
 use lunchbox_ipc::IpcServer;
@@ -356,7 +357,17 @@ fn usb_removable(usb_device: &Path) -> bool {
 /// does not call removable — a built-in one. The one machine this misreads is
 /// a laptop with a Steam Controller's receiver in a port its firmware does
 /// not describe, which loses its built-in keyboard while the receiver is in.
+///
+/// Devices Lunchbox created itself through `/dev/uinput` count as nothing: the
+/// HUD's page-turn keyboard stays for the life of the HUD, and an input-compat
+/// bridge's keyboard and mouse for the life of its activity, and neither is
+/// hardware anybody attached.
 fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
+    let devices: Vec<&ScannedDevice> = devices
+        .iter()
+        .filter(|device| !device.name.starts_with(VIRTUAL_DEVICE_NAME_PREFIX))
+        .collect();
+
     let controllers: HashSet<&Path> = devices
         .iter()
         .filter(|device| device.caps.has_gamepad_btn)
@@ -365,7 +376,7 @@ fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
 
     let classified: Vec<(&ScannedDevice, HashSet<InputDeviceType>, bool)> = devices
         .iter()
-        .map(|device| {
+        .map(|&device| {
             let mut types = HashSet::new();
             device.caps.classify_into(&mut types);
             let emulated = device
@@ -580,6 +591,31 @@ mod tests {
             usb_device: Some(PathBuf::from(usb_device)),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn lunchbox_virtual_devices_count_as_nothing() {
+        let devices = [
+            ScannedDevice {
+                name: format!("{VIRTUAL_DEVICE_NAME_PREFIX}keyboard"),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ScannedDevice {
+                name: format!("{VIRTUAL_DEVICE_NAME_PREFIX}pointer+keyboard"),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    has_rel_xy: true,
+                    has_btn_left: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        assert!(classify(&devices).is_empty());
     }
 
     #[test]

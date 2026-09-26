@@ -61,7 +61,8 @@ The Lunchbox background service.
   `/dev/input` isn't readable. A keyboard or mouse that a game controller
   emulates on its own USB device — a handheld's built-in controller — does not
   count, and on a machine with such a controller built in (not on a removable
-  port), neither does the i8042 AT keyboard (issue #236).
+  port), neither does the i8042 AT keyboard. Nor do Lunchbox's own `uinput`
+  devices (`lunchbox_bridge::VIRTUAL_DEVICE_NAME_PREFIX`) (issue #236).
 
 ## Usage
 

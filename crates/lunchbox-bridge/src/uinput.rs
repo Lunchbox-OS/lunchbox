@@ -62,6 +62,17 @@ const MAX_SLOT: i32 = 9;
 /// so the first real input would otherwise be lost.
 const SETTLE: Duration = Duration::from_millis(300);
 
+/// What every device this crate creates is named starting with.
+///
+/// lunchboxd's input-device detection skips anything named this way (issue
+/// #236): the HUD's page-turn keyboard, once created, lasts as long as the HUD
+/// does, and a keyboard Lunchbox made itself is not one a child plugged in.
+pub const VIRTUAL_DEVICE_NAME_PREFIX: &str = "lunchbox-bridge virtual ";
+
+fn device_name(shape: &str) -> String {
+    format!("{VIRTUAL_DEVICE_NAME_PREFIX}{shape}")
+}
+
 /// Whether `/dev/uinput` can be opened for writing.
 ///
 /// Every synthetic input in Lunchbox goes through it — the touch and gamepad
@@ -107,7 +118,7 @@ impl UinputSink {
         let builder = VirtualDevice::builder()
             .context("open /dev/uinput (is the user allowed to write it?)")?;
         let device = builder
-            .name("lunchbox-bridge virtual pointer+keyboard")
+            .name(&device_name("pointer+keyboard"))
             .with_keys(&keyboard_and_mouse_keys())
             .context("register uinput keys")?
             .with_relative_axes(&rel)
@@ -132,7 +143,7 @@ impl UinputSink {
         let builder = VirtualDevice::builder()
             .context("open /dev/uinput (is the user allowed to write it?)")?;
         let device = builder
-            .name("lunchbox-bridge virtual absolute pointer")
+            .name(&device_name("absolute pointer"))
             .with_keys(&mouse_buttons())
             .context("register uinput mouse buttons")?
             .with_absolute_axis(&abs_x)
@@ -155,7 +166,7 @@ impl UinputSink {
         let builder = VirtualDevice::builder()
             .context("open /dev/uinput (is the user allowed to write it?)")?;
         let device = builder
-            .name("lunchbox-bridge virtual keyboard")
+            .name(&device_name("keyboard"))
             .with_keys(&keyboard_keys())
             .context("register uinput keys")?
             .build()
@@ -185,7 +196,7 @@ impl UinputSink {
         let builder = VirtualDevice::builder()
             .context("open /dev/uinput (is the user allowed to write it?)")?;
         let device = builder
-            .name("lunchbox-bridge virtual touchscreen")
+            .name(&device_name("touchscreen"))
             .with_properties(&props)
             .context("register uinput INPUT_PROP_DIRECT")?
             .with_keys(&keys)
