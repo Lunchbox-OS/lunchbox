@@ -1301,7 +1301,20 @@ impl LauncherField {
         if page <= 0.0 {
             return;
         }
-        let view_left = adj.value();
+        // The visible stretch of the row, in the row's own coordinates — which
+        // are not the adjustment's. The adjustment counts from the row's
+        // border box, while a GTK 4 widget's coordinates start at its content
+        // box, inside `.lb-field__row`'s side padding. Taking one for the
+        // other put the view the padding's width further right than it was,
+        // so at the start of the row the first categories' names were pushed
+        // in by the fade inset with nothing scrolled under the fade at all.
+        // The row's bounds in its own coordinates start at minus that padding.
+        let origin = imp
+            .row
+            .compute_bounds(&imp.row)
+            .map(|b| f64::from(b.x()))
+            .unwrap_or(0.0);
+        let view_left = adj.value() + origin;
         let view_right = view_left + page;
         // Clear of the fades, or a title would sit dissolving under the very
         // edge it is trying to stay ahead of.
