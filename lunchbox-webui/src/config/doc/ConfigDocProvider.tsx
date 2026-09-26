@@ -109,6 +109,16 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
   const [document, setDocument] = useState<ConfigDocument>({ text: "", name: null });
   const [error, setError] = useState<string | null>(null);
 
+  // Every accepted mutation goes through here. The text is read in the same
+  // update as the version bump, not in an effect keyed on it: an effect that
+  // sets state costs a second render of the whole editor after every
+  // keystroke, and leaves an update queued behind each one that fast typing
+  // keeps starving (issue #235).
+  const changed = useCallback((doc: ConfigDoc) => {
+    setVersion((v) => v + 1);
+    setText(doc.text());
+  }, []);
+
   // Load the wasm module, then start from a blank document so the editor is
   // usable before anyone opens a file.
   useEffect(() => {
@@ -119,7 +129,7 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
         docRef.current = ConfigDoc.blank();
         setVersions(JSON.parse(wasmVersions()) as Versions);
         setReady(true);
-        setVersion((v) => v + 1);
+        changed(docRef.current);
       })
       .catch((e: unknown) => {
         if (!cancelled) setLoadError(String(e));
@@ -127,17 +137,11 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [changed]);
 
-  // Text is read synchronously so the raw pane and the save button never lag
-  // behind an edit; the projection and validation are debounced, since they
-  // are the expensive half and only feed rendering.
-  useEffect(() => {
-    const doc = docRef.current;
-    if (!doc) return;
-    setText(doc.text());
-  }, [version]);
-
+  // Text is kept current with every edit (see `changed`) so the raw pane and
+  // the save button never lag behind one; the projection and validation are
+  // debounced, since they are the expensive half and only feed rendering.
   useEffect(() => {
     const doc = docRef.current;
     if (!doc) return;
@@ -157,12 +161,11 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     const doc = docRef.current;
     if (!doc) return;
     try {
-      const changed = doc.apply(JSON.stringify(patch), coalesceKey ?? null);
-      if (changed) setVersion((v) => v + 1);
+      if (doc.apply(JSON.stringify(patch), coalesceKey ?? null)) changed(doc);
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [changed]);
 
   const endGesture = useCallback(() => {
     docRef.current?.endGesture();
@@ -172,22 +175,24 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     const doc = docRef.current;
     if (!doc) return null;
     try {
-      if (doc.replaceText(next)) setVersion((v) => v + 1);
+      if (doc.replaceText(next)) changed(doc);
       return null;
     } catch (e) {
       // Returned rather than thrown: the raw pane shows this inline while the
       // user is mid-edit, which is not an error state worth a dialog.
       return String(e);
     }
-  }, []);
+  }, [changed]);
 
   const undo = useCallback(() => {
-    if (docRef.current?.undo()) setVersion((v) => v + 1);
-  }, []);
+    const doc = docRef.current;
+    if (doc?.undo()) changed(doc);
+  }, [changed]);
 
   const redo = useCallback(() => {
-    if (docRef.current?.redo()) setVersion((v) => v + 1);
-  }, []);
+    const doc = docRef.current;
+    if (doc?.redo()) changed(doc);
+  }, [changed]);
 
   const availabilityFor = useCallback(
     (subject: { kind: "entry" | "group"; id: string }): AvailabilityView | null => {
@@ -214,12 +219,12 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       if (!opened) return;
       docRef.current = ConfigDoc.open(opened.text);
       setDocument(opened);
-      setVersion((v) => v + 1);
+      changed(docRef.current);
       setError(null);
     } catch (e) {
       setError(`Could not open that config: ${messageOf(e)}`);
     }
-  }, []);
+  }, [changed]);
 
   const save = useCallback(
     async (source: ConfigSource, as = false): Promise<boolean> => {
@@ -247,8 +252,8 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
   const startBlank = useCallback(() => {
     docRef.current = ConfigDoc.blank();
     setDocument({ text: "", name: null });
-    setVersion((v) => v + 1);
-  }, []);
+    changed(docRef.current);
+  }, [changed]);
 
   const value = useMemo<ConfigDocContextValue>(
     () => ({
