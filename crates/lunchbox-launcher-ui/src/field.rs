@@ -484,6 +484,16 @@ mod imp {
                 }
                 child = widget.next_sibling();
             }
+            // The headers slide against where their compartments *are*, and
+            // this is the first moment that is known. The adjustment's own
+            // signals come too early for it — it is configured part way through
+            // the allocation above, before the row's children have been placed
+            // — and a rebuild that lands the row where it already was fires no
+            // signal at all, so the offsets they last computed stayed on
+            // screen — a category's badge could be left somewhere off the edge
+            // of the screen after a rebuild. Only redraws, so it is safe from
+            // in here.
+            self.obj().slide_headers();
 
             let resized = self.laid_out.replace((width, height)) != (width, height);
             // The pending flag matters on its own: a field that was handed a
