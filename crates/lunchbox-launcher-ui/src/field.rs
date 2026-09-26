@@ -216,9 +216,14 @@ mod imp {
         /// back, which is what makes "play one more round" a single press.
         pub last_launched: RefCell<Option<EntryId>>,
         pub scale: Cell<f64>,
-        /// Set when the field is rebuilt, cleared once the selection has
-        /// actually been scrolled into view. See `wire_scroll_chips`.
+        /// Set when the field is rebuilt, cleared once the row has been put
+        /// back at `scroll_restore` — or once the child has woken the
+        /// selection, which is somewhere they asked to be instead. See
+        /// `wire_scroll_chips`.
         pub pending_scroll: Cell<bool>,
+        /// Where the row was when it was last rebuilt, and so where it goes
+        /// once the new one has been allocated.
+        pub scroll_restore: Cell<f64>,
         /// Whether the selection is *shown*. The cursor always has a position;
         /// this is whether the child has done anything to deserve seeing it.
         pub selection_active: Cell<bool>,
@@ -261,6 +266,7 @@ mod imp {
                 last_launched: RefCell::new(None),
                 scale: Cell::new(1.0),
                 pending_scroll: Cell::new(false),
+                scroll_restore: Cell::new(0.0),
                 selection_active: Cell::new(false),
                 scroll_generation: Cell::new(0),
                 laid_out: Cell::new((0, 0)),
@@ -311,6 +317,16 @@ mod imp {
             self.scroller
                 .set_policy(gtk4::PolicyType::External, gtk4::PolicyType::Never);
             self.scroller.set_child(Some(&self.row));
+            // The field decides where the row sits (`scroll_to_cursor`), so the
+            // viewport GTK wrapped the row in must not decide as well. Left
+            // on, it followed the keyboard focus on its own — and a rebuild
+            // destroys the focused item, so GTK hands focus to the first one
+            // in the row and the viewport scrolls to show it, throwing the
+            // child back to the start on every snapshot while the launcher was
+            // up.
+            if let Some(viewport) = self.scroller.child().and_downcast::<gtk4::Viewport>() {
+                viewport.set_scroll_to_focus(false);
+            }
             self.scroller.set_hexpand(true);
             self.scroller.set_vexpand(true);
 
@@ -610,6 +626,7 @@ impl LauncherField {
         // Keep where the child was looking, so a snapshot arriving while they
         // are half way along the row does not throw them back to the start.
         let previous = self.focused_entry_id();
+        imp.scroll_restore.set(imp.scroller.hadjustment().value());
 
         while let Some(child) = imp.row.first_child() {
             imp.row.remove(&child);
@@ -718,11 +735,15 @@ impl LauncherField {
 
         self.clear_selection();
         self.restore_focus(previous);
-        // `restore_focus` scrolls, but nothing is allocated yet at this point:
-        // the viewport still measures zero, so the scroll is a no-op and an
-        // initial selection in a compartment beyond the first screenful would
-        // be left off-screen with nothing visibly selected at all. Ask again
-        // once the adjustment knows its real size.
+        // Put the row back where it was, not where the cursor is. The
+        // selection is asleep after a rebuild, so there is nothing on screen to
+        // bring into view — scrolling to the cursor here used to drag the row
+        // off to the last-launched activity on every snapshot, including the
+        // one that brings the launcher back after an activity closes (#238).
+        //
+        // Not now, though: nothing is allocated yet at this point, and the new
+        // row may not yet reach as far as the old one did. Once the adjustment
+        // knows its real size.
         imp.pending_scroll.set(true);
         self.update_scroll_chips();
     }
@@ -1049,6 +1070,9 @@ impl LauncherField {
         if page <= 0.0 {
             return;
         }
+        // The child has woken the selection, so where it is outranks where
+        // the row was before the rebuild.
+        imp.pending_scroll.set(false);
 
         let (s, _) = imp.cursor.get();
         let Some(slot) = imp.stacks.borrow().get(s).map(|stack| stack.slot.clone()) else {
@@ -1286,9 +1310,17 @@ impl LauncherField {
             // The adjustment learns its page size and extent during
             // allocation, which is the first moment a scroll can mean
             // anything. Take the one the rebuild could not do.
+            //
+            // Held until the row reaches as far as the old one did: a rebuilt
+            // row is allocated in more than one pass, and the first can be
+            // too narrow to scroll back to where the child was, which left
+            // the row at whatever the clamp allowed.
             if field.imp().pending_scroll.get() && adj.page_size() > 0.0 {
-                field.imp().pending_scroll.set(false);
-                field.scroll_to_cursor();
+                let target = field.imp().scroll_restore.get();
+                field.scroll_to(target, false);
+                if target <= adj.upper() - adj.page_size() {
+                    field.imp().pending_scroll.set(false);
+                }
             }
             field.update_scroll_chips();
             field.slide_headers();
