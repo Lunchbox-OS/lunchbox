@@ -275,9 +275,6 @@ struct SessionInfo {
     /// handler and write the page it was on. The cost of cutting either short
     /// is the child's progress.
     graceful_floor: Option<Duration>,
-    /// Ask the compositor to close this activity's windows before signalling
-    /// it. See [`EntryKind::wants_polite_close`].
-    polite_close: bool,
 }
 
 /// How a session's graceful SIGTERM is delivered.
@@ -1847,9 +1844,6 @@ impl HostAdapter for LinuxHost {
             EntryKind::Ebook { .. } => Some(crate::ebook::STOP_TIMEOUT),
             _ => None,
         };
-        // Likewise for the polite close: whether a stop asks the compositor
-        // first is a property of the kind, decided once here.
-        let polite_close = entry_kind.wants_polite_close();
 
         // Extract argv, env, cwd, snap_name, flatpak_app_id, and steam_app_id based on entry kind
         let (argv, env, cwd, snap_name, flatpak_app_id, steam_app_id) = match entry_kind {
@@ -2298,7 +2292,6 @@ impl HostAdapter for LinuxHost {
             steam_app_id,
             firewall_scope: firewall_scope.clone(),
             graceful_floor,
-            polite_close,
         };
         self.session_info
             .lock()
@@ -2406,18 +2399,17 @@ impl HostAdapter for LinuxHost {
                     .as_ref()
                     .is_some_and(|i| i.steam_app_id.is_some());
 
-                // Ask before telling. For an application that saves its state
-                // in `closeEvent` and installs no signal handler, this is the
-                // whole difference between finishing and being killed — see
-                // `EntryKind::wants_polite_close`. Costs nothing when the
-                // activity has no window, and falls through to the signal
+                // Ask before telling, for every kind (issues #160, #237). A
+                // signal is a request to die and closing the window a request
+                // to finish, and only the second reliably lets an application
+                // save: Okular writes the page it was on only in its close
+                // handler, and Chrome flushes its cookie store only on a real
+                // quit — not on SIGTERM, not on SIGKILL. Costs nothing when
+                // the activity has no window, and falls through to the signal
                 // ladder unchanged when it ignores the request.
-                let closed_politely = if session_info.as_ref().is_some_and(|i| i.polite_close) {
-                    self.close_windows_politely(pid, pgid, &session_info, is_steam_session)
-                        .await
-                } else {
-                    false
-                };
+                let closed_politely = self
+                    .close_windows_politely(pid, pgid, &session_info, is_steam_session)
+                    .await;
 
                 let plan = session_info.as_ref().map(GracefulSignal::for_session);
 
@@ -3255,7 +3247,6 @@ mod tests {
             steam_app_id: None,
             firewall_scope: None,
             graceful_floor: None,
-            polite_close: false,
         }
     }
 
@@ -3392,7 +3383,6 @@ mod tests {
             steam_app_id: None,
             firewall_scope: None,
             graceful_floor: None,
-            polite_close: false,
         });
         host.session_info
             .lock()
@@ -3768,64 +3758,7 @@ mod tests {
             steam_app_id: None,
             firewall_scope: None,
             graceful_floor: None,
-            polite_close: false,
         }
-    }
-
-    /// Which kinds get asked before they get told (issue #160).
-    ///
-    /// The list is a judgement, not a detail: Steam reads a close request as
-    /// "hide to tray" and would only stop more slowly, and RetroArch's
-    /// single-SIGTERM shutdown is verified to save (#125), so neither opts in.
-    /// A reader must, because it saves the page in its close handler and
-    /// handles no signal at all.
-    #[test]
-    fn only_kinds_that_save_on_window_close_are_asked_first() {
-        let ebook = EntryKind::Ebook {
-            book: "/books/x.epub".into(),
-            viewer: Default::default(),
-            open_at: None,
-            layout: Default::default(),
-            font_size: 16,
-            font_family: "Noto Serif".into(),
-            command: None,
-            args: vec![],
-            env: HashMap::new(),
-            kiosk: true,
-        };
-        assert!(ebook.wants_polite_close());
-
-        assert!(
-            !EntryKind::Steam {
-                app_id: 1,
-                args: vec![],
-                env: HashMap::new(),
-            }
-            .wants_polite_close()
-        );
-        assert!(
-            !EntryKind::Retroarch {
-                core: Some("mgba".into()),
-                core_path: None,
-                content: "/roms/x.gba".into(),
-                save_state: lunchbox_api::RetroarchSaveState::Auto,
-                command: "retroarch".into(),
-                args: vec![],
-                env: HashMap::new(),
-                kiosk: true,
-                reset: true,
-            }
-            .wants_polite_close()
-        );
-        assert!(
-            !EntryKind::Process {
-                command: "foot".into(),
-                args: vec![],
-                env: HashMap::new(),
-                cwd: None,
-            }
-            .wants_polite_close()
-        );
     }
 
     /// The stop path raises its floor for the kinds whose shutdown does real

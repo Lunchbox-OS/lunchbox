@@ -9,8 +9,8 @@
 //! would start again at page one.
 //!
 //! This module renders the configuration that fixes the first problem and
-//! builds the argv around it. The second is fixed in the stop path: see
-//! [`EntryKind::wants_polite_close`](lunchbox_api::EntryKind::wants_polite_close).
+//! builds the argv around it. The second is fixed in the stop path, which asks
+//! the compositor to close every activity's windows before it signals them.
 //!
 //! **The admin's own KDE configuration is never touched.** Everything below
 //! goes into a per-entry `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME`,
