@@ -131,3 +131,35 @@ client, so there is no unit test either.
 
 Left out: #188's suggestion of a "not checked yet" state for a target that has
 not been probed. It changes the wire format and every display of the status.
+
+## Follow-up: #244, #245, #246
+
+Prompt: "fix #244 #245 #246 too".
+
+`handle_config_reload` would have gone past clippy's argument limit, so a
+refactor commit first gathers what a reload pushes settings into, as
+`ReloadTargets` (Steam's host, the file manager, and now the HUD layout and the
+display manager). Its `apply()` hands each one its part of the new policy.
+
+* #244: `HudLayout` keeps the global edge and the per-activity override behind
+  one lock, and both change through the same "announce only if the effective
+  edge moved" step. A reload moves the HUD at once unless an activity has its
+  own edge. In that case the new global takes effect when the session ends.
+* #245: the `DisplayManager` is built whether or not docking is enabled. While
+  it's disabled it ignores hotplug, mode requests and the HiDPI re-assert
+  (checked under its apply lock). `configure()` enables it (reconciling what's
+  connected), disables it (back to the internal display, mirror stopped, audio
+  restored), or moves audio when `mirror_audio` changes while docked. Side
+  effect: with docking disabled, the display state now names the primary, so
+  the HUD anchors to the internal display.
+* #246: the auto-brightness loop waits on `PolicyReloads` and rebuilds its
+  ticker when the interval changes.
+
+Verified #244 and #245 together in the headless session. I booted with
+`docking_enabled = false` and `[service.hud] orientation = "top"` and added a
+second output with `swaymsg create_output`: it was left alone. Editing the file
+to enable docking and set `orientation = "left"` moved the HUD (the screenshot
+shows it on the left with the display toggle present) and mirrored onto
+HEADLESS-2 with wl-mirror running. Disabling docking again stopped wl-mirror and
+went back to `single_internal` without rebuilding the HUD. #246 is untested: the
+loop only runs with a light sensor, which the VM doesn't have.

@@ -52,7 +52,8 @@ The Lunchbox background service.
   docked display via `wl-mirror` by default, and exposes a HUD toggle to switch
   to external-only at native resolution. A sway IPC output-event subscription
   drives reconciliation on hotplug. Exactly one logical output is active in
-  every mode, preserving the one-activity-at-a-time invariant.
+  every mode, preserving the one-activity-at-a-time invariant. Built whether or
+  not docking is enabled, so a config reload can turn it on or off (issue #245).
 - `input_devices` (`InputMonitor`) — input-device dependencies (issue #96).
   When an entry declares `requires_input`, enumerates `/dev/input` via `evdev`
   to see which device types (mouse/touch/keyboard/gamepad) are connected, feeds
