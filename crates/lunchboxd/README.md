@@ -58,7 +58,9 @@ The Lunchbox background service.
   to see which device types (mouse/touch/keyboard/gamepad) are connected, feeds
   the set into the engine, and re-broadcasts availability on hotplug (a `notify`
   watch on `/dev/input` plus a slow fallback re-scan). Gates fail open when
-  `/dev/input` isn't readable.
+  `/dev/input` isn't readable. A keyboard or mouse that a game controller
+  emulates on its own USB device — a handheld's built-in controller — does not
+  count (issue #236).
 
 ## Usage
 

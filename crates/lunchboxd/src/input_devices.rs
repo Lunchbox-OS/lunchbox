@@ -19,11 +19,11 @@
 //! already rely on.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use evdev::{AbsoluteAxisCode, Device, KeyCode, PropType, RelativeAxisCode};
+use evdev::{AbsoluteAxisCode, BusType, Device, KeyCode, PropType, RelativeAxisCode};
 use lunchbox_api::{Event, EventPayload, InputDeviceType};
 use lunchbox_config::Policy;
 use lunchbox_core::CoreEngine;
@@ -35,6 +35,9 @@ use tracing::{debug, info, warn};
 
 /// Directory the kernel exposes input event devices under.
 const INPUT_DIR: &str = "/dev/input";
+
+/// Where sysfs lists each input node, linking back to the hardware behind it.
+const SYSFS_INPUT_CLASS: &str = "/sys/class/input";
 
 /// Slow fallback re-scan cadence, in case an inotify event is ever missed
 /// (e.g. the watcher failed to install). Hotplug is normally reflected far
@@ -298,14 +301,59 @@ impl DeviceCaps {
 struct ScannedDevice {
     name: String,
     caps: DeviceCaps,
+    /// The sysfs directory of the USB device this node belongs to, when it is
+    /// on USB (see [`usb_device_of`]).
+    usb_device: Option<PathBuf>,
+}
+
+/// The sysfs directory of the USB device an input node belongs to, or `None`
+/// when it is not on USB or sysfs does not say.
+///
+/// A USB device exposes each of its interfaces as its own input node, so a
+/// game controller that also emulates a keyboard and a mouse shows up as
+/// several nodes; this is what ties them back together. Only USB is followed:
+/// a Bluetooth device's ancestors lead to the adapter, which every Bluetooth
+/// device shares, so following them would tie unrelated devices together.
+fn usb_device_of(node: &Path, bus: BusType) -> Option<PathBuf> {
+    if bus != BusType::BUS_USB {
+        return None;
+    }
+    let sysfs = std::fs::canonicalize(Path::new(SYSFS_INPUT_CLASS).join(node.file_name()?)).ok()?;
+    // The interface directories between the node and the device (`5-1:1.2`)
+    // carry no `idVendor`; the device itself (`5-1`) is the first that does.
+    sysfs
+        .ancestors()
+        .find(|dir| dir.join("idVendor").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// Which input device types a set of scanned devices adds up to.
+///
+/// A keyboard or mouse that shares its USB device with a gamepad is the
+/// controller emulating one, not one somebody plugged in (issue #236). Gaming
+/// handhelds do this with their built-in controller — the Legion Go S exposes
+/// two full keyboards and a mouse alongside its gamepad, all on one USB
+/// device, as do the Steam Deck and ROG Ally — so counting them would satisfy
+/// `requires_input = "keyboard"` on a handheld with nothing attached.
 fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
+    let controllers: HashSet<&Path> = devices
+        .iter()
+        .filter(|device| device.caps.has_gamepad_btn)
+        .filter_map(|device| device.usb_device.as_deref())
+        .collect();
+
     let mut connected = HashSet::new();
     for device in devices {
         let mut types = HashSet::new();
         device.caps.classify_into(&mut types);
+        if device
+            .usb_device
+            .as_deref()
+            .is_some_and(|usb| controllers.contains(usb))
+        {
+            types.remove(&InputDeviceType::Keyboard);
+            types.remove(&InputDeviceType::Mouse);
+        }
         if !types.is_empty() {
             debug!(name = %device.name, ?types, "Classified input device");
         }
@@ -324,9 +372,10 @@ fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
 /// set is authoritative.
 fn scan_connected_inputs() -> Option<HashSet<InputDeviceType>> {
     let devices: Vec<ScannedDevice> = evdev::enumerate()
-        .map(|(_path, dev)| ScannedDevice {
+        .map(|(path, dev)| ScannedDevice {
             name: dev.name().unwrap_or("").to_string(),
             caps: DeviceCaps::from_device(&dev),
+            usb_device: usb_device_of(&path, dev.input_id().bus_type()),
         })
         .collect();
     (!devices.is_empty()).then(|| classify(&devices))
@@ -420,6 +469,102 @@ mod tests {
         let mut set = HashSet::new();
         caps.classify_into(&mut set);
         assert!(set.is_empty());
+    }
+
+    /// The keyboard, mouse and gamepad nodes a Legion Go S exposes with nothing
+    /// attached (issue #236), all on the one USB device its controller is.
+    fn legion_go_s_controller() -> Vec<ScannedDevice> {
+        let usb = Some(PathBuf::from("/sys/devices/pci0000:00/usb5/5-1"));
+        vec![
+            ScannedDevice {
+                name: "wch.cn Legion Go S".into(),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                usb_device: usb.clone(),
+            },
+            ScannedDevice {
+                name: "Legion Go S".into(),
+                caps: DeviceCaps {
+                    has_gamepad_btn: true,
+                    ..Default::default()
+                },
+                usb_device: usb.clone(),
+            },
+            ScannedDevice {
+                name: "wch.cn Legion Go S Mouse".into(),
+                caps: DeviceCaps {
+                    has_rel_xy: true,
+                    has_btn_left: true,
+                    ..Default::default()
+                },
+                usb_device: usb.clone(),
+            },
+            ScannedDevice {
+                name: "wch.cn Legion Go S Keyboard".into(),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                usb_device: usb,
+            },
+        ]
+    }
+
+    fn usb_keyboard(usb_device: &str) -> ScannedDevice {
+        ScannedDevice {
+            name: "USB Keyboard".into(),
+            caps: DeviceCaps {
+                has_typing_keys: true,
+                ..Default::default()
+            },
+            usb_device: Some(PathBuf::from(usb_device)),
+        }
+    }
+
+    #[test]
+    fn controller_emulation_is_not_a_keyboard_or_mouse() {
+        assert_eq!(
+            classify(&legion_go_s_controller()),
+            HashSet::from([InputDeviceType::Gamepad])
+        );
+    }
+
+    #[test]
+    fn keyboard_on_another_usb_device_still_counts() {
+        let mut devices = legion_go_s_controller();
+        devices.push(usb_keyboard("/sys/devices/pci0000:00/usb3/3-2"));
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
+    }
+
+    #[test]
+    fn keyboard_without_a_usb_device_is_never_tied_to_a_controller() {
+        // A Bluetooth keyboard next to a Bluetooth gamepad: neither is on USB,
+        // so neither is taken for the other's emulation.
+        let devices = [
+            ScannedDevice {
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ScannedDevice {
+                caps: DeviceCaps {
+                    has_gamepad_btn: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
     }
 
     /// Smoke test against the machine's real `/dev/input`. Ignored by default —
