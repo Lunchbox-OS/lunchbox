@@ -253,6 +253,8 @@ struct ReloadTargets {
     host: Arc<LinuxHost>,
     /// The file manager's live settings (issue #195).
     file_manager: tokio::sync::watch::Sender<Arc<lunchbox_config::FileManagerConfig>>,
+    /// The global HUD edge (issue #244).
+    hud_layout: Arc<HudLayout>,
 }
 
 impl ReloadTargets {
@@ -260,7 +262,7 @@ impl ReloadTargets {
     ///
     /// Steam is not here: its gate has to change under the same engine lock as
     /// the policy swap, so `handle_config_reload` applies it there.
-    fn apply(&self, policy: &lunchbox_config::Policy) {
+    async fn apply(&self, policy: &lunchbox_config::Policy) {
         // The file manager reads its roots and its caps from here, so a reload
         // that changed them reaches the web interface without a restart.
         // `enabled` is deliberately *not* re-read: the routes were mounted (or
@@ -269,6 +271,7 @@ impl ReloadTargets {
         let _ = self
             .file_manager
             .send(Arc::new(policy.service.file_manager.clone()));
+        self.hud_layout.set_global(policy.hud_orientation).await;
     }
 }
 
@@ -1598,8 +1601,9 @@ impl Service {
 
         // HUD placement (issue #171). Same shape and the same reasons as the
         // hidpi manager above: it holds both subscriber channels so it can
-        // announce a change of edge to IPC and SSE alike, and the global
-        // setting it falls back to is fixed at load time.
+        // announce a change of edge to IPC and SSE alike. The global setting
+        // it falls back to is read here and again on every config reload
+        // (issue #244).
         let hud_layout = {
             let global = engine.lock().await.policy().hud_orientation;
             Arc::new(HudLayout::new(global, ipc_ref.clone(), event_tx.clone()))
@@ -1633,6 +1637,7 @@ impl Service {
         let reload_targets = ReloadTargets {
             host: host.clone(),
             file_manager: file_manager_tx,
+            hud_layout: hud_layout.clone(),
         };
 
         // The web listener's real state (issue #182), created before the
@@ -2477,7 +2482,7 @@ impl Service {
                 let state = engine.lock().await.get_state();
                 Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
                 let policy = engine.lock().await.policy().clone();
-                targets.apply(&policy);
+                targets.apply(&policy).await;
             }
             Err(e) => {
                 warn!(error = %e, "Failed to reload config, keeping existing policy");
