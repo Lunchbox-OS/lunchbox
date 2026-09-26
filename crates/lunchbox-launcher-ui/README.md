@@ -245,6 +245,11 @@ wrapping — by most of a screenful, since a chevron is a "next page" control.
 Hovering with a pointer selects, so the pointer and the D-pad produce the same
 single state.
 
+An ordinary mouse wheel scrolls the row (#234). The row only moves sideways, so
+a mostly vertical scroll is turned into a horizontal one (`wire_wheel`); a
+mostly horizontal one (a touchpad swipe, or Shift and the wheel) is left to the
+scrolled window, which already handles it.
+
 The selected look is carried by a CSS class the field manages, not by `:focus`
 — see the note on `.lb-item--selected` in `src/theme.rs` for why.
 

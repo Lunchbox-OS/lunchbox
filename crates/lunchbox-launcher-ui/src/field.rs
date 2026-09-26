@@ -542,8 +542,50 @@ impl LauncherField {
     pub fn new() -> Self {
         let obj: Self = glib::Object::builder().build();
         obj.wire_scroll_chips();
+        obj.wire_wheel();
         obj.wire_background_taps();
         obj
+    }
+
+    /// Let an ordinary mouse wheel turn the row (#234).
+    ///
+    /// The row only scrolls sideways, and the scrolled window only listens to
+    /// the axis it scrolls, so a wheel — which turns vertically — did nothing
+    /// unless Shift was held to make it horizontal. Nobody reaches for Shift,
+    /// least of all a child; with one axis to move along, either axis should
+    /// move it.
+    ///
+    /// Capture phase, so this sees the event before the scrolled window does.
+    /// Only a *mostly vertical* scroll is taken: anything mostly sideways — a
+    /// touchpad swipe, a tilted wheel, Shift and a wheel — is left to the
+    /// scrolled window, which already handles it, kinetics and all.
+    fn wire_wheel(&self) {
+        let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
+        scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let field = self.downgrade();
+        scroll.connect_scroll(move |controller, dx, dy| {
+            let Some(field) = field.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if dy.abs() <= dx.abs() {
+                return glib::Propagation::Proceed;
+            }
+            // A wheel reports notches, a touchpad reports pixels. A notch moves
+            // as far as it does in any other GTK scrolled window, which scales
+            // it by the page so it feels the same on any size of screen.
+            let step = match controller.unit() {
+                gtk4::gdk::ScrollUnit::Wheel => field
+                    .imp()
+                    .scroller
+                    .hadjustment()
+                    .page_size()
+                    .powf(2.0 / 3.0),
+                _ => 1.0,
+            };
+            field.scroll_by(dy * step);
+            glib::Propagation::Stop
+        });
+        self.imp().scroller.add_controller(scroll);
     }
 
     /// A tap that lands on no activity puts the selection away (#208 review).
@@ -1211,6 +1253,23 @@ impl LauncherField {
             adj.set_value(from + (target - from) * eased);
             glib::ControlFlow::Continue
         });
+    }
+
+    /// Move the row `delta` pixels along from wherever it is now, at once.
+    ///
+    /// Not eased: a wheel sends a stream of these, and each would start a new
+    /// animation from wherever the last had got to, so the row would lag
+    /// behind the wheel and never quite arrive.
+    fn scroll_by(&self, delta: f64) {
+        let imp = self.imp();
+        // Wherever the child has turned the row to is where it should stay,
+        // not where it was before the last rebuild — and not wherever an
+        // easing still running was taking it.
+        imp.pending_scroll.set(false);
+        imp.scroll_generation
+            .set(imp.scroll_generation.get().wrapping_add(1));
+        let value = imp.scroller.hadjustment().value();
+        self.scroll_to(value + delta, false);
     }
 
     /// Push the row along when the child steers past either end.
