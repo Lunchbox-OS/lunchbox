@@ -245,6 +245,33 @@ struct Args {
 }
 
 /// Main service state
+/// The parts of lunchboxd built from the policy that a config reload has to
+/// push new settings into, because they do not read the engine's policy for
+/// themselves (issues #188, #243).
+struct ReloadTargets {
+    /// Steam's settings and preload (issue #243).
+    host: Arc<LinuxHost>,
+    /// The file manager's live settings (issue #195).
+    file_manager: tokio::sync::watch::Sender<Arc<lunchbox_config::FileManagerConfig>>,
+}
+
+impl ReloadTargets {
+    /// Hand each target its part of a policy the engine has just taken.
+    ///
+    /// Steam is not here: its gate has to change under the same engine lock as
+    /// the policy swap, so `handle_config_reload` applies it there.
+    fn apply(&self, policy: &lunchbox_config::Policy) {
+        // The file manager reads its roots and its caps from here, so a reload
+        // that changed them reaches the web interface without a restart.
+        // `enabled` is deliberately *not* re-read: the routes were mounted (or
+        // not) when the router was built, and a surface that appeared
+        // mid-session would be one nobody watching the device had asked for.
+        let _ = self
+            .file_manager
+            .send(Arc::new(policy.service.file_manager.clone()));
+    }
+}
+
 struct Service {
     config_path: PathBuf,
     engine: CoreEngine,
@@ -1603,6 +1630,10 @@ impl Service {
         // Published here at boot and again from `handle_config_reload`.
         let (file_manager_tx, file_manager_rx) =
             tokio::sync::watch::channel(Arc::new(file_manager_config.clone()));
+        let reload_targets = ReloadTargets {
+            host: host.clone(),
+            file_manager: file_manager_tx,
+        };
 
         // The web listener's real state (issue #182), created before the
         // service that reads it and before the server that writes it. A
@@ -2216,12 +2247,11 @@ impl Service {
                     while config_change_rx.try_recv().is_ok() {}
                     Self::handle_config_reload(
                         &engine,
-                        &host,
                         &ipc_ref,
                         &event_tx,
                         &config_path,
                         policy_files.as_ref(),
-                        &file_manager_tx,
+                        &reload_targets,
                     )
                     .await;
                     // Re-probe against the new policy. Without this an admin who
@@ -2387,12 +2417,11 @@ impl Service {
 
     async fn handle_config_reload(
         engine: &Arc<Mutex<CoreEngine>>,
-        host: &LinuxHost,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
         policy_files: Option<&Arc<dyn ProtectedFiles>>,
-        file_manager: &tokio::sync::watch::Sender<Arc<lunchbox_config::FileManagerConfig>>,
+        targets: &ReloadTargets,
     ) {
         // Read from wherever the policy was read at boot. Reloading from a
         // different source than the one that started the session would mean a
@@ -2420,7 +2449,7 @@ impl Service {
                     // Under the same lock as the reload, so the snapshot
                     // broadcast below already hides a Steam entry this reload
                     // brought in before Steam has loaded.
-                    if Self::apply_steam_policy(host, eng.policy()) {
+                    if Self::apply_steam_policy(&targets.host, eng.policy()) {
                         eng.set_kind_readiness(EntryKindTag::Steam, false);
                     }
                     if let CoreEvent::PolicyReloaded { entry_count } = event {
@@ -2447,17 +2476,8 @@ impl Service {
                 );
                 let state = engine.lock().await.get_state();
                 Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
-                // The file manager reads its roots and its caps from here, so
-                // a reload that changed them reaches the web interface without
-                // a restart. `enabled` is deliberately *not* re-read: the
-                // routes were mounted (or not) when the router was built, and
-                // a surface that appeared mid-session would be one nobody
-                // watching the device had asked for.
-                let settings = {
-                    let eng = engine.lock().await;
-                    eng.policy().service.file_manager.clone()
-                };
-                let _ = file_manager.send(Arc::new(settings));
+                let policy = engine.lock().await.policy().clone();
+                targets.apply(&policy);
             }
             Err(e) => {
                 warn!(error = %e, "Failed to reload config, keeping existing policy");
