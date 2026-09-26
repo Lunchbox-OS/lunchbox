@@ -269,6 +269,17 @@ impl LauncherApp {
 
         glib::spawn_future_local(async move {
             let mut receiver = state_receiver;
+            // Whether the field has been off screen for something other than a
+            // refresh, so the next `Idle` is the launcher *opening* rather
+            // than redrawing (#238). A refresh passes through `Connecting` on
+            // its way back to `Idle`, and so does the end of an activity, so
+            // the view on screen at the time cannot tell the two apart; what
+            // came before it can. Starts set: the first `Idle` is an opening.
+            //
+            // A failed launch comes back to `Idle` straight from `Launching`
+            // and is deliberately not an opening — the child is still looking
+            // at the part of the row they pressed.
+            let mut away = true;
 
             loop {
                 receiver.changed().await.ok();
@@ -284,6 +295,7 @@ impl LauncherApp {
 
                 match state {
                     LauncherState::Disconnected => {
+                        away = true;
                         if let Some(ref win) = window {
                             win.set_visible(true);
                         }
@@ -298,6 +310,9 @@ impl LauncherApp {
                     LauncherState::Idle { entries, groups } => {
                         if let Some(field) = field {
                             field.set_state(entries, groups);
+                            if std::mem::take(&mut away) {
+                                field.scroll_home();
+                            }
                         }
                         if let Some(ref win) = window {
                             win.set_visible(true);
@@ -313,6 +328,7 @@ impl LauncherApp {
                     LauncherState::Closing { entry_label } => {
                         // Same surface as the session view, so the grid stays
                         // out of reach while the activity is torn down.
+                        away = true;
                         session_label.set_text(&format!("Closing {}…", entry_label));
                         session_hint.set_text("Please wait while the activity closes");
                         if let Some(ref win) = window {
@@ -325,6 +341,7 @@ impl LauncherApp {
                         entry_label,
                         time_remaining: _,
                     } => {
+                        away = true;
                         session_label.set_text(&format!("Loading: {}", entry_label));
                         session_hint.set_text("Please wait while the application starts");
                         // Show the session view as a loading screen behind the game
@@ -344,6 +361,7 @@ impl LauncherApp {
                     LauncherState::AdminMode => {
                         // Non-interactive by construction: the grid is a
                         // different stack child, so nothing here can launch.
+                        away = true;
                         if let Some(ref win) = window {
                             win.set_visible(true);
                         }

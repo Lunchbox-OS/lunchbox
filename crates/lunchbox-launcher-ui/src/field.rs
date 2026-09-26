@@ -222,7 +222,8 @@ mod imp {
         /// `wire_scroll_chips`.
         pub pending_scroll: Cell<bool>,
         /// Where the row was when it was last rebuilt, and so where it goes
-        /// once the new one has been allocated.
+        /// once the new one has been allocated. `scroll_home` sets it to the
+        /// start.
         pub scroll_restore: Cell<f64>,
         /// Whether the selection is *shown*. The cursor always has a position;
         /// this is whether the child has done anything to deserve seeing it.
@@ -1107,6 +1108,27 @@ impl LauncherField {
         } else if right > adj.value() + page {
             self.scroll_to(right - page, animate);
         }
+    }
+
+    /// Show the start of the row, as though the launcher had just opened.
+    ///
+    /// Called whenever the field comes back from something else — an activity
+    /// closing, above all (#238). A caregiver puts first what they most want
+    /// the child to see, and a launcher that reopens wherever the child last
+    /// left it shows them their last game instead, every time.
+    ///
+    /// Only the view moves. The cursor stays on what they launched last, so
+    /// the first press still wakes the selection there and "play one more
+    /// round" is still close at hand; it just is not the first thing on
+    /// screen.
+    pub fn scroll_home(&self) {
+        let imp = self.imp();
+        imp.scroll_restore.set(0.0);
+        // Any easing still running is headed somewhere else.
+        imp.scroll_generation
+            .set(imp.scroll_generation.get().wrapping_add(1));
+        self.clear_selection();
+        self.scroll_to(0.0, false);
     }
 
     /// Move the row to `target`, easing unless told not to.
