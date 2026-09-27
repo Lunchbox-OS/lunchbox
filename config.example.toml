@@ -99,8 +99,8 @@ enabled = false             # Start with auto brightness on?
 [service.display]
 docking_enabled = true   # Master switch for external-monitor support
 mirror_audio = true      # Route audio to the external video device while docked
-docked_mode = "mirror"   # "mirror" or "external_only" when a display is plugged in;
-                         # the HUD's display button switches to the other
+docked_mode = "external_only" # or "mirror", when a display is plugged in;
+                              # the HUD's display button switches to the other
 
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.

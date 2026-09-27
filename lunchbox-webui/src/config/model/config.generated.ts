@@ -249,7 +249,8 @@ export type RawDays = string | string[];
 export interface RawDisplayConfig {
   /**
    * What an external display shows when it is plugged in (issue #233). The
-   * HUD's display button switches to the other mode (default: `mirror`).
+   * HUD's display button switches to the other mode (default:
+   * `external_only`).
    */
   docked_mode?: RawDockedMode;
   /**

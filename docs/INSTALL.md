@@ -812,6 +812,11 @@ left root-owned side files behind, `sudo chown lunchbox-state:lunchbox-state
 
 ### External monitor / docking (issue #87)
 
+A docked device drives only the external display by default, with the built-in
+panel off; the HUD's display button switches to mirroring both, and
+`docked_mode = "mirror"` under `[service.display]` makes mirroring the default
+instead (issue #233).
+
 If you use external-monitor mirroring, the Sway session must be started with
 `WLR_SCENE_DISABLE_DIRECT_SCANOUT=1` in its environment. Without it, a
 fullscreen activity direct-scans-out and starves `wl-mirror`'s screen capture,

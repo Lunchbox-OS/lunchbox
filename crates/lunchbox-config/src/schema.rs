@@ -1358,7 +1358,8 @@ pub struct RawDisplayConfig {
     pub mirror_audio: bool,
 
     /// What an external display shows when it is plugged in (issue #233). The
-    /// HUD's display button switches to the other mode (default: `mirror`).
+    /// HUD's display button switches to the other mode (default:
+    /// `external_only`).
     #[serde(default = "default_docked_mode")]
     pub docked_mode: RawDockedMode,
 }
@@ -1382,7 +1383,7 @@ fn default_true() -> bool {
 }
 
 fn default_docked_mode() -> RawDockedMode {
-    RawDockedMode::Mirror
+    RawDockedMode::ExternalOnly
 }
 
 #[cfg(test)]

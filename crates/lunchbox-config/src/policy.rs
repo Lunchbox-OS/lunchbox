@@ -516,7 +516,7 @@ impl Default for DisplayConfig {
         Self {
             docking_enabled: true,
             mirror_audio: true,
-            docked_mode: DisplayMode::Mirror,
+            docked_mode: DisplayMode::ExternalOnly,
         }
     }
 }
@@ -1658,6 +1658,27 @@ mod tests {
 
         let dt = lunchbox_util::now();
         assert!(policy.is_available(&dt));
+    }
+
+    #[test]
+    fn docked_mode_defaults_to_external_only() {
+        // Issue #233: a docked device drives only the external display unless
+        // the config asks for mirroring, whether or not the table is present.
+        assert_eq!(
+            DisplayConfig::from_raw(None).docked_mode,
+            DisplayMode::ExternalOnly
+        );
+        let raw: crate::schema::RawDisplayConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            DisplayConfig::from_raw(Some(&raw)).docked_mode,
+            DisplayMode::ExternalOnly
+        );
+        let raw: crate::schema::RawDisplayConfig =
+            toml::from_str(r#"docked_mode = "mirror""#).unwrap();
+        assert_eq!(
+            DisplayConfig::from_raw(Some(&raw)).docked_mode,
+            DisplayMode::Mirror
+        );
     }
 
     #[test]
