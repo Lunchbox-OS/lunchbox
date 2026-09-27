@@ -38,6 +38,14 @@ function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * Everything but what changes on every keystroke.
+ *
+ * The forms draw from `view` and `report`, which are debounced, so an edit
+ * alone changes nothing here. That is what lets a keystroke re-render only the
+ * field being typed in rather than the whole editor (issue #235); what does
+ * change per edit is in `ConfigDocLive`, for the few controls that show it.
+ */
 interface ConfigDocContextValue {
   /** Null until the wasm module has loaded. */
   ready: boolean;
@@ -54,13 +62,9 @@ interface ConfigDocContextValue {
   view: RawConfig | null;
   /** Validation result, refreshed on the same debounce as `view`. */
   report: Report | null;
-  /** The live document text — exactly what would be saved. */
-  text: string;
 
   /** Metadata about where this document came from. */
   document: ConfigDocument;
-  /** True when the text differs from what was last opened or saved. */
-  dirty: boolean;
 
   apply: (patch: Patch, coalesceKey?: string) => void;
   endGesture: () => void;
@@ -68,10 +72,12 @@ interface ConfigDocContextValue {
 
   undo: () => void;
   redo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
 
-  /** Per-day availability spans, computed by the same code the daemon uses. */
+  /**
+   * Per-day availability spans, computed by the same code the daemon uses.
+   * Changes identity when `view` does, so it agrees with the windows drawn
+   * from the view beside it.
+   */
   availabilityFor: (
     subject: { kind: "entry" | "group"; id: string },
   ) => AvailabilityView | null;
@@ -85,11 +91,32 @@ interface ConfigDocContextValue {
   clearError: () => void;
 }
 
+/** What changes on every accepted edit. Read it only where it is shown. */
+interface ConfigDocLive {
+  /** The live document text — exactly what would be saved. */
+  text: string;
+  /** True when the text differs from what was last opened or saved. */
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
 const ConfigDocContext = createContext<ConfigDocContextValue | null>(null);
+const ConfigDocLiveContext = createContext<ConfigDocLive | null>(null);
 
 export function useConfigDoc(): ConfigDocContextValue {
   const ctx = useContext(ConfigDocContext);
   if (!ctx) throw new Error("useConfigDoc must be used inside ConfigDocProvider");
+  return ctx;
+}
+
+/**
+ * The per-edit half of the document. A component that reads this re-renders
+ * on every keystroke anywhere in the editor, so keep such components small.
+ */
+export function useConfigDocLive(): ConfigDocLive {
+  const ctx = useContext(ConfigDocLiveContext);
+  if (!ctx) throw new Error("useConfigDocLive must be used inside ConfigDocProvider");
   return ctx;
 }
 
@@ -109,6 +136,16 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
   const [document, setDocument] = useState<ConfigDocument>({ text: "", name: null });
   const [error, setError] = useState<string | null>(null);
 
+  // Every accepted mutation goes through here. The text is read in the same
+  // update as the version bump, not in an effect keyed on it: an effect that
+  // sets state costs a second render of the whole editor after every
+  // keystroke, and leaves an update queued behind each one that fast typing
+  // keeps starving (issue #235).
+  const changed = useCallback((doc: ConfigDoc) => {
+    setVersion((v) => v + 1);
+    setText(doc.text());
+  }, []);
+
   // Load the wasm module, then start from a blank document so the editor is
   // usable before anyone opens a file.
   useEffect(() => {
@@ -119,7 +156,7 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
         docRef.current = ConfigDoc.blank();
         setVersions(JSON.parse(wasmVersions()) as Versions);
         setReady(true);
-        setVersion((v) => v + 1);
+        changed(docRef.current);
       })
       .catch((e: unknown) => {
         if (!cancelled) setLoadError(String(e));
@@ -127,17 +164,11 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [changed]);
 
-  // Text is read synchronously so the raw pane and the save button never lag
-  // behind an edit; the projection and validation are debounced, since they
-  // are the expensive half and only feed rendering.
-  useEffect(() => {
-    const doc = docRef.current;
-    if (!doc) return;
-    setText(doc.text());
-  }, [version]);
-
+  // Text is kept current with every edit (see `changed`) so the raw pane and
+  // the save button never lag behind one; the projection and validation are
+  // debounced, since they are the expensive half and only feed rendering.
   useEffect(() => {
     const doc = docRef.current;
     if (!doc) return;
@@ -157,12 +188,11 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     const doc = docRef.current;
     if (!doc) return;
     try {
-      const changed = doc.apply(JSON.stringify(patch), coalesceKey ?? null);
-      if (changed) setVersion((v) => v + 1);
+      if (doc.apply(JSON.stringify(patch), coalesceKey ?? null)) changed(doc);
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [changed]);
 
   const endGesture = useCallback(() => {
     docRef.current?.endGesture();
@@ -172,22 +202,24 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
     const doc = docRef.current;
     if (!doc) return null;
     try {
-      if (doc.replaceText(next)) setVersion((v) => v + 1);
+      if (doc.replaceText(next)) changed(doc);
       return null;
     } catch (e) {
       // Returned rather than thrown: the raw pane shows this inline while the
       // user is mid-edit, which is not an error state worth a dialog.
       return String(e);
     }
-  }, []);
+  }, [changed]);
 
   const undo = useCallback(() => {
-    if (docRef.current?.undo()) setVersion((v) => v + 1);
-  }, []);
+    const doc = docRef.current;
+    if (doc?.undo()) changed(doc);
+  }, [changed]);
 
   const redo = useCallback(() => {
-    if (docRef.current?.redo()) setVersion((v) => v + 1);
-  }, []);
+    const doc = docRef.current;
+    if (doc?.redo()) changed(doc);
+  }, [changed]);
 
   const availabilityFor = useCallback(
     (subject: { kind: "entry" | "group"; id: string }): AvailabilityView | null => {
@@ -203,9 +235,10 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
         return null;
       }
     },
-    // Recomputed whenever the document changes; callers memoize on `version`.
+    // Reads the document through the ref, so nothing here names `view`; it is
+    // what the identity should follow, all the same.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [version],
+    [view],
   );
 
   const openFrom = useCallback(async (source: ConfigSource) => {
@@ -214,12 +247,12 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       if (!opened) return;
       docRef.current = ConfigDoc.open(opened.text);
       setDocument(opened);
-      setVersion((v) => v + 1);
+      changed(docRef.current);
       setError(null);
     } catch (e) {
       setError(`Could not open that config: ${messageOf(e)}`);
     }
-  }, []);
+  }, [changed]);
 
   const save = useCallback(
     async (source: ConfigSource, as = false): Promise<boolean> => {
@@ -247,8 +280,8 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
   const startBlank = useCallback(() => {
     docRef.current = ConfigDoc.blank();
     setDocument({ text: "", name: null });
-    setVersion((v) => v + 1);
-  }, []);
+    changed(docRef.current);
+  }, [changed]);
 
   const value = useMemo<ConfigDocContextValue>(
     () => ({
@@ -257,16 +290,12 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       versions,
       view,
       report,
-      text,
       document,
-      dirty: text !== document.text,
       apply,
       endGesture,
       replaceText,
       undo,
       redo,
-      canUndo: docRef.current?.canUndo() ?? false,
-      canRedo: docRef.current?.canRedo() ?? false,
       availabilityFor,
       openFrom,
       save,
@@ -274,14 +303,28 @@ export function ConfigDocProvider({ children }: { children: ReactNode }) {
       error,
       clearError: () => setError(null),
     }),
-    // `version` is in the deps because canUndo/canRedo read through the ref,
-    // which React cannot observe on its own.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
-      ready, loadError, versions, view, report, text, document, version, error,
+      ready, loadError, versions, view, report, document, error,
       apply, endGesture, replaceText, undo, redo, availabilityFor, openFrom, save, startBlank,
     ],
   );
 
-  return <ConfigDocContext.Provider value={value}>{children}</ConfigDocContext.Provider>;
+  const live = useMemo<ConfigDocLive>(
+    () => ({
+      text,
+      dirty: text !== document.text,
+      canUndo: docRef.current?.canUndo() ?? false,
+      canRedo: docRef.current?.canRedo() ?? false,
+    }),
+    // `version` is in the deps because canUndo/canRedo read through the ref,
+    // which React cannot observe on its own.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [text, document, version],
+  );
+
+  return (
+    <ConfigDocContext.Provider value={value}>
+      <ConfigDocLiveContext.Provider value={live}>{children}</ConfigDocLiveContext.Provider>
+    </ConfigDocContext.Provider>
+  );
 }

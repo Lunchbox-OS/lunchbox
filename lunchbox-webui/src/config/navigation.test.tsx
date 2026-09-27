@@ -70,6 +70,7 @@ const doc = {
 vi.mock("./doc/ConfigDocProvider", () => ({
   ConfigDocProvider: ({ children }: { children: React.ReactNode }) => children,
   useConfigDoc: () => doc,
+  useConfigDocLive: () => doc,
 }));
 
 const { ConfigApp } = await import("./ConfigApp");
@@ -117,6 +118,7 @@ describe("the standalone shell", () => {
     vi.doMock("./doc/ConfigDocProvider", () => ({
       ConfigDocProvider: ({ children }: { children: React.ReactNode }) => children,
       useConfigDoc: () => doc,
+      useConfigDocLive: () => doc,
     }));
     const { ConfigApp: Standalone } = await import("./ConfigApp");
 

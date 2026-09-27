@@ -60,6 +60,7 @@ const doc = {
 vi.mock("./doc/ConfigDocProvider", () => ({
   ConfigDocProvider: ({ children }: { children: React.ReactNode }) => children,
   useConfigDoc: () => doc,
+  useConfigDocLive: () => doc,
 }));
 
 const { ServicePage } = await import("./pages/ServicePage");
