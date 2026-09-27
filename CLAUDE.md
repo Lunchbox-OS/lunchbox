@@ -36,7 +36,11 @@ fixes is the thing to avoid, however small each one is; the history note
 (below) is where they get told as one story. If you have already committed and
 the split is clearer in hindsight, rebuild the commits before you push.
 
-Historical prompts and design docs provided to agents are placed in <docs/ai/history>. Please refer there for history, and if this prompt is substantial, write it along with any relevant context (like the GitHub issue) to that directory as well.
+Historical prompts and design docs provided to agents are placed in
+<docs/ai/history>. Refer there for history, and if this prompt is substantial,
+write it along with any relevant context (like the GitHub issue) to that
+directory as well. Use a filename in this format:
+"YYYY-MM-DD HHMM short-description.md".
 
 This project was called **Shepherd** until 2026-09-19. Notes in <docs/ai/history>
 dated before then use the old names throughout (`shepherd-*` crates, `shepherdd`,
