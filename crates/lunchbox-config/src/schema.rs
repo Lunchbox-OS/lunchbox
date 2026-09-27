@@ -1356,10 +1356,33 @@ pub struct RawDisplayConfig {
     /// use, in both mirror and external-only modes (default: true).
     #[serde(default = "default_true")]
     pub mirror_audio: bool,
+
+    /// What an external display shows when it is plugged in (issue #233). The
+    /// HUD's display button switches to the other mode (default: `mirror`).
+    #[serde(default = "default_docked_mode")]
+    pub docked_mode: RawDockedMode,
+}
+
+/// The arrangement lunchboxd picks when an external display connects (issue
+/// #233).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RawDockedMode {
+    /// Both panels show the same picture: the external display mirrors the
+    /// built-in one.
+    Mirror,
+    /// The built-in panel turns off and the external display runs at its
+    /// native resolution.
+    ExternalOnly,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_docked_mode() -> RawDockedMode {
+    RawDockedMode::Mirror
 }
 
 #[cfg(test)]

@@ -2,8 +2,10 @@
 //!
 //! [`DisplayManager`] owns the compositor's display arrangement. On boot it
 //! records the primary (first-enumerated) output; when an external display is
-//! connected it mirrors the primary onto it by default, and it exposes a toggle
-//! to disable the primary and drive the external at its native resolution.
+//! connected it enters the configured docked mode (`service.display.docked_mode`,
+//! issue #233): mirroring the primary onto it, or disabling the primary and
+//! driving the external at its native resolution. The HUD toggles between the
+//! two.
 //! Exactly one logical output is ever active, so the one-activity-at-a-time
 //! invariant always holds.
 //!
@@ -134,6 +136,9 @@ pub struct DisplayManager {
     audio: Arc<dyn AudioRouter>,
     /// Whether to route audio to the external display while docked.
     mirror_audio: bool,
+    /// The mode entered whenever an external display connects: `Mirror` or
+    /// `ExternalOnly` (issue #233).
+    docked_mode: DisplayMode,
     ipc: Arc<IpcServer>,
     event_tx: broadcast::Sender<Event>,
     inner: Mutex<Inner>,
@@ -150,14 +155,17 @@ impl DisplayManager {
         mirror: Arc<dyn MirrorLauncher>,
         audio: Arc<dyn AudioRouter>,
         mirror_audio: bool,
+        docked_mode: DisplayMode,
         ipc: Arc<IpcServer>,
         event_tx: broadcast::Sender<Event>,
     ) -> Self {
+        debug_assert_ne!(docked_mode, DisplayMode::SingleInternal);
         Self {
             backend,
             mirror,
             audio,
             mirror_audio,
+            docked_mode,
             ipc,
             event_tx,
             inner: Mutex::new(Inner {
@@ -237,13 +245,14 @@ impl DisplayManager {
         let target = match (&new_secondary, prev_secondary.as_ref()) {
             // No external display connected.
             (None, _) => DisplayMode::SingleInternal,
-            // A new (or changed) external display → reset to Mirror (decision #4).
-            (Some(s), prev) if Some(s) != prev => DisplayMode::Mirror,
+            // A new (or changed) external display → reset to the configured
+            // docked mode (decision #4, issue #233).
+            (Some(s), prev) if Some(s) != prev => self.docked_mode,
             // Same external display still present → keep the user's current mode,
-            // unless we were in SingleInternal (shouldn't happen) → Mirror.
+            // unless we were in SingleInternal (shouldn't happen) → docked mode.
             (Some(_), _) => {
                 if prev_mode == DisplayMode::SingleInternal {
-                    DisplayMode::Mirror
+                    self.docked_mode
                 } else {
                     prev_mode
                 }
@@ -678,11 +687,20 @@ mod tests {
         mirror: Arc<MockMirror>,
         audio: Arc<MockAudio>,
     ) -> DisplayManager {
+        manager_docked(backend, mirror, audio, DisplayMode::Mirror)
+    }
+
+    fn manager_docked(
+        backend: Arc<MockBackend>,
+        mirror: Arc<MockMirror>,
+        audio: Arc<MockAudio>,
+        docked_mode: DisplayMode,
+    ) -> DisplayManager {
         // A real IpcServer isn't needed for logic: broadcast_event only pushes
         // onto a channel, so an unbound server (never `run()`) is fine.
         let ipc = Arc::new(IpcServer::new("/tmp/lunchbox-display-test.sock"));
         let (tx, _rx) = broadcast::channel(16);
-        DisplayManager::new(backend, mirror, audio, true, ipc, tx)
+        DisplayManager::new(backend, mirror, audio, true, docked_mode, ipc, tx)
     }
 
     #[tokio::test]
@@ -731,6 +749,66 @@ mod tests {
         // The pointer is confined to the primary so it can't wander onto the
         // mirror surface (issue #87).
         assert!(backend.ops().iter().any(|o| o == "pointer eDP-1"));
+    }
+
+    #[tokio::test]
+    async fn docked_mode_external_only_skips_the_mirror() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(vec![disp("eDP-1", true, &[(1920, 1080)])]);
+        let mirror = Arc::new(MockMirror {
+            available: true,
+            ..Default::default()
+        });
+        let audio = Arc::new(MockAudio::default());
+        let mgr = manager_docked(
+            backend.clone(),
+            mirror.clone(),
+            audio.clone(),
+            DisplayMode::ExternalOnly,
+        );
+        mgr.initialize().await;
+        backend.set_displays(vec![
+            disp("eDP-1", true, &[(1920, 1080)]),
+            disp("HDMI-A-1", true, &[(3840, 2160)]),
+        ]);
+        mgr.on_output_changed().await;
+        let st = mgr.state().await;
+        assert_eq!(st.mode, DisplayMode::ExternalOnly);
+        assert_eq!(st.secondary.as_deref(), Some("HDMI-A-1"));
+        assert!(backend.ops().iter().any(|o| o == "disable eDP-1"));
+        assert!(
+            !mirror
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.starts_with("start"))
+        );
+        assert!(audio.events.lock().unwrap().iter().any(|e| e == "route"));
+
+        // The HUD toggle goes the other way, into mirroring (issue #233).
+        let st = mgr.set_mode(st.mode.toggled()).await;
+        assert_eq!(st.mode, DisplayMode::Mirror);
+        assert!(
+            mirror
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e == "start eDP-1")
+        );
+
+        // Unplugging and replugging resets to the configured mode, not the
+        // one the toggle left behind.
+        backend.set_displays(vec![disp("eDP-1", true, &[(1920, 1080)])]);
+        mgr.on_output_changed().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::SingleInternal);
+        backend.set_displays(vec![
+            disp("eDP-1", true, &[(1920, 1080)]),
+            disp("HDMI-A-1", true, &[(3840, 2160)]),
+        ]);
+        mgr.on_output_changed().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::ExternalOnly);
     }
 
     #[tokio::test]

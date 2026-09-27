@@ -731,6 +731,20 @@ function DisplayEditor({ config }: { config: RawConfig }) {
         }
         label="Route audio to the external display"
       />
+      <TextField
+        select
+        size="small"
+        label="When a display is plugged in"
+        value={v?.docked_mode ?? FIELD_DEFAULTS.RawDisplayConfig.docked_mode}
+        onChange={(e) => f.setField("docked_mode", e.target.value)}
+        helperText="The display button on the HUD switches to the other mode."
+        sx={{ mt: 2, maxWidth: 520 }}
+      >
+        <MenuItem value="external_only">
+          Use only the external display, at its native resolution
+        </MenuItem>
+        <MenuItem value="mirror">Show the same picture on both screens</MenuItem>
+      </TextField>
     </Stack>
   );
 }

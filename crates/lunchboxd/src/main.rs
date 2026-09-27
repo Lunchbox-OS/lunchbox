@@ -1559,6 +1559,7 @@ impl Service {
                 Arc::new(WlMirrorLauncher::new()),
                 Arc::new(PipeWireAudioRouter::new()),
                 display_cfg.mirror_audio,
+                display_cfg.docked_mode,
                 ipc_ref.clone(),
                 event_tx.clone(),
             ));

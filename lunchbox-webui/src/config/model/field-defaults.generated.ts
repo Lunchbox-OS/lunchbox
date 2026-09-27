@@ -48,6 +48,7 @@ export const FIELD_DEFAULTS = {
     groups: [],
   },
   RawDisplayConfig: {
+    docked_mode: "mirror",
     docking_enabled: true,
     mirror_audio: true,
   },

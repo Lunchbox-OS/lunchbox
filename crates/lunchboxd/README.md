@@ -48,9 +48,10 @@ The Lunchbox background service.
 - `hidpi` (`XwaylandHidpi`) — temporarily drops the compositor output scale to
   1.0 for XWayland activities that need the native pixel grid (issue #45).
 - `display` (`DisplayManager`) + `display_watch` — external monitor / docking
-  support (issue #87). Captures the primary output at boot, mirrors it onto a
-  docked display via `wl-mirror` by default, and exposes a HUD toggle to switch
-  to external-only at native resolution. A sway IPC output-event subscription
+  support (issue #87). Captures the primary output at boot, puts a docked
+  display in the configured `service.display.docked_mode` (issue #233) —
+  mirroring the primary via `wl-mirror`, or external-only at native resolution —
+  and exposes a HUD toggle to switch to the other. A sway IPC output-event subscription
   drives reconciliation on hotplug. Exactly one logical output is active in
   every mode, preserving the one-activity-at-a-time invariant.
 - `input_devices` (`InputMonitor`) — input-device dependencies (issue #96).

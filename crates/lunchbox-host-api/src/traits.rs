@@ -477,8 +477,9 @@ impl HudLayoutController for NoOpHudLayoutController {
 /// External-display / docking controller (issue #87).
 ///
 /// Owns the compositor's display arrangement: on boot it records the primary
-/// (first-enumerated) output, mirrors it onto any connected external display by
-/// default, and toggles to "external only" on request. Threaded into the
+/// (first-enumerated) output, puts any connected external display in the
+/// configured docked mode (mirror or external only, issue #233), and toggles
+/// between the two on request. Threaded into the
 /// management service so admins can drive it over HTTP/BLE, exactly like
 /// [`HidpiController`].
 ///
