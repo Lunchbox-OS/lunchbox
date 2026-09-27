@@ -22,12 +22,25 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tracing::info;
 
-/// Tracks the effective HUD edge and announces changes to it.
-pub struct HudLayout {
-    /// The configured `[service.hud]` edge. Never changes at runtime.
+/// The two settings the effective HUD edge is decided from.
+#[derive(Debug, Clone, Copy)]
+struct Edges {
+    /// The configured `[service.hud]` edge. Follows config reloads (issue
+    /// #244).
     global: HudOrientation,
     /// The running activity's override, if it asked for one.
-    override_: Mutex<Option<HudOrientation>>,
+    override_: Option<HudOrientation>,
+}
+
+impl Edges {
+    fn effective(self) -> HudOrientation {
+        self.override_.unwrap_or(self.global)
+    }
+}
+
+/// Tracks the effective HUD edge and announces changes to it.
+pub struct HudLayout {
+    edges: Mutex<Edges>,
     /// IPC server, used to push `HudOrientationChanged` to subscribed shells
     /// (in practice, lunchbox-hud).
     ipc: Arc<IpcServer>,
@@ -43,24 +56,41 @@ impl HudLayout {
         event_tx: broadcast::Sender<Event>,
     ) -> Self {
         Self {
-            global,
-            override_: Mutex::new(None),
+            edges: Mutex::new(Edges {
+                global,
+                override_: None,
+            }),
             ipc,
             event_tx,
         }
     }
 
-    /// Swap the override and broadcast if the *effective* edge moved.
+    /// Take the `[service.hud]` edge from a reloaded config (issue #244).
     ///
-    /// Comparing effective edges rather than overrides is what keeps an
-    /// activity that asks for the edge the device already uses from producing
-    /// a spurious event — and a spurious event costs a full HUD rebuild.
+    /// Moves the HUD at once when no activity has an edge of its own. When one
+    /// does, the new setting waits for the session to end, the same way the
+    /// old one would have.
+    pub async fn set_global(&self, global: HudOrientation) {
+        self.update(|edges| edges.global = global).await;
+    }
+
+    /// Swap the override and broadcast if the *effective* edge moved.
     async fn set_override(&self, next: Option<HudOrientation>) {
-        let mut guard = self.override_.lock().await;
-        let before = guard.unwrap_or(self.global);
-        let after = next.unwrap_or(self.global);
-        *guard = next;
-        drop(guard);
+        self.update(|edges| edges.override_ = next).await;
+    }
+
+    /// Change the edges and broadcast if the *effective* edge moved.
+    ///
+    /// Comparing effective edges rather than settings is what keeps an
+    /// activity that asks for the edge the device already uses, or a reload
+    /// that leaves `[service.hud]` alone, from producing a spurious event —
+    /// and a spurious event costs a full HUD rebuild.
+    async fn update(&self, change: impl FnOnce(&mut Edges)) {
+        let mut edges = self.edges.lock().await;
+        let before = edges.effective();
+        change(&mut edges);
+        let after = edges.effective();
+        drop(edges);
 
         if before == after {
             return;
@@ -83,6 +113,59 @@ impl HudLayoutController for HudLayout {
     }
 
     async fn orientation(&self) -> HudOrientation {
-        self.override_.lock().await.unwrap_or(self.global)
+        self.edges.lock().await.effective()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout(global: HudOrientation) -> (HudLayout, broadcast::Receiver<Event>) {
+        let ipc = Arc::new(IpcServer::new(
+            "/nonexistent-dir-for-lunchbox-tests/ipc.sock",
+        ));
+        let (tx, rx) = broadcast::channel(16);
+        (HudLayout::new(global, ipc, tx), rx)
+    }
+
+    fn announced(rx: &mut broadcast::Receiver<Event>) -> Vec<HudOrientation> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let EventPayload::HudOrientationChanged { orientation } = event.payload {
+                out.push(orientation);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_reloaded_global_edge_moves_the_hud_at_once() {
+        let (layout, mut rx) = layout(HudOrientation::Top);
+        layout.set_global(HudOrientation::Left).await;
+        assert_eq!(layout.orientation().await, HudOrientation::Left);
+        assert_eq!(announced(&mut rx), [HudOrientation::Left]);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_global_edge_announces_nothing() {
+        let (layout, mut rx) = layout(HudOrientation::Top);
+        layout.set_global(HudOrientation::Top).await;
+        assert!(announced(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reloaded_global_edge_waits_for_an_activity_with_its_own() {
+        let (layout, mut rx) = layout(HudOrientation::Top);
+        layout.apply(Some(HudOrientation::Bottom)).await;
+        layout.set_global(HudOrientation::Left).await;
+        assert_eq!(layout.orientation().await, HudOrientation::Bottom);
+
+        layout.restore().await;
+        assert_eq!(layout.orientation().await, HudOrientation::Left);
+        assert_eq!(
+            announced(&mut rx),
+            [HudOrientation::Bottom, HudOrientation::Left]
+        );
     }
 }

@@ -16,6 +16,10 @@
 //! The state machine and mode selection are unit-tested against a mock
 //! [`OutputBackend`]; `wl-mirror` and audio are behind traits so tests don't
 //! spawn real processes.
+//!
+//! `[service.display]` follows config reloads (issue #245): the manager is
+//! built whether or not docking is enabled, does nothing with outputs while it
+//! is not, and [`DisplayManager::configure`] takes new settings.
 
 use async_trait::async_trait;
 use lunchbox_api::{DisplayMode, DisplayState, Event, EventPayload, VideoMode};
@@ -26,6 +30,7 @@ use lunchbox_host_linux::{
 use lunchbox_ipc::IpcServer;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{info, warn};
 
@@ -132,8 +137,11 @@ pub struct DisplayManager {
     backend: Arc<dyn OutputBackend>,
     mirror: Arc<dyn MirrorLauncher>,
     audio: Arc<dyn AudioRouter>,
+    /// `[service.display] docking_enabled`. While false, hotplug and mode
+    /// requests are ignored and the internal display is the only output.
+    docking_enabled: AtomicBool,
     /// Whether to route audio to the external display while docked.
-    mirror_audio: bool,
+    mirror_audio: AtomicBool,
     ipc: Arc<IpcServer>,
     event_tx: broadcast::Sender<Event>,
     inner: Mutex<Inner>,
@@ -149,6 +157,7 @@ impl DisplayManager {
         backend: Arc<dyn OutputBackend>,
         mirror: Arc<dyn MirrorLauncher>,
         audio: Arc<dyn AudioRouter>,
+        docking_enabled: bool,
         mirror_audio: bool,
         ipc: Arc<IpcServer>,
         event_tx: broadcast::Sender<Event>,
@@ -157,7 +166,8 @@ impl DisplayManager {
             backend,
             mirror,
             audio,
-            mirror_audio,
+            docking_enabled: AtomicBool::new(docking_enabled),
+            mirror_audio: AtomicBool::new(mirror_audio),
             ipc,
             event_tx,
             inner: Mutex::new(Inner {
@@ -170,6 +180,55 @@ impl DisplayManager {
         }
     }
 
+    fn docking_enabled(&self) -> bool {
+        self.docking_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Take `[service.display]` from a reloaded config (issue #245).
+    ///
+    /// Enabling docking arranges the outputs for whatever is connected now,
+    /// as a hotplug would. Disabling it returns to the internal display alone,
+    /// stopping any mirror and restoring audio. A change to `mirror_audio`
+    /// while docked moves the audio straight away.
+    pub async fn configure(&self, docking_enabled: bool, mirror_audio: bool) {
+        let _serial = self.apply_lock.lock().await;
+        let was_enabled = self.docking_enabled.swap(docking_enabled, Ordering::SeqCst);
+        let had_audio = self.mirror_audio.swap(mirror_audio, Ordering::SeqCst);
+        let (primary, mode) = {
+            let inner = self.inner.lock().await;
+            (inner.primary.clone(), inner.mode)
+        };
+        let docked = mode != DisplayMode::SingleInternal;
+
+        match (was_enabled, docking_enabled) {
+            (false, true) => {
+                info!("Docking enabled by config reload");
+                match self.backend.get_displays().await {
+                    Ok(displays) => self.reconcile_serialized(&displays, true).await,
+                    Err(e) => warn!(error = %e, "Failed to query displays after enabling docking"),
+                }
+            }
+            (true, false) => {
+                info!("Docking disabled by config reload");
+                if let Some(primary) = primary
+                    && docked
+                {
+                    // Only the internal branch runs, which reads no display info.
+                    self.apply(&primary, None, DisplayMode::SingleInternal, &[])
+                        .await;
+                }
+            }
+            (true, true) if docked && had_audio != mirror_audio => {
+                if mirror_audio {
+                    self.audio.route_to_external().await;
+                } else {
+                    self.audio.restore().await;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn broadcast(&self, state: DisplayState) {
         let event = Event::new(EventPayload::DisplayModeChanged { state });
         self.ipc.broadcast_event(event.clone());
@@ -177,7 +236,8 @@ impl DisplayManager {
     }
 
     /// Capture the primary output and apply the initial arrangement. Call once
-    /// at startup.
+    /// at startup. The primary is captured even with docking disabled, so a
+    /// reload that enables it has the native mode to restore on undock.
     pub async fn initialize(&self) {
         let displays = match self.backend.get_displays().await {
             Ok(d) => d,
@@ -197,13 +257,18 @@ impl DisplayManager {
         if let Some(p) = &primary {
             info!(primary = %p, mode = ?primary_native_mode, "Captured primary display");
         }
-        self.reconcile(&displays, true).await;
+        if self.docking_enabled() {
+            self.reconcile(&displays, true).await;
+        }
     }
 
     /// Re-evaluate the arrangement against the current display topology. Called
     /// by the hotplug watcher. Idempotent: does nothing when the topology and
     /// mode are already consistent.
     pub async fn on_output_changed(&self) {
+        if !self.docking_enabled() {
+            return;
+        }
         let displays = match self.backend.get_displays().await {
             Ok(d) => d,
             Err(e) => {
@@ -218,6 +283,16 @@ impl DisplayManager {
     /// changes, so shells learn the starting state.
     async fn reconcile(&self, displays: &[DisplayInfo], initial: bool) {
         let _serial = self.apply_lock.lock().await;
+        // Checked under the lock, so a hotplug queued behind a reload that
+        // disabled docking does not undo it.
+        if !self.docking_enabled() {
+            return;
+        }
+        self.reconcile_serialized(displays, initial).await;
+    }
+
+    /// [`Self::reconcile`], for a caller already holding `apply_lock`.
+    async fn reconcile_serialized(&self, displays: &[DisplayInfo], initial: bool) {
         let (primary_name, prev_secondary, prev_mode) = {
             let inner = self.inner.lock().await;
             (inner.primary.clone(), inner.secondary.clone(), inner.mode)
@@ -421,7 +496,7 @@ impl DisplayManager {
     }
 
     async fn route_audio_external(&self) {
-        if self.mirror_audio {
+        if self.mirror_audio.load(Ordering::SeqCst) {
             self.audio.route_to_external().await;
         }
     }
@@ -447,6 +522,9 @@ impl DisplayManager {
     /// (and thus the HUD's view) is unchanged.
     pub async fn reassert(&self) {
         let _serial = self.apply_lock.lock().await;
+        if !self.docking_enabled() {
+            return;
+        }
         let (primary, secondary, mode) = {
             let inner = self.inner.lock().await;
             (inner.primary.clone(), inner.secondary.clone(), inner.mode)
@@ -534,6 +612,9 @@ impl DisplayController for DisplayManager {
         // Serialize against concurrent toggles/hotplugs so a burst of clicks
         // can't interleave and corrupt the arrangement.
         let _serial = self.apply_lock.lock().await;
+        if !self.docking_enabled() {
+            return self.state().await;
+        }
         let displays = match self.backend.get_displays().await {
             Ok(d) => d,
             Err(e) => {
@@ -682,7 +763,111 @@ mod tests {
         // onto a channel, so an unbound server (never `run()`) is fine.
         let ipc = Arc::new(IpcServer::new("/tmp/lunchbox-display-test.sock"));
         let (tx, _rx) = broadcast::channel(16);
-        DisplayManager::new(backend, mirror, audio, true, ipc, tx)
+        DisplayManager::new(backend, mirror, audio, true, true, ipc, tx)
+    }
+
+    fn undocked_manager(
+        backend: Arc<MockBackend>,
+        mirror: Arc<MockMirror>,
+        audio: Arc<MockAudio>,
+    ) -> DisplayManager {
+        let ipc = Arc::new(IpcServer::new("/tmp/lunchbox-display-test.sock"));
+        let (tx, _rx) = broadcast::channel(16);
+        DisplayManager::new(backend, mirror, audio, false, true, ipc, tx)
+    }
+
+    fn internal_and_external() -> Vec<DisplayInfo> {
+        vec![
+            disp("eDP-1", true, &[(1920, 1080)]),
+            disp("HDMI-A-1", true, &[(1920, 1080)]),
+        ]
+    }
+
+    fn available_mirror() -> Arc<MockMirror> {
+        Arc::new(MockMirror {
+            available: true,
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn with_docking_disabled_a_connected_display_is_left_alone() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(internal_and_external());
+        let mirror = available_mirror();
+        let mgr = undocked_manager(backend.clone(), mirror.clone(), Arc::default());
+        mgr.initialize().await;
+        mgr.on_output_changed().await;
+
+        let st = mgr.state().await;
+        assert_eq!(st.mode, DisplayMode::SingleInternal);
+        assert_eq!(st.secondary, None);
+        assert!(mirror.events.lock().unwrap().is_empty());
+        assert_eq!(
+            mgr.set_mode(DisplayMode::ExternalOnly).await.mode,
+            DisplayMode::SingleInternal
+        );
+    }
+
+    #[tokio::test]
+    async fn enabling_docking_by_reload_mirrors_a_connected_display() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(internal_and_external());
+        let mirror = available_mirror();
+        let mgr = undocked_manager(backend.clone(), mirror.clone(), Arc::default());
+        mgr.initialize().await;
+
+        mgr.configure(true, true).await;
+        let st = mgr.state().await;
+        assert_eq!(st.mode, DisplayMode::Mirror);
+        assert_eq!(st.secondary.as_deref(), Some("HDMI-A-1"));
+        assert!(
+            mirror
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e == "start eDP-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_docking_by_reload_returns_to_the_internal_display() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(internal_and_external());
+        let mirror = available_mirror();
+        let audio = Arc::new(MockAudio::default());
+        let mgr = manager(backend.clone(), mirror.clone(), audio.clone());
+        mgr.initialize().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::Mirror);
+        mirror.events.lock().unwrap().clear();
+        audio.events.lock().unwrap().clear();
+
+        mgr.configure(false, true).await;
+        let st = mgr.state().await;
+        assert_eq!(st.mode, DisplayMode::SingleInternal);
+        assert_eq!(st.secondary, None);
+        assert_eq!(*mirror.events.lock().unwrap(), ["stop"]);
+        assert_eq!(*audio.events.lock().unwrap(), ["restore"]);
+
+        // And it stays that way through a hotplug.
+        mgr.on_output_changed().await;
+        assert_eq!(mgr.state().await.mode, DisplayMode::SingleInternal);
+    }
+
+    #[tokio::test]
+    async fn mirror_audio_follows_a_reload_while_docked() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_displays(internal_and_external());
+        let audio = Arc::new(MockAudio::default());
+        let mgr = manager(backend.clone(), available_mirror(), audio.clone());
+        mgr.initialize().await;
+        audio.events.lock().unwrap().clear();
+
+        mgr.configure(true, false).await;
+        mgr.configure(true, false).await;
+        mgr.configure(true, true).await;
+        assert_eq!(*audio.events.lock().unwrap(), ["restore", "route"]);
     }
 
     #[tokio::test]

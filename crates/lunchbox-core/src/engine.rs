@@ -204,6 +204,15 @@ impl CoreEngine {
         let entry_count = policy.entries.len();
         self.policy = policy;
 
+        // Forget connectivity for targets the new policy no longer checks
+        // (issue #188). Nothing probes them any more, so a status kept here
+        // would be a stale answer waiting for a later reload to bring the
+        // target back and report it as current.
+        let live: HashSet<&InternetCheckTarget> =
+            self.policy.internet_check_targets().into_iter().collect();
+        self.internet_status
+            .retain(|target, _| live.contains(target));
+
         let _ = self
             .store
             .append_audit(AuditEvent::new(AuditEventType::PolicyLoaded {
@@ -415,25 +424,8 @@ impl CoreEngine {
     /// known status. Targets that have never been checked are reported as
     /// unavailable. The list is empty when no checks are configured.
     pub fn internet_status_views(&self) -> Vec<InternetStatusView> {
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut targets: Vec<&InternetCheckTarget> = Vec::new();
-
-        if let Some(target) = self.policy.service.internet.check.as_ref()
-            && seen.insert(target.original.as_str())
-        {
-            targets.push(target);
-        }
-
-        for entry in &self.policy.entries {
-            if entry.internet.required
-                && let Some(target) = entry.internet.check.as_ref()
-                && seen.insert(target.original.as_str())
-            {
-                targets.push(target);
-            }
-        }
-
-        targets
+        self.policy
+            .internet_check_targets()
             .into_iter()
             .map(|target| InternetStatusView {
                 target: target.original.clone(),
@@ -2586,6 +2578,40 @@ mod tests {
         assert!(engine.set_kind_readiness(EntryKindTag::Process, true));
         assert!(engine.list_entries(now)[0].enabled);
         assert!(engine.list_entries(now)[0].reasons.is_empty());
+    }
+
+    #[test]
+    fn reload_forgets_status_of_checks_it_no_longer_asks_for() {
+        let target = InternetCheckTarget::parse("tcp://example.com:443").unwrap();
+        let mut policy = make_test_policy();
+        policy.service.internet.check = Some(target.clone());
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy.clone(), store, HostCapabilities::minimal());
+        engine.set_internet_status(target.clone(), true);
+
+        // Drop the check, then bring it back: the old `true` must not come
+        // back with it, because nothing probed the target in between.
+        let mut without = policy.clone();
+        without.service.internet.check = None;
+        engine.reload_policy(without);
+        assert!(engine.internet_status_views().is_empty());
+        engine.reload_policy(policy);
+        let views = engine.internet_status_views();
+        assert_eq!(views.len(), 1);
+        assert!(!views[0].available);
+    }
+
+    #[test]
+    fn reload_keeps_status_of_checks_it_still_asks_for() {
+        let target = InternetCheckTarget::parse("tcp://example.com:443").unwrap();
+        let mut policy = make_test_policy();
+        policy.service.internet.check = Some(target.clone());
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let mut engine = CoreEngine::new(policy.clone(), store, HostCapabilities::minimal());
+        engine.set_internet_status(target, true);
+
+        engine.reload_policy(policy);
+        assert!(engine.internet_status_views()[0].available);
     }
 
     #[test]

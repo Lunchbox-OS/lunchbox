@@ -13,4 +13,4 @@ mod uinput;
 
 pub use event::{OutputEvent, ScrollAxis};
 pub use sink::OutputSink;
-pub use uinput::{UinputSink, is_writable as uinput_is_writable};
+pub use uinput::{UinputSink, VIRTUAL_DEVICE_NAME_PREFIX, is_writable as uinput_is_writable};

@@ -52,13 +52,20 @@ The Lunchbox background service.
   docked display via `wl-mirror` by default, and exposes a HUD toggle to switch
   to external-only at native resolution. A sway IPC output-event subscription
   drives reconciliation on hotplug. Exactly one logical output is active in
-  every mode, preserving the one-activity-at-a-time invariant.
+  every mode, preserving the one-activity-at-a-time invariant. Built whether or
+  not docking is enabled, so a config reload can turn it on or off (issue #245).
 - `input_devices` (`InputMonitor`) — input-device dependencies (issue #96).
   When an entry declares `requires_input`, enumerates `/dev/input` via `evdev`
   to see which device types (mouse/touch/keyboard/gamepad) are connected, feeds
   the set into the engine, and re-broadcasts availability on hotplug (a `notify`
-  watch on `/dev/input` plus a slow fallback re-scan). Gates fail open when
-  `/dev/input` isn't readable.
+  watch on `/dev/input` plus a slow fallback re-scan). Runs for the daemon's
+  whole life and re-scans on config reload, so an entry that gains
+  `requires_input` by reload is gated at once. Gates fail open when
+  `/dev/input` isn't readable. A keyboard or mouse that a game controller
+  emulates on its own USB device — a handheld's built-in controller — does not
+  count, and on a machine with such a controller built in (not on a removable
+  port), neither does the i8042 AT keyboard. Nor do Lunchbox's own `uinput`
+  devices (`lunchbox_bridge::VIRTUAL_DEVICE_NAME_PREFIX`) (issue #236).
 
 ## Usage
 

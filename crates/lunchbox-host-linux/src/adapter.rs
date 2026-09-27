@@ -329,6 +329,9 @@ pub struct LinuxHost {
     steam_sessions: Arc<Mutex<HashMap<u32, SteamSession>>>,
     /// PIDs of preloaded Steam launcher processes (not session-tracked)
     steam_preload_pids: Arc<Mutex<HashSet<u32>>>,
+    /// Whether [`Self::preload_steam`] has run, so a second call — from a
+    /// config reload that finds Steam entries again — does nothing.
+    steam_preloaded: Arc<AtomicBool>,
     /// Per-activity sidecar processes (touch-bridge, etc.), keyed by the
     /// activity's pid so the monitor can reap them on natural exit too.
     sidecars: Arc<Mutex<HashMap<u32, Vec<Child>>>>,
@@ -496,6 +499,7 @@ impl LinuxHost {
             session_info: Arc::new(Mutex::new(HashMap::new())),
             steam_sessions: Arc::new(Mutex::new(HashMap::new())),
             steam_preload_pids: Arc::new(Mutex::new(HashSet::new())),
+            steam_preloaded: Arc::new(AtomicBool::new(false)),
             sidecars: Arc::new(Mutex::new(HashMap::new())),
             profile_wipes: Arc::new(Mutex::new(HashMap::new())),
             browser_root: resolve_browser_root(),
@@ -526,11 +530,19 @@ impl LinuxHost {
 
     /// Apply `[service.steam]` config. Call before [`preload_steam`] so the CEF
     /// debug flag is created (only) when at least one interstitial is enabled.
+    ///
+    /// Also called on every config reload (issue #243). An interstitial
+    /// enabled after the preload creates the flag here instead, since the
+    /// preload already ran; Steam reads it when it starts, so auto-dismiss
+    /// works from Steam's next start rather than straight away.
     pub fn configure_steam(
         &self,
         auto_dismiss: HashSet<InterstitialKind>,
         launch_timeout: Duration,
     ) {
+        if !auto_dismiss.is_empty() && self.steam_preloaded.load(Ordering::SeqCst) {
+            steam_interstitial::ensure_cef_debug_enabled();
+        }
         *self.steam_auto_dismiss.lock().unwrap() = auto_dismiss;
         self.steam_launch_timeout_ms
             .store(launch_timeout.as_millis() as u64, Ordering::Relaxed);
@@ -840,7 +852,16 @@ impl LinuxHost {
     /// Steam performs several startup steps (update, auth, cloud sync) before it
     /// can run a game. By starting Steam at daemon startup, these steps complete
     /// in the background and game launches feel nearly instant.
-    pub fn preload_steam(&self) {
+    ///
+    /// Runs once per daemon: returns whether this call started the preload,
+    /// and does nothing on later calls. A config reload calls it whenever the
+    /// new policy has Steam entries (issue #243), and a second client, or a
+    /// second readiness watcher re-gating Steam, is not what it is asking for.
+    pub fn preload_steam(&self) -> bool {
+        if self.steam_preloaded.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+
         // Watch for Steam finishing its initial load so Steam activities stay
         // hidden until then (issue #76). Started before the spawn (and
         // unconditionally, even if the spawn below fails) so the fallback
@@ -896,6 +917,7 @@ impl LinuxHost {
                 warn!(error = %e, "Failed to preload Steam");
             }
         }
+        true
     }
 
     /// Kill any preloaded Steam instance. Called during graceful shutdown.

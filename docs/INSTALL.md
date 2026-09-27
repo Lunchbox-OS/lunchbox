@@ -982,6 +982,11 @@ is **not** required. If the daemon can't read `/dev/input` the gate fails open
 — gated activities stay visible and a warning is logged — so a missing group
 never silently hides content.
 
+On a gaming handheld, "attached" means attached: the keyboard and mouse the
+built-in controller emulates from its buttons and trackpad do not count, and
+nor does the internal AT keyboard such machines report with no keys wired to
+it. A laptop's built-in keyboard still counts.
+
 ## Kiosk hardening
 
 Intended for devices used by children rather than developer machines — but on

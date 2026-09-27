@@ -19,12 +19,13 @@
 //! already rely on.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use evdev::{AbsoluteAxisCode, Device, KeyCode, PropType, RelativeAxisCode};
+use evdev::{AbsoluteAxisCode, BusType, Device, KeyCode, PropType, RelativeAxisCode};
 use lunchbox_api::{Event, EventPayload, InputDeviceType};
+use lunchbox_bridge::VIRTUAL_DEVICE_NAME_PREFIX;
 use lunchbox_config::Policy;
 use lunchbox_core::CoreEngine;
 use lunchbox_ipc::IpcServer;
@@ -33,8 +34,13 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, info, warn};
 
+use crate::policy_reloads::PolicyReloads;
+
 /// Directory the kernel exposes input event devices under.
 const INPUT_DIR: &str = "/dev/input";
+
+/// Where sysfs lists each input node, linking back to the hardware behind it.
+const SYSFS_INPUT_CLASS: &str = "/sys/class/input";
 
 /// Slow fallback re-scan cadence, in case an inotify event is ever missed
 /// (e.g. the watcher failed to install). Hotplug is normally reflected far
@@ -65,6 +71,12 @@ pub fn connected_inputs() -> Option<HashSet<InputDeviceType>> {
     scan_connected_inputs()
 }
 
+/// Runs for the life of the daemon whatever the policy says, because a config
+/// reload can add the first `requires_input` entry (issue #236). A monitor
+/// built only for a policy that had one at boot never ran for an entry added
+/// later, leaving the engine with no detection report and the gate failing
+/// open. It re-scans as soon as a reload lands, and does not open
+/// `/dev/input` while no entry sets `requires_input`.
 pub struct InputMonitor {
     /// Whether we've already logged that detection is unavailable, so the
     /// periodic fallback re-scan doesn't spam the log every cycle.
@@ -72,14 +84,10 @@ pub struct InputMonitor {
 }
 
 impl InputMonitor {
-    /// Build a monitor only if some entry actually depends on an input device.
-    /// When no entry sets `requires_input`, there is nothing to gate, so we
-    /// avoid opening `/dev/input` entirely.
-    pub fn from_policy(policy: &Policy) -> Option<Self> {
-        let any_required = policy.entries.iter().any(|e| !e.requires_input.is_empty());
-        any_required.then_some(Self {
+    pub fn new() -> Self {
+        Self {
             warned_unavailable: false,
-        })
+        }
     }
 
     pub async fn run(
@@ -88,6 +96,10 @@ impl InputMonitor {
         ipc: Arc<IpcServer>,
         event_tx: broadcast::Sender<Event>,
     ) {
+        // Subscribed before the first scan, so a reload that lands while it
+        // runs is still seen.
+        let mut reloads = PolicyReloads::subscribe(&event_tx);
+
         // Initial scan so the very first gating decision reflects real hardware.
         self.rescan_and_apply(&engine, &ipc, &event_tx).await;
 
@@ -125,19 +137,31 @@ impl InputMonitor {
                 _ = fallback.tick() => {
                     self.rescan_and_apply(&engine, &ipc, &event_tx).await;
                 }
-                else => break,
+                reload = reloads.next() => match reload {
+                    Some(()) => {
+                        debug!("Re-scanning input devices after a config reload");
+                        self.rescan_and_apply(&engine, &ipc, &event_tx).await;
+                    }
+                    None => break,
+                },
             }
         }
     }
 
     /// Scan `/dev/input`, push the connected set into the engine, and broadcast
-    /// a fresh state snapshot if the set changed.
+    /// a fresh state snapshot if the set changed. Does nothing while no entry
+    /// sets `requires_input`: there is nothing to gate, so `/dev/input` is not
+    /// opened.
     async fn rescan_and_apply(
         &mut self,
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
     ) {
+        if !any_entry_requires_input(engine.lock().await.policy()) {
+            return;
+        }
+
         // evdev enumeration opens and ioctls each device node; keep that off the
         // async runtime's worker threads.
         let scan = match tokio::task::spawn_blocking(scan_connected_inputs).await {
@@ -184,6 +208,10 @@ impl InputMonitor {
             let _ = event_tx.send(event);
         }
     }
+}
+
+fn any_entry_requires_input(policy: &Policy) -> bool {
+    policy.entries.iter().any(|e| !e.requires_input.is_empty())
 }
 
 /// Install an inotify-backed watcher on `/dev/input`. The returned watcher must
@@ -290,6 +318,120 @@ impl DeviceCaps {
     }
 }
 
+/// One device the scan could open: what it is called and what it can do.
+///
+/// The scan records every device before deciding what any of them count as,
+/// because whether a device counts can depend on the others around it.
+#[derive(Debug, Clone, Default)]
+struct ScannedDevice {
+    name: String,
+    caps: DeviceCaps,
+    /// The sysfs directory of the USB device this node belongs to, when it is
+    /// on USB (see [`usb_device_of`]).
+    usb_device: Option<PathBuf>,
+    /// Whether the firmware marks that USB device's port as one a user plugs
+    /// things into. Firmware that does not know says so, which reads as
+    /// `false` here.
+    usb_removable: bool,
+    /// Whether the node is on the i8042 controller — the PS/2 keyboard and
+    /// pointer wired inside a laptop or handheld, never one attached later.
+    on_i8042: bool,
+}
+
+/// The sysfs directory of the USB device an input node belongs to, or `None`
+/// when it is not on USB or sysfs does not say.
+///
+/// A USB device exposes each of its interfaces as its own input node, so a
+/// game controller that also emulates a keyboard and a mouse shows up as
+/// several nodes; this is what ties them back together. Only USB is followed:
+/// a Bluetooth device's ancestors lead to the adapter, which every Bluetooth
+/// device shares, so following them would tie unrelated devices together.
+fn usb_device_of(node: &Path, bus: BusType) -> Option<PathBuf> {
+    if bus != BusType::BUS_USB {
+        return None;
+    }
+    let sysfs = std::fs::canonicalize(Path::new(SYSFS_INPUT_CLASS).join(node.file_name()?)).ok()?;
+    // The interface directories between the node and the device (`5-1:1.2`)
+    // carry no `idVendor`; the device itself (`5-1`) is the first that does.
+    sysfs
+        .ancestors()
+        .find(|dir| dir.join("idVendor").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// Whether sysfs marks a USB device as sitting on a user-facing port.
+fn usb_removable(usb_device: &Path) -> bool {
+    std::fs::read_to_string(usb_device.join("removable"))
+        .is_ok_and(|removable| removable.trim() == "removable")
+}
+
+/// Which input device types a set of scanned devices adds up to.
+///
+/// A keyboard or mouse that shares its USB device with a gamepad is the
+/// controller emulating one, not one somebody plugged in (issue #236). Gaming
+/// handhelds do this with their built-in controller — the Legion Go S exposes
+/// two full keyboards and a mouse alongside its gamepad, all on one USB
+/// device, as do the Steam Deck and ROG Ally — so counting them would satisfy
+/// `requires_input = "keyboard"` on a handheld with nothing attached.
+///
+/// The same handhelds also have an i8042 AT keyboard, which claims a full
+/// keymap whether or not any keys are wired to it. On a laptop that is the
+/// real keyboard, so it is only discounted on a handheld, recognised by a
+/// controller that emulates a keyboard or mouse on a USB device the firmware
+/// does not call removable — a built-in one. The one machine this misreads is
+/// a laptop with a Steam Controller's receiver in a port its firmware does
+/// not describe, which loses its built-in keyboard while the receiver is in.
+///
+/// Devices Lunchbox created itself through `/dev/uinput` count as nothing: the
+/// HUD's page-turn keyboard stays for the life of the HUD, and an input-compat
+/// bridge's keyboard and mouse for the life of its activity, and neither is
+/// hardware anybody attached.
+fn classify(devices: &[ScannedDevice]) -> HashSet<InputDeviceType> {
+    let devices: Vec<&ScannedDevice> = devices
+        .iter()
+        .filter(|device| !device.name.starts_with(VIRTUAL_DEVICE_NAME_PREFIX))
+        .collect();
+
+    let controllers: HashSet<&Path> = devices
+        .iter()
+        .filter(|device| device.caps.has_gamepad_btn)
+        .filter_map(|device| device.usb_device.as_deref())
+        .collect();
+
+    let classified: Vec<(&ScannedDevice, HashSet<InputDeviceType>, bool)> = devices
+        .iter()
+        .map(|&device| {
+            let mut types = HashSet::new();
+            device.caps.classify_into(&mut types);
+            let emulated = device
+                .usb_device
+                .as_deref()
+                .is_some_and(|usb| controllers.contains(usb));
+            (device, types, emulated)
+        })
+        .collect();
+
+    let handheld = classified.iter().any(|(device, types, emulated)| {
+        *emulated
+            && !device.usb_removable
+            && (types.contains(&InputDeviceType::Keyboard)
+                || types.contains(&InputDeviceType::Mouse))
+    });
+
+    let mut connected = HashSet::new();
+    for (device, mut types, emulated) in classified {
+        if emulated || (handheld && device.on_i8042) {
+            types.remove(&InputDeviceType::Keyboard);
+            types.remove(&InputDeviceType::Mouse);
+        }
+        if !types.is_empty() {
+            debug!(name = %device.name, ?types, "Classified input device");
+        }
+        connected.extend(types);
+    }
+    connected
+}
+
 /// Enumerate `/dev/input` and return the set of connected input device types.
 ///
 /// Returns `None` when not a single device could be enumerated — `evdev`
@@ -299,26 +441,20 @@ impl DeviceCaps {
 /// open. `Some(set)` (even an empty set) means devices were readable and the
 /// set is authoritative.
 fn scan_connected_inputs() -> Option<HashSet<InputDeviceType>> {
-    let mut connected = HashSet::new();
-    let mut seen_any = false;
-    for (path, dev) in evdev::enumerate() {
-        seen_any = true;
-        let caps = DeviceCaps::from_device(&dev);
-        let before = connected.len();
-        caps.classify_into(&mut connected);
-        if connected.len() != before {
-            debug!(
-                path = %path.display(),
-                name = %dev.name().unwrap_or(""),
-                "Classified input device"
-            );
-        }
-        if connected.len() == 4 {
-            // All four types seen; no need to keep opening devices.
-            break;
-        }
-    }
-    seen_any.then_some(connected)
+    let devices: Vec<ScannedDevice> = evdev::enumerate()
+        .map(|(path, dev)| {
+            let bus = dev.input_id().bus_type();
+            let usb_device = usb_device_of(&path, bus);
+            ScannedDevice {
+                name: dev.name().unwrap_or("").to_string(),
+                caps: DeviceCaps::from_device(&dev),
+                usb_removable: usb_device.as_deref().is_some_and(usb_removable),
+                usb_device,
+                on_i8042: bus == BusType::BUS_I8042,
+            }
+        })
+        .collect();
+    (!devices.is_empty()).then(|| classify(&devices))
 }
 
 #[cfg(test)]
@@ -409,6 +545,191 @@ mod tests {
         let mut set = HashSet::new();
         caps.classify_into(&mut set);
         assert!(set.is_empty());
+    }
+
+    /// The keyboard, mouse and gamepad nodes a Legion Go S exposes with nothing
+    /// attached (issue #236), all on the one USB device its controller is.
+    fn legion_go_s_controller() -> Vec<ScannedDevice> {
+        let usb = Some(PathBuf::from("/sys/devices/pci0000:00/usb5/5-1"));
+        vec![
+            ScannedDevice {
+                name: "wch.cn Legion Go S".into(),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                usb_device: usb.clone(),
+                ..Default::default()
+            },
+            ScannedDevice {
+                name: "Legion Go S".into(),
+                caps: DeviceCaps {
+                    has_gamepad_btn: true,
+                    ..Default::default()
+                },
+                usb_device: usb.clone(),
+                ..Default::default()
+            },
+            ScannedDevice {
+                name: "wch.cn Legion Go S Mouse".into(),
+                caps: DeviceCaps {
+                    has_rel_xy: true,
+                    has_btn_left: true,
+                    ..Default::default()
+                },
+                usb_device: usb.clone(),
+                ..Default::default()
+            },
+            ScannedDevice {
+                name: "wch.cn Legion Go S Keyboard".into(),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                usb_device: usb,
+                ..Default::default()
+            },
+        ]
+    }
+
+    /// The i8042 keyboard a laptop types on, and a handheld has with no keys.
+    fn at_keyboard() -> ScannedDevice {
+        ScannedDevice {
+            name: "AT Translated Set 2 keyboard".into(),
+            caps: DeviceCaps {
+                has_typing_keys: true,
+                ..Default::default()
+            },
+            on_i8042: true,
+            ..Default::default()
+        }
+    }
+
+    fn usb_keyboard(usb_device: &str) -> ScannedDevice {
+        ScannedDevice {
+            name: "USB Keyboard".into(),
+            caps: DeviceCaps {
+                has_typing_keys: true,
+                ..Default::default()
+            },
+            usb_device: Some(PathBuf::from(usb_device)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lunchbox_virtual_devices_count_as_nothing() {
+        let devices = [
+            ScannedDevice {
+                name: format!("{VIRTUAL_DEVICE_NAME_PREFIX}keyboard"),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ScannedDevice {
+                name: format!("{VIRTUAL_DEVICE_NAME_PREFIX}pointer+keyboard"),
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    has_rel_xy: true,
+                    has_btn_left: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        assert!(classify(&devices).is_empty());
+    }
+
+    #[test]
+    fn handheld_at_keyboard_is_not_a_keyboard() {
+        let mut devices = legion_go_s_controller();
+        devices.push(at_keyboard());
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad])
+        );
+    }
+
+    #[test]
+    fn laptop_at_keyboard_counts_beside_a_plain_gamepad() {
+        // An external pad that emulates nothing says nothing about the
+        // machine it is plugged into.
+        let devices = [
+            at_keyboard(),
+            ScannedDevice {
+                caps: DeviceCaps {
+                    has_gamepad_btn: true,
+                    ..Default::default()
+                },
+                usb_device: Some(PathBuf::from("/sys/devices/pci0000:00/usb1/1-3")),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
+    }
+
+    #[test]
+    fn laptop_at_keyboard_counts_beside_a_removable_emulating_controller() {
+        // A Steam Controller in a port the firmware calls removable emulates a
+        // keyboard too, but is not built in.
+        let mut devices = legion_go_s_controller();
+        for device in &mut devices {
+            device.usb_removable = true;
+        }
+        devices.push(at_keyboard());
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
+    }
+
+    #[test]
+    fn controller_emulation_is_not_a_keyboard_or_mouse() {
+        assert_eq!(
+            classify(&legion_go_s_controller()),
+            HashSet::from([InputDeviceType::Gamepad])
+        );
+    }
+
+    #[test]
+    fn keyboard_on_another_usb_device_still_counts() {
+        let mut devices = legion_go_s_controller();
+        devices.push(usb_keyboard("/sys/devices/pci0000:00/usb3/3-2"));
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
+    }
+
+    #[test]
+    fn keyboard_without_a_usb_device_is_never_tied_to_a_controller() {
+        // A Bluetooth keyboard next to a Bluetooth gamepad: neither is on USB,
+        // so neither is taken for the other's emulation.
+        let devices = [
+            ScannedDevice {
+                caps: DeviceCaps {
+                    has_typing_keys: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ScannedDevice {
+                caps: DeviceCaps {
+                    has_gamepad_btn: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            classify(&devices),
+            HashSet::from([InputDeviceType::Gamepad, InputDeviceType::Keyboard])
+        );
     }
 
     /// Smoke test against the machine's real `/dev/input`. Ignored by default —

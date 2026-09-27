@@ -20,8 +20,8 @@ use lunchbox_config::load_config;
 use lunchbox_core::{BeginStopDecision, CoreEngine, CoreEvent};
 use lunchbox_host_api::{
     BrightnessController, DisplayController, HidpiController, HostAdapter, HostEvent,
-    HudLayoutController, LightSensor, NetworkInfoProvider, NoOpDisplayController,
-    StopMode as HostStopMode, VolumeController,
+    HudLayoutController, LightSensor, NetworkInfoProvider, StopMode as HostStopMode,
+    VolumeController,
 };
 use lunchbox_host_linux::{
     LinuxBrightnessController, LinuxHost, LinuxLightSensor, LinuxNetworkInfo,
@@ -113,11 +113,13 @@ mod input_devices;
 mod internet;
 mod media;
 mod pairing_display;
+mod policy_reloads;
 mod system_events;
 
 use display::{DisplayManager, WlMirrorLauncher};
 use hidpi::XwaylandHidpi;
 use hud_layout::HudLayout;
+use policy_reloads::PolicyReloads;
 
 /// How often to re-read the PipeWire audio topology (issue #124).
 ///
@@ -244,6 +246,42 @@ struct Args {
 }
 
 /// Main service state
+/// The parts of lunchboxd built from the policy that a config reload has to
+/// push new settings into, because they do not read the engine's policy for
+/// themselves (issues #188, #243).
+struct ReloadTargets {
+    /// Steam's settings and preload (issue #243).
+    host: Arc<LinuxHost>,
+    /// The file manager's live settings (issue #195).
+    file_manager: tokio::sync::watch::Sender<Arc<lunchbox_config::FileManagerConfig>>,
+    /// The global HUD edge (issue #244).
+    hud_layout: Arc<HudLayout>,
+    /// Docking (issue #245).
+    display: Arc<DisplayManager>,
+}
+
+impl ReloadTargets {
+    /// Hand each target its part of a policy the engine has just taken.
+    ///
+    /// Steam is not here: its gate has to change under the same engine lock as
+    /// the policy swap, so `handle_config_reload` applies it there.
+    async fn apply(&self, policy: &lunchbox_config::Policy) {
+        // The file manager reads its roots and its caps from here, so a reload
+        // that changed them reaches the web interface without a restart.
+        // `enabled` is deliberately *not* re-read: the routes were mounted (or
+        // not) when the router was built, and a surface that appeared
+        // mid-session would be one nobody watching the device had asked for.
+        let _ = self
+            .file_manager
+            .send(Arc::new(policy.service.file_manager.clone()));
+        self.hud_layout.set_global(policy.hud_orientation).await;
+        let display = &policy.service.display;
+        self.display
+            .configure(display.docking_enabled, display.mirror_audio)
+            .await;
+    }
+}
+
 struct Service {
     config_path: PathBuf,
     engine: CoreEngine,
@@ -254,8 +292,8 @@ struct Service {
     ipc: Arc<IpcServer>,
     store: Arc<dyn Store>,
     rate_limiter: RateLimiter,
-    internet_monitor: Option<internet::InternetMonitor>,
-    input_monitor: Option<input_devices::InputMonitor>,
+    internet_monitor: internet::InternetMonitor,
+    input_monitor: input_devices::InputMonitor,
     media_prefetcher: media::MediaPrefetcher,
     /// What is currently wrong with this device, for an administrator (issue
     /// #143). Swept periodically and on config reload.
@@ -1080,19 +1118,16 @@ impl Service {
             diagnostics.raise(Self::interrupted_session_diagnostic(&recovered, &label));
         }
 
-        // Apply Steam config to the host before any preload so the CEF debug
-        // flag is created (only) when interstitial auto-dismiss is enabled.
-        host.configure_steam(
-            engine.policy().service.steam.auto_dismiss.clone(),
-            engine.policy().service.steam.launch_timeout,
-        );
-
-        // Initialize internet connectivity monitor (if configured)
+        // Initialize internet connectivity monitor. Constructed unconditionally,
+        // so a reload that adds the first check has something to reach (issue
+        // #188); it probes nothing while the policy checks nothing.
         let internet_monitor = internet::InternetMonitor::from_policy(engine.policy());
 
-        // Initialize input-device dependency monitor (issue #96). Only runs when
-        // some entry declares `requires_input`.
-        let input_monitor = input_devices::InputMonitor::from_policy(engine.policy());
+        // Initialize input-device dependency monitor (issue #96). Constructed
+        // unconditionally, so a reload that adds the first `requires_input`
+        // entry has something to reach (issue #236); it scans only while some
+        // entry declares one.
+        let input_monitor = input_devices::InputMonitor::new();
         // Background media prefetch (issue #127). Constructed unconditionally,
         // including with no media entries configured: it re-reads policy each
         // sweep, so a reload that adds a media entry has something to reach.
@@ -1510,21 +1545,13 @@ impl Service {
         let _monitor_handle = self.host.start_monitor();
 
         // Preload Steam if any Steam entries are configured so it is ready
-        // when a user launches a game (skips Steam's startup sequence)
-        let has_steam = self
-            .engine
-            .policy()
-            .entries
-            .iter()
-            .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
-        if has_steam {
-            info!("Steam entries detected, preloading Steam in background");
-            // Hide Steam activities until the preloaded client finishes its
-            // initial load (issue #76). Seeded here so the very first served
-            // snapshot already gates Steam; the host's readiness watcher flips
-            // it to ready (see HostEvent::KindReadinessChanged).
+        // when a user launches a game (skips Steam's startup sequence), and
+        // hide Steam activities until the preloaded client finishes its initial
+        // load (issue #76). Seeded here so the very first served snapshot
+        // already gates Steam; the host's readiness watcher flips it to ready
+        // (see HostEvent::KindReadinessChanged).
+        if Self::apply_steam_policy(&self.host, self.engine.policy()) {
             self.engine.set_kind_readiness(EntryKindTag::Steam, false);
-            self.host.preload_steam();
         }
 
         // Get channels
@@ -1543,29 +1570,23 @@ impl Service {
         let brightness = self.brightness.clone();
         let light_sensor = self.light_sensor.clone();
         let store = self.store.clone();
-        // External monitor / docking controller (issue #87). When docking is
-        // disabled in config, a no-op controller is used so the management RPCs
-        // still resolve. When enabled, the real `DisplayManager` is also handed
-        // to a hotplug watcher and initialized below, and to the HiDPI workaround
-        // so the two output-mutating controllers coordinate (the HiDPI apply /
-        // restore re-asserts the mirror).
+        // External monitor / docking controller (issue #87). Built whether or
+        // not docking is enabled, so a config reload can turn it on or off
+        // (issue #245); while it is off the manager leaves the outputs alone.
+        // It is handed to a hotplug watcher and initialized below, and to the
+        // HiDPI workaround so the two output-mutating controllers coordinate
+        // (the HiDPI apply / restore re-asserts the mirror).
         let display_cfg = { engine.lock().await.policy().service.display.clone() };
-        let (display_svc, display_manager): (
-            Arc<dyn DisplayController>,
-            Option<Arc<DisplayManager>>,
-        ) = if display_cfg.docking_enabled {
-            let mgr = Arc::new(DisplayManager::new(
-                Arc::new(SwayIpcBackend),
-                Arc::new(WlMirrorLauncher::new()),
-                Arc::new(PipeWireAudioRouter::new()),
-                display_cfg.mirror_audio,
-                ipc_ref.clone(),
-                event_tx.clone(),
-            ));
-            (mgr.clone() as Arc<dyn DisplayController>, Some(mgr))
-        } else {
-            (Arc::new(NoOpDisplayController), None)
-        };
+        let display_manager = Arc::new(DisplayManager::new(
+            Arc::new(SwayIpcBackend),
+            Arc::new(WlMirrorLauncher::new()),
+            Arc::new(PipeWireAudioRouter::new()),
+            display_cfg.docking_enabled,
+            display_cfg.mirror_audio,
+            ipc_ref.clone(),
+            event_tx.clone(),
+        ));
+        let display_svc = display_manager.clone() as Arc<dyn DisplayController>;
 
         // The hidpi manager owns both the IPC server handle and the SSE
         // broadcast channel so it can fan `HudScaleChanged` events out to
@@ -1576,13 +1597,14 @@ impl Service {
         let hidpi = Arc::new(XwaylandHidpi::new(
             ipc_ref.clone(),
             event_tx.clone(),
-            display_manager.clone(),
+            Some(display_manager.clone()),
         ));
 
         // HUD placement (issue #171). Same shape and the same reasons as the
         // hidpi manager above: it holds both subscriber channels so it can
-        // announce a change of edge to IPC and SSE alike, and the global
-        // setting it falls back to is fixed at load time.
+        // announce a change of edge to IPC and SSE alike. The global setting
+        // it falls back to is read here and again on every config reload
+        // (issue #244).
         let hud_layout = {
             let global = engine.lock().await.policy().hud_orientation;
             Arc::new(HudLayout::new(global, ipc_ref.clone(), event_tx.clone()))
@@ -1613,6 +1635,12 @@ impl Service {
         // Published here at boot and again from `handle_config_reload`.
         let (file_manager_tx, file_manager_rx) =
             tokio::sync::watch::channel(Arc::new(file_manager_config.clone()));
+        let reload_targets = ReloadTargets {
+            host: host.clone(),
+            file_manager: file_manager_tx,
+            hud_layout: hud_layout.clone(),
+            display: display_manager.clone(),
+        };
 
         // The web listener's real state (issue #182), created before the
         // service that reads it and before the server that writes it. A
@@ -1768,16 +1796,40 @@ impl Service {
         // Automatic-brightness poll loop: sample the light sensor on a timer
         // and let the service decide whether to nudge the backlight. Runs only
         // when a sensor exists; ticks are cheap no-ops while auto is off.
+        // The sampling interval follows config reloads (issue #246); the curve
+        // and limits are read from the live policy on every tick already.
         if light_sensor_opt.is_some() {
             let svc_for_auto = svc_concrete.clone();
             let mut auto_shutdown_rx = shutdown_rx.clone();
-            let poll_interval = auto_brightness_policy.poll_interval;
+            let mut poll_interval = auto_brightness_policy.poll_interval;
+            let engine_for_auto = engine.clone();
+            let mut reloads = PolicyReloads::subscribe(&event_tx);
             tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(poll_interval);
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let ticker_for = |period| {
+                    let mut ticker = tokio::time::interval(period);
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    ticker
+                };
+                let mut ticker = ticker_for(poll_interval);
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => svc_for_auto.auto_brightness_tick().await,
+                        reload = reloads.next() => match reload {
+                            Some(()) => {
+                                let next = engine_for_auto
+                                    .lock()
+                                    .await
+                                    .policy()
+                                    .auto_brightness
+                                    .poll_interval;
+                                if next != poll_interval {
+                                    info!(poll_secs = next.as_secs(), "Auto-brightness poll interval changed");
+                                    poll_interval = next;
+                                    ticker = ticker_for(next);
+                                }
+                            }
+                            None => break,
+                        },
                         _ = auto_shutdown_rx.changed() => {
                             if *auto_shutdown_rx.borrow() {
                                 break;
@@ -1999,11 +2051,12 @@ impl Service {
         // System event watcher (logind + NetworkManager). Always running so the
         // suspend cover (issue #73) works regardless of internet gating: it
         // broadcasts SystemSuspending/SystemResumed and asks for a fresh state
-        // snapshot on resume via `resume_rx`. When an internet monitor is
-        // configured it also nudges it to re-check immediately on resume /
-        // network change instead of waiting for the next poll interval.
+        // snapshot on resume via `resume_rx`. It also nudges the internet
+        // monitor to re-check immediately on resume / network change instead
+        // of waiting for the next poll interval.
         let (resume_tx, mut resume_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let recheck_tx = if let Some(monitor) = self.internet_monitor {
+        let recheck_tx = {
+            let monitor = self.internet_monitor;
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
@@ -2019,15 +2072,14 @@ impl Service {
                     .await;
             });
             Some(recheck_tx)
-        } else {
-            None
         };
 
         // Input-device dependency monitor (issue #96): tracks which input device
         // types are connected and re-broadcasts availability on hotplug so
         // input-gated entries (e.g. a typing tutor requiring a keyboard) show and
         // hide as hardware is attached/removed.
-        if let Some(monitor) = self.input_monitor {
+        {
+            let monitor = self.input_monitor;
             let engine_ref = engine.clone();
             let ipc_for_monitor = ipc_ref.clone();
             let event_tx_for_monitor = event_tx.clone();
@@ -2075,10 +2127,10 @@ impl Service {
 
         // Initialize the display arrangement (detect primary, mirror any already
         // connected external) and watch for hotplug events (issue #87).
-        if let Some(mgr) = display_manager {
-            let init_mgr = mgr.clone();
+        {
+            let init_mgr = display_manager.clone();
             tokio::spawn(async move { init_mgr.initialize().await });
-            display_watch::spawn(mgr, shutdown_rx.clone()).await;
+            display_watch::spawn(display_manager.clone(), shutdown_rx.clone()).await;
         }
 
         // The peer allow-list was decided at construction, before there was
@@ -2230,7 +2282,7 @@ impl Service {
                         &event_tx,
                         &config_path,
                         policy_files.as_ref(),
-                        &file_manager_tx,
+                        &reload_targets,
                     )
                     .await;
                     // Re-probe against the new policy. Without this an admin who
@@ -2368,13 +2420,39 @@ impl Service {
         let _ = tx.send(event);
     }
 
+    /// Bring the host's Steam setup in line with `policy`: at boot, and again
+    /// on every config reload (issue #243).
+    ///
+    /// Returns whether Steam was preloaded just now, in which case the caller
+    /// must gate Steam entries until the host reports the client ready (issue
+    /// #76). Decided at boot alone, a Steam entry the boot policy did not have
+    /// was shown before Steam had loaded, or was launched with Steam not
+    /// started at all, and `[service.steam]` changes never reached the host.
+    fn apply_steam_policy(host: &LinuxHost, policy: &lunchbox_config::Policy) -> bool {
+        // Before any preload, so the CEF debug flag is created (only) when
+        // interstitial auto-dismiss is enabled.
+        host.configure_steam(
+            policy.service.steam.auto_dismiss.clone(),
+            policy.service.steam.launch_timeout,
+        );
+        let has_steam = policy
+            .entries
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Steam { .. }));
+        let started = has_steam && host.preload_steam();
+        if started {
+            info!("Steam entries detected, preloading Steam in background");
+        }
+        started
+    }
+
     async fn handle_config_reload(
         engine: &Arc<Mutex<CoreEngine>>,
         ipc: &Arc<IpcServer>,
         event_tx: &broadcast::Sender<Event>,
         config_path: &Path,
         policy_files: Option<&Arc<dyn ProtectedFiles>>,
-        file_manager: &tokio::sync::watch::Sender<Arc<lunchbox_config::FileManagerConfig>>,
+        targets: &ReloadTargets,
     ) {
         // Read from wherever the policy was read at boot. Reloading from a
         // different source than the one that started the session would mean a
@@ -2397,7 +2475,14 @@ impl Service {
         match loaded {
             Ok(policy) => {
                 let entry_count = {
-                    let event = engine.lock().await.reload_policy(policy);
+                    let mut eng = engine.lock().await;
+                    let event = eng.reload_policy(policy);
+                    // Under the same lock as the reload, so the snapshot
+                    // broadcast below already hides a Steam entry this reload
+                    // brought in before Steam has loaded.
+                    if Self::apply_steam_policy(&targets.host, eng.policy()) {
+                        eng.set_kind_readiness(EntryKindTag::Steam, false);
+                    }
                     if let CoreEvent::PolicyReloaded { entry_count } = event {
                         entry_count
                     } else {
@@ -2422,17 +2507,8 @@ impl Service {
                 );
                 let state = engine.lock().await.get_state();
                 Self::broadcast(ipc, event_tx, Event::new(EventPayload::StateChanged(state)));
-                // The file manager reads its roots and its caps from here, so
-                // a reload that changed them reaches the web interface without
-                // a restart. `enabled` is deliberately *not* re-read: the
-                // routes were mounted (or not) when the router was built, and
-                // a surface that appeared mid-session would be one nobody
-                // watching the device had asked for.
-                let settings = {
-                    let eng = engine.lock().await;
-                    eng.policy().service.file_manager.clone()
-                };
-                let _ = file_manager.send(Arc::new(settings));
+                let policy = engine.lock().await.policy().clone();
+                targets.apply(&policy).await;
             }
             Err(e) => {
                 warn!(error = %e, "Failed to reload config, keeping existing policy");
