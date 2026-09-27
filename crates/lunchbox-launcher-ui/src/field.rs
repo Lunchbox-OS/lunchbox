@@ -216,9 +216,15 @@ mod imp {
         /// back, which is what makes "play one more round" a single press.
         pub last_launched: RefCell<Option<EntryId>>,
         pub scale: Cell<f64>,
-        /// Set when the field is rebuilt, cleared once the selection has
-        /// actually been scrolled into view. See `wire_scroll_chips`.
+        /// Set when the field is rebuilt, cleared once the row has been put
+        /// back at `scroll_restore` — or once the child has woken the
+        /// selection, which is somewhere they asked to be instead. See
+        /// `wire_scroll_chips`.
         pub pending_scroll: Cell<bool>,
+        /// Where the row was when it was last rebuilt, and so where it goes
+        /// once the new one has been allocated. `scroll_home` sets it to the
+        /// start.
+        pub scroll_restore: Cell<f64>,
         /// Whether the selection is *shown*. The cursor always has a position;
         /// this is whether the child has done anything to deserve seeing it.
         pub selection_active: Cell<bool>,
@@ -261,6 +267,7 @@ mod imp {
                 last_launched: RefCell::new(None),
                 scale: Cell::new(1.0),
                 pending_scroll: Cell::new(false),
+                scroll_restore: Cell::new(0.0),
                 selection_active: Cell::new(false),
                 scroll_generation: Cell::new(0),
                 laid_out: Cell::new((0, 0)),
@@ -311,6 +318,16 @@ mod imp {
             self.scroller
                 .set_policy(gtk4::PolicyType::External, gtk4::PolicyType::Never);
             self.scroller.set_child(Some(&self.row));
+            // The field decides where the row sits (`scroll_to_cursor`), so the
+            // viewport GTK wrapped the row in must not decide as well. Left
+            // on, it followed the keyboard focus on its own — and a rebuild
+            // destroys the focused item, so GTK hands focus to the first one
+            // in the row and the viewport scrolls to show it, throwing the
+            // child back to the start on every snapshot while the launcher was
+            // up.
+            if let Some(viewport) = self.scroller.child().and_downcast::<gtk4::Viewport>() {
+                viewport.set_scroll_to_focus(false);
+            }
             self.scroller.set_hexpand(true);
             self.scroller.set_vexpand(true);
 
@@ -484,6 +501,16 @@ mod imp {
                 }
                 child = widget.next_sibling();
             }
+            // The headers slide against where their compartments *are*, and
+            // this is the first moment that is known. The adjustment's own
+            // signals come too early for it — it is configured part way through
+            // the allocation above, before the row's children have been placed
+            // — and a rebuild that lands the row where it already was fires no
+            // signal at all, so the offsets they last computed stayed on
+            // screen — a category's badge could be left somewhere off the edge
+            // of the screen after a rebuild. Only redraws, so it is safe from
+            // in here.
+            self.obj().slide_headers();
 
             let resized = self.laid_out.replace((width, height)) != (width, height);
             // The pending flag matters on its own: a field that was handed a
@@ -515,8 +542,50 @@ impl LauncherField {
     pub fn new() -> Self {
         let obj: Self = glib::Object::builder().build();
         obj.wire_scroll_chips();
+        obj.wire_wheel();
         obj.wire_background_taps();
         obj
+    }
+
+    /// Let an ordinary mouse wheel turn the row (#234).
+    ///
+    /// The row only scrolls sideways, and the scrolled window only listens to
+    /// the axis it scrolls, so a wheel — which turns vertically — did nothing
+    /// unless Shift was held to make it horizontal. Nobody reaches for Shift,
+    /// least of all a child; with one axis to move along, either axis should
+    /// move it.
+    ///
+    /// Capture phase, so this sees the event before the scrolled window does.
+    /// Only a *mostly vertical* scroll is taken: anything mostly sideways — a
+    /// touchpad swipe, a tilted wheel, Shift and a wheel — is left to the
+    /// scrolled window, which already handles it, kinetics and all.
+    fn wire_wheel(&self) {
+        let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
+        scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let field = self.downgrade();
+        scroll.connect_scroll(move |controller, dx, dy| {
+            let Some(field) = field.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if dy.abs() <= dx.abs() {
+                return glib::Propagation::Proceed;
+            }
+            // A wheel reports notches, a touchpad reports pixels. A notch moves
+            // as far as it does in any other GTK scrolled window, which scales
+            // it by the page so it feels the same on any size of screen.
+            let step = match controller.unit() {
+                gtk4::gdk::ScrollUnit::Wheel => field
+                    .imp()
+                    .scroller
+                    .hadjustment()
+                    .page_size()
+                    .powf(2.0 / 3.0),
+                _ => 1.0,
+            };
+            field.scroll_by(dy * step);
+            glib::Propagation::Stop
+        });
+        self.imp().scroller.add_controller(scroll);
     }
 
     /// A tap that lands on no activity puts the selection away (#208 review).
@@ -600,6 +669,7 @@ impl LauncherField {
         // Keep where the child was looking, so a snapshot arriving while they
         // are half way along the row does not throw them back to the start.
         let previous = self.focused_entry_id();
+        imp.scroll_restore.set(imp.scroller.hadjustment().value());
 
         while let Some(child) = imp.row.first_child() {
             imp.row.remove(&child);
@@ -708,11 +778,15 @@ impl LauncherField {
 
         self.clear_selection();
         self.restore_focus(previous);
-        // `restore_focus` scrolls, but nothing is allocated yet at this point:
-        // the viewport still measures zero, so the scroll is a no-op and an
-        // initial selection in a compartment beyond the first screenful would
-        // be left off-screen with nothing visibly selected at all. Ask again
-        // once the adjustment knows its real size.
+        // Put the row back where it was, not where the cursor is. The
+        // selection is asleep after a rebuild, so there is nothing on screen to
+        // bring into view — scrolling to the cursor here used to drag the row
+        // off to the last-launched activity on every snapshot, including the
+        // one that brings the launcher back after an activity closes (#238).
+        //
+        // Not now, though: nothing is allocated yet at this point, and the new
+        // row may not yet reach as far as the old one did. Once the adjustment
+        // knows its real size.
         imp.pending_scroll.set(true);
         self.update_scroll_chips();
     }
@@ -1039,6 +1113,9 @@ impl LauncherField {
         if page <= 0.0 {
             return;
         }
+        // The child has woken the selection, so where it is outranks where
+        // the row was before the rebuild.
+        imp.pending_scroll.set(false);
 
         let (s, _) = imp.cursor.get();
         let Some(slot) = imp.stacks.borrow().get(s).map(|stack| stack.slot.clone()) else {
@@ -1073,6 +1150,27 @@ impl LauncherField {
         } else if right > adj.value() + page {
             self.scroll_to(right - page, animate);
         }
+    }
+
+    /// Show the start of the row, as though the launcher had just opened.
+    ///
+    /// Called whenever the field comes back from something else — an activity
+    /// closing, above all (#238). A caregiver puts first what they most want
+    /// the child to see, and a launcher that reopens wherever the child last
+    /// left it shows them their last game instead, every time.
+    ///
+    /// Only the view moves. The cursor stays on what they launched last, so
+    /// the first press still wakes the selection there and "play one more
+    /// round" is still close at hand; it just is not the first thing on
+    /// screen.
+    pub fn scroll_home(&self) {
+        let imp = self.imp();
+        imp.scroll_restore.set(0.0);
+        // Any easing still running is headed somewhere else.
+        imp.scroll_generation
+            .set(imp.scroll_generation.get().wrapping_add(1));
+        self.clear_selection();
+        self.scroll_to(0.0, false);
     }
 
     /// Move the row to `target`, easing unless told not to.
@@ -1157,6 +1255,23 @@ impl LauncherField {
         });
     }
 
+    /// Move the row `delta` pixels along from wherever it is now, at once.
+    ///
+    /// Not eased: a wheel sends a stream of these, and each would start a new
+    /// animation from wherever the last had got to, so the row would lag
+    /// behind the wheel and never quite arrive.
+    fn scroll_by(&self, delta: f64) {
+        let imp = self.imp();
+        // Wherever the child has turned the row to is where it should stay,
+        // not where it was before the last rebuild — and not wherever an
+        // easing still running was taking it.
+        imp.pending_scroll.set(false);
+        imp.scroll_generation
+            .set(imp.scroll_generation.get().wrapping_add(1));
+        let value = imp.scroller.hadjustment().value();
+        self.scroll_to(value + delta, false);
+    }
+
     /// Push the row along when the child steers past either end.
     fn nudge(&self, dx: i32) {
         let adj = self.imp().scroller.hadjustment();
@@ -1186,7 +1301,20 @@ impl LauncherField {
         if page <= 0.0 {
             return;
         }
-        let view_left = adj.value();
+        // The visible stretch of the row, in the row's own coordinates — which
+        // are not the adjustment's. The adjustment counts from the row's
+        // border box, while a GTK 4 widget's coordinates start at its content
+        // box, inside `.lb-field__row`'s side padding. Taking one for the
+        // other put the view the padding's width further right than it was,
+        // so at the start of the row the first categories' names were pushed
+        // in by the fade inset with nothing scrolled under the fade at all.
+        // The row's bounds in its own coordinates start at minus that padding.
+        let origin = imp
+            .row
+            .compute_bounds(&imp.row)
+            .map(|b| f64::from(b.x()))
+            .unwrap_or(0.0);
+        let view_left = adj.value() + origin;
         let view_right = view_left + page;
         // Clear of the fades, or a title would sit dissolving under the very
         // edge it is trying to stay ahead of.
@@ -1276,9 +1404,17 @@ impl LauncherField {
             // The adjustment learns its page size and extent during
             // allocation, which is the first moment a scroll can mean
             // anything. Take the one the rebuild could not do.
+            //
+            // Held until the row reaches as far as the old one did: a rebuilt
+            // row is allocated in more than one pass, and the first can be
+            // too narrow to scroll back to where the child was, which left
+            // the row at whatever the clamp allowed.
             if field.imp().pending_scroll.get() && adj.page_size() > 0.0 {
-                field.imp().pending_scroll.set(false);
-                field.scroll_to_cursor();
+                let target = field.imp().scroll_restore.get();
+                field.scroll_to(target, false);
+                if target <= adj.upper() - adj.page_size() {
+                    field.imp().pending_scroll.set(false);
+                }
             }
             field.update_scroll_chips();
             field.slide_headers();

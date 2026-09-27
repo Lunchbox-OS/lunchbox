@@ -229,8 +229,22 @@ Example (bedtime restriction):
   across several presses instead, and the later ones land:
   `wtype -s 700 -k Return -k Return` (env: the session's `WAYLAND_DISPLAY` /
   `XDG_RUNTIME_DIR` / `SWAYSOCK`, see `dev-runtime/headless/session.env`). GTK
-  clients rebind on the capability change, which is why `dev key` works there.
+  clients rebind on the capability change, so `dev key` mostly works there, but
+  not always: driving the launcher on 2026-09-26, about four `dev key Right`
+  calls in five were lost, and a lone `dev key Return` never launched anything.
+  For a sequence you need to land, use one `wtype` with a harmless first key
+  to take the loss: `wtype -d 250 -k Shift_L -k Right -k Right -k Return`.
   Synthetic pointer clicks never reached the egui surface under any timing.
+- **For pointer input, hold a virtual pointer open.** `dev click` goes through
+  `swaymsg seat - cursor`, which moves a cursor the seat has no pointer device
+  for (`capabilities: 0` in `swaymsg -t get_seats`), so no client ever gets a
+  `wl_pointer` event. `wlrctl pointer …` creates a real
+  `zwlr_virtual_pointer_v1`, but it exits too quickly for GTK to bind it. A
+  small client that creates the virtual pointer, waits about a second, and
+  then sends `motion_absolute` and `axis_discrete` does reach the GTK
+  launcher. That is how wheel scrolling was verified for #234, with a
+  throwaway 60-line `wayland-client` + `wayland-protocols-wlr` program built
+  `--offline` from crates already in the cargo cache.
 - **Qt/KDE clients need the same repeat trick, and ignore synthetic clicks.**
   Okular (issue #160's Phase 0) takes `wtype -s 800 -M ctrl -k o -m ctrl` when
   the sequence is repeated two or three times, and drops a single press. Menubar

@@ -231,11 +231,24 @@ The branding asks for exactly one item focused at all times, which is right for
 a D-pad and wrong for a touchscreen: there is no cursor there to explain a
 standing highlight, and it claims a choice nobody has made.
 
+**The launcher opens at the start of the row** (#238): at startup, and every
+time it comes back from an activity, administrator mode or a lost connection,
+the row is scrolled all the way left. Caregivers put first what they most want
+the child to see, so that is what the child should see first. Only the view
+moves; the cursor stays on what they launched last, so the first press wakes
+the selection there. A snapshot arriving while the launcher is already up is a
+redraw, not an opening, and leaves the row where it was.
+
 Left/right move between stacks and across compartments; up/down move within a
 stack and wrap. Running off either end of the row nudges the scroll rather than
 wrapping — by most of a screenful, since a chevron is a "next page" control.
 Hovering with a pointer selects, so the pointer and the D-pad produce the same
 single state.
+
+An ordinary mouse wheel scrolls the row (#234). The row only moves sideways, so
+a mostly vertical scroll is turned into a horizontal one (`wire_wheel`); a
+mostly horizontal one (a touchpad swipe, or Shift and the wheel) is left to the
+scrolled window, which already handles it.
 
 The selected look is carried by a CSS class the field manages, not by `:focus`
 — see the note on `.lb-item--selected` in `src/theme.rs` for why.
