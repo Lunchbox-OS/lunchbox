@@ -308,16 +308,21 @@ handler and installs no signal handler at all — Okular is the measured case: i
 writes the page it was on only on a clean close, so a signal-only stop loses the
 child's place every session.
 
-So a graceful stop for a kind that asks for it (`EntryKind::wants_polite_close`)
-first asks the compositor to close every window attributed to the session
-(`[con_id=N] kill` over the sway IPC the daemon already holds), waits up to
-`POLITE_CLOSE_TIMEOUT`, and only then falls through to the unchanged
-`SIGTERM` → `SIGKILL` ladder. Measured at 0.33 s (PDF) to ~2 s (EPUB).
+Chrome is the other measured case (issue #237): it commits its cookie store to
+disk on a ~30 s timer and flushes it only on a real quit, so `SIGTERM` or
+`SIGKILL` — to the flatpak scope or to the browser process alone — drops any
+login made in the last half-minute of a session.
 
-It is opt-in per kind rather than universal because a close request is not
-always a quit: Steam reads it as "hide to tray", and RetroArch already has a
-verified single-`SIGTERM` shutdown that writes its save state. An activity with
-no window costs nothing — the wait only happens if a window was found.
+So every graceful stop, whatever the kind, first asks the compositor to close
+every window attributed to the session (`[con_id=N] kill` over the sway IPC the
+daemon already holds), waits up to `POLITE_CLOSE_TIMEOUT`, and only then falls
+through to the unchanged signal ladder. Measured at 0.33 s (PDF) to ~2 s
+(EPUB) for Okular and 150–300 ms for Chrome.
+
+An activity with no window costs nothing — the wait only happens if a window
+was found. One that reads a close as something other than a quit (Steam's
+"hide to tray", a page's "Leave site?" prompt) costs at most the timeout before
+it is signalled exactly as it would have been without the request.
 
 ## RetroArch
 
@@ -627,6 +632,11 @@ supported — a warning is logged and the browser policy ignored.
   activity's pid and deleted once the activity exits (detected by the process
   monitor, so the wipe waits for the Chrome instance to be gone). Wiping
   happens in the host adapter, never inside Chrome.
+- **Stopping**: like every activity, a graceful stop first asks sway to close
+  Chrome's windows (see "Closing a window before signalling it"). Chrome saves
+  cookies on a ~30s timer and does not flush on `SIGTERM` or `SIGKILL`, so a
+  signal-only stop dropped any login made in the last half-minute of a session
+  (issue #237).
 
 A failed policy write is logged and Chrome launches without the policy.
 
