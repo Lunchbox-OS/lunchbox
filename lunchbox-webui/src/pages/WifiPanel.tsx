@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
@@ -55,6 +55,34 @@ import type {
  */
 const REFRESH_MS = 6_000;
 const JOINING_REFRESH_MS = 2_000;
+
+/**
+ * How long to keep refreshing fast for a scan's results before giving up on
+ * seeing them land. NetworkManager's scans took 3.0 to 3.9 s on the dev box;
+ * this is room for a slow radio, not a figure anything waits out.
+ */
+const SCAN_FOLLOW_MS = 15_000;
+
+/**
+ * Whether `view`, fetched at `fetchedAt`, holds a scan that finished after a
+ * request made at `requestedAt` -- or the wait for one has gone on long enough.
+ * All three are `Date.now()` milliseconds.
+ *
+ * The device reports how old its last scan was when it answered, not when it
+ * happened, because its clock means nothing to a browser. So the scan's time
+ * is worked out from when the answer arrived, which also keeps a list fetched
+ * *before* the request from counting as its result.
+ */
+function scanLanded(
+  view: WifiScanView,
+  fetchedAt: number,
+  requestedAt: number,
+): boolean {
+  if (Date.now() - requestedAt > SCAN_FOLLOW_MS) return true;
+  const age = view.last_scan_age_s;
+  if (age === null || age === undefined) return false;
+  return fetchedAt - age * 1000 >= requestedAt;
+}
 
 /** What a person may pick when typing a network name in by hand. */
 const MANUAL_SECURITY: { value: WifiSecurity; label: string }[] = [
@@ -441,13 +469,16 @@ export function WifiPanel() {
   const [selected, setSelected] = useState<WifiNetwork | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // When a scan was asked for, while its results have not arrived. Tightens
+  // the refresh the way a join in flight does.
+  const [scanRequestedAt, setScanRequestedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const scan = useQuery<WifiScanView>({
     queryKey: ["wifi_networks"],
     queryFn: getWifiNetworks,
     refetchInterval: (query) =>
-      query.state.data?.join.state === "connecting"
+      query.state.data?.join.state === "connecting" || scanRequestedAt !== null
         ? JOINING_REFRESH_MS
         : REFRESH_MS,
   });
@@ -474,10 +505,38 @@ export function WifiPanel() {
   };
 
   const rescan = useMutation({
-    mutationFn: scanWifi,
-    onSuccess: () => setNotice("Scanning…"),
+    mutationFn: (_announce: boolean) => scanWifi(),
+    // `announce` is false for the scan the panel starts on its own when it
+    // opens, which nobody asked to be told about.
+    onSuccess: (_data, announce: boolean) => {
+      setScanRequestedAt(Date.now());
+      if (announce) setNotice("Scanning…");
+    },
     onError: (e) => report(e, "Could not start a scan."),
   });
+
+  // Scan when the panel opens. NetworkManager scans rarely on its own while
+  // connected -- its last one was four minutes old on the dev box -- and a
+  // single scan misses networks the next one finds. Only once the first read
+  // has shown there is a radio: without one the scan is an error, and opening
+  // the page would say so every time.
+  const scannedOnOpen = useRef(false);
+  const hasRadio = scan.data?.supported === true;
+  useEffect(() => {
+    if (!hasRadio || scannedOnOpen.current) return;
+    scannedOnOpen.current = true;
+    rescan.mutate(false);
+  }, [hasRadio, rescan]);
+
+  // Stop following a scan once its results are in, and retire "Scanning…"
+  // with it -- it said something was on its way, and now it has arrived.
+  useEffect(() => {
+    if (scanRequestedAt === null || !scan.data) return;
+    if (scanLanded(scan.data, scan.dataUpdatedAt, scanRequestedAt)) {
+      setScanRequestedAt(null);
+      setNotice((n) => (n === "Scanning…" ? null : n));
+    }
+  }, [scan.data, scan.dataUpdatedAt, scanRequestedAt]);
 
   const save = useMutation({
     mutationFn: saveWifiNetwork,
@@ -574,7 +633,7 @@ export function WifiPanel() {
             <IconButton
               size="small"
               aria-label="Scan again"
-              onClick={() => rescan.mutate()}
+              onClick={() => rescan.mutate(true)}
               disabled={rescan.isPending}
             >
               <RefreshIcon fontSize="inherit" />

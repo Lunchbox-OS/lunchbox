@@ -264,6 +264,45 @@ describe("the Wi-Fi panel", () => {
     expect(screen.queryByText(/No networks found yet/i)).toBeNull();
   });
 
+  it("scans when it opens, but not on a device with no radio", async () => {
+    // NetworkManager scans rarely on its own while connected, so the list on
+    // open could be minutes old. Without a radio the scan is an error, and
+    // opening the page would report it every time.
+    getWifiNetworks.mockResolvedValue(aScan());
+    getSavedWifiNetworks.mockResolvedValue([]);
+    renderPanel();
+    await waitFor(() => expect(scanWifi).toHaveBeenCalledTimes(1));
+
+    cleanup();
+    vi.clearAllMocks();
+    getWifiNetworks.mockResolvedValue(
+      aScan({ supported: false, networks: [] }),
+    );
+    renderPanel();
+    expect(await screen.findByText(/no Wi-Fi adapter/i)).toBeTruthy();
+    expect(scanWifi).not.toHaveBeenCalled();
+  });
+
+  it("retires 'Scanning…' once a scan newer than the request arrives", async () => {
+    // The list the request was made against is minutes old; the next one
+    // reports a scan that has just finished. "Scanning…" said something was
+    // on its way, and should go once it has arrived -- within the fast
+    // refresh, not the ordinary six seconds.
+    getWifiNetworks.mockResolvedValue(aScan({ last_scan_age_s: 240 }));
+    getSavedWifiNetworks.mockResolvedValue([]);
+    scanWifi.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: "Scan again" }));
+    expect(await screen.findByText("Scanning…")).toBeTruthy();
+
+    getWifiNetworks.mockResolvedValue(aScan({ last_scan_age_s: 0 }));
+    await waitFor(() => expect(screen.queryByText("Scanning…")).toBeNull(), {
+      timeout: 4_000,
+    });
+  }, 10_000);
+
   it("shows an unsupported network instead of hiding it", async () => {
     // A network missing from the list reads as a device that cannot see it.
     getWifiNetworks.mockResolvedValue(
