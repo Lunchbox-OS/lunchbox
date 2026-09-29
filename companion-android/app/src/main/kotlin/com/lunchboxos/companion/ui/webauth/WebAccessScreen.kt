@@ -21,7 +21,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -37,13 +36,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lunchboxos.companion.domain.LoginRequestInfo
 import com.lunchboxos.companion.ui.LinkStatus
 import com.lunchboxos.companion.ui.DeviceViewModel
+import com.lunchboxos.companion.ui.components.PasswordField
 import kotlinx.coroutines.delay
 
 /**
@@ -241,22 +240,20 @@ private fun PasswordCard(configured: Boolean, onSet: (String) -> Unit) {
                     Text(if (configured) "Change password" else "Set password")
                 }
             } else {
-                OutlinedTextField(
+                PasswordField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("New password") },
+                    label = "New password",
                     isError = tooShort,
                     supportingText = { Text(if (tooShort) "At least 8 characters" else " ") },
-                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                PasswordField(
                     value = confirm,
                     onValueChange = { confirm = it },
-                    label = { Text("Confirm") },
+                    label = "Confirm",
                     isError = mismatch,
                     supportingText = { Text(if (mismatch) "The passwords do not match" else " ") },
-                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

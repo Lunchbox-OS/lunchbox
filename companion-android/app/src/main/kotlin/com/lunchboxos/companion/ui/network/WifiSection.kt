@@ -35,7 +35,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.lunchboxos.companion.domain.SavedWifiNetwork
 import com.lunchboxos.companion.domain.WifiJoinFailureKind
@@ -44,6 +43,7 @@ import com.lunchboxos.companion.domain.WifiNetwork
 import com.lunchboxos.companion.domain.WifiSecurity
 import com.lunchboxos.companion.ui.DeviceViewModel
 import com.lunchboxos.companion.ui.WifiUiState
+import com.lunchboxos.companion.ui.components.PasswordField
 
 /**
  * Choosing a wireless network from the phone (issue #194).
@@ -127,12 +127,10 @@ private fun JoinDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (wantsPassword) {
-                    OutlinedTextField(
+                    PasswordField(
                         value = password,
                         onValueChange = { password = it },
-                        label = { Text("Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
+                        label = "Password",
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -210,12 +208,10 @@ private fun ManualDialog(
                     }
                 }
                 if (wantsPassword) {
-                    OutlinedTextField(
+                    PasswordField(
                         value = password,
                         onValueChange = { password = it },
-                        label = { Text("Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
+                        label = "Password",
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
