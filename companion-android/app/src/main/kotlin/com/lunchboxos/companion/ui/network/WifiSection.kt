@@ -84,13 +84,17 @@ private const val WEP_KEY_HINT =
     "5 or 13 characters, 10 or 26 hexadecimal digits, or a passphrase."
 
 /**
- * Said before a WEP join rather than refusing one. Joining it knowingly is no
- * worse than an open network, which is joined without a word; the point is
- * the "knowingly".
+ * Said before joining a network whose traffic anyone nearby can read, rather
+ * than refusing to join it. Open and WEP are equally exposed, so both get a
+ * sentence; the point is that the join is a knowing one. Enhanced Open gets
+ * none: it is encrypted, only without a password.
  */
-private const val WEP_NOTE =
-    "WEP is old and easily broken: anyone nearby can read this network's traffic, " +
-        "as on an open network."
+private fun exposureNote(security: WifiSecurity): String? = when (security) {
+    WifiSecurity.OPEN -> "This network isn't encrypted: anyone nearby can read its traffic."
+    WifiSecurity.WEP ->
+        "WEP is old and easily broken: anyone nearby can read this network's traffic."
+    else -> null
+}
 
 /** What a manual entry may choose. Enterprise is not written here. */
 private val MANUAL_SECURITY = listOf(
@@ -161,9 +165,9 @@ private fun JoinDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                if (network.security == WifiSecurity.WEP) {
+                exposureNote(network.security)?.let {
                     Text(
-                        WEP_NOTE,
+                        it,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -250,9 +254,9 @@ private fun ManualDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                if (security == WifiSecurity.WEP) {
+                exposureNote(security)?.let {
                     Text(
-                        WEP_NOTE,
+                        it,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

@@ -337,6 +337,46 @@ describe("the Wi-Fi panel", () => {
     );
   });
 
+  it("says an open network is readable, and Enhanced Open is not", async () => {
+    // Open is at least as exposed as WEP, so it gets the same kind of
+    // sentence. OWE is encrypted without a password and gets none.
+    getWifiNetworks.mockResolvedValue(
+      aScan({
+        networks: [
+          {
+            ssid: "cafe",
+            security: "open",
+            signal_percent: 70,
+            bands_ghz: [2],
+            saved: false,
+            active: false,
+          },
+          {
+            ssid: "library",
+            security: "owe",
+            signal_percent: 60,
+            bands_ghz: [5],
+            saved: false,
+            active: false,
+          },
+        ],
+      }),
+    );
+    getSavedWifiNetworks.mockResolvedValue([]);
+    const user = userEvent.setup();
+
+    renderPanel();
+    const [cafe, library] = await screen.findAllByRole("button", {
+      name: "Join",
+    });
+    await user.click(cafe);
+    expect(screen.getByText(/isn't encrypted/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await user.click(library);
+    expect(screen.queryByText(/anyone nearby can read/)).toBeNull();
+  });
+
   it("disables the forms on a device that cannot save a network", async () => {
     // The device can still list and still join what it knows; what it cannot
     // do is remember something new. Saying so up front beats a form that

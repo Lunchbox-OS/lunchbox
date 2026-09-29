@@ -93,15 +93,22 @@ function passwordHint(security: WifiSecurity): string {
 }
 
 /**
- * Said before a WEP join rather than refusing one. Joining it knowingly is no
- * worse than an open network, which is joined without a word; the point is the
- * "knowingly".
+ * Said before joining a network whose traffic anyone nearby can read, rather
+ * than refusing to join it. Open and WEP are equally exposed, so both get a
+ * sentence; the point is that the join is a knowing one. Enhanced Open gets
+ * none: it is encrypted, only without a password.
  */
-function WepNote() {
+function ExposureNote({ security }: { security: WifiSecurity }) {
+  const text =
+    security === "open"
+      ? "This network isn't encrypted: anyone nearby can read its traffic."
+      : security === "wep"
+        ? "WEP is old and easily broken: anyone nearby can read this network's traffic."
+        : null;
+  if (!text) return null;
   return (
     <Typography variant="body2" color="text.secondary">
-      WEP is old and easily broken: anyone nearby can read this network's
-      traffic, as on an open network.
+      {text}
     </Typography>
   );
 }
@@ -204,7 +211,7 @@ function JoinDialog({
               }}
             />
           )}
-          {network.security === "wep" && <WepNote />}
+          <ExposureNote security={network.security} />
           {confirmingConnect ? (
             <Alert severity="warning">
               <AlertTitle>This page may stop responding</AlertTitle>
@@ -335,7 +342,7 @@ function ManualDialog({
               }}
             />
           )}
-          {security === "wep" && <WepNote />}
+          <ExposureNote security={security} />
           <FormControlLabel
             control={
               <Checkbox
