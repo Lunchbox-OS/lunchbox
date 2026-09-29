@@ -164,6 +164,9 @@ of it has unit tests and no hardware run.
 
 * **Enterprise and WEP**, per the maintainer's answer. Both appear in the scan
   marked unsupported, with admin mode (#154) as the way in.
+  *Correction, 2026-09-28:* the maintainer's answer was about Enterprise only;
+  WEP had been listed as a non-goal with no reason given. WEP was then added —
+  see `2026-09-28 2156 wep-support (#194).md`.
 * **Toggling the radio.** `radio_enabled` is reported, never set.
 * **Manual IP configuration and captive portals**, per the issue.
 * **Choosing between several adapters.** The first managed one wins;
