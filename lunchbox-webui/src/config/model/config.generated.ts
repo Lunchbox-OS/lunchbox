@@ -248,6 +248,12 @@ export type RawDays = string | string[];
  */
 export interface RawDisplayConfig {
   /**
+   * What an external display shows when it is plugged in (issue #233). The
+   * HUD's display button switches to the other mode (default:
+   * `external_only`).
+   */
+  docked_mode?: RawDockedMode;
+  /**
    * Master switch for docking support. When false, lunchboxd leaves display
    * configuration entirely to sway (default: true).
    */
@@ -258,6 +264,22 @@ export interface RawDisplayConfig {
    */
   mirror_audio?: boolean;
 }
+
+/**
+ * The arrangement lunchboxd picks when an external display connects (issue
+ * #233).
+ */
+export type RawDockedMode =
+  /**
+   * Both panels show the same picture: the external display mirrors the
+   * built-in one.
+   */
+  | "mirror"
+  /**
+   * The built-in panel turns off and the external display runs at its
+   * native resolution.
+   */
+  | "external_only";
 
 /**
  * Raw entry definition

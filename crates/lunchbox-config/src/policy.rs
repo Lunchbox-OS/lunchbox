@@ -7,15 +7,16 @@ use crate::internet::{
 };
 use crate::schema::{
     RawAutoBrightnessConfig, RawBleManagementConfig, RawBrightnessConfig, RawBrowserConfig,
-    RawConfig, RawEntry, RawEntryKind, RawFirewallConfig, RawHudOrientation, RawInputCompat,
-    RawInputCompatOptions, RawInputDevice, RawInternetConfig, RawManagementApiConfig, RawMediaMode,
-    RawMediaQuality, RawMediaSortBy, RawServiceConfig, RawSteamConfig, RawVolumeConfig,
-    RawWarningThreshold,
+    RawConfig, RawDockedMode, RawEntry, RawEntryKind, RawFirewallConfig, RawHudOrientation,
+    RawInputCompat, RawInputCompatOptions, RawInputDevice, RawInternetConfig,
+    RawManagementApiConfig, RawMediaMode, RawMediaQuality, RawMediaSortBy, RawServiceConfig,
+    RawSteamConfig, RawVolumeConfig, RawWarningThreshold,
 };
 use crate::validation::{parse_days, parse_firewall_rule, parse_time};
 use lunchbox_api::{
-    BrowserMode, EntryKind, HudOrientation, InputCompatMode, InputCompatOptions, InputDeviceType,
-    InterstitialKind, MediaMode, MediaQuality, MediaSortBy, WarningSeverity, WarningThreshold,
+    BrowserMode, DisplayMode, EntryKind, HudOrientation, InputCompatMode, InputCompatOptions,
+    InputDeviceType, InterstitialKind, MediaMode, MediaQuality, MediaSortBy, WarningSeverity,
+    WarningThreshold,
 };
 use lunchbox_util::{
     DaysOfWeek, EntryId, GroupId, LimitSubject, TimeWindow, WallClock, default_data_dir,
@@ -505,6 +506,9 @@ pub struct DisplayConfig {
     pub docking_enabled: bool,
     /// Route audio to the external video device while docked.
     pub mirror_audio: bool,
+    /// The mode entered when an external display connects (issue #233): always
+    /// [`DisplayMode::Mirror`] or [`DisplayMode::ExternalOnly`].
+    pub docked_mode: DisplayMode,
 }
 
 impl Default for DisplayConfig {
@@ -512,6 +516,7 @@ impl Default for DisplayConfig {
         Self {
             docking_enabled: true,
             mirror_audio: true,
+            docked_mode: DisplayMode::ExternalOnly,
         }
     }
 }
@@ -522,6 +527,7 @@ impl DisplayConfig {
             Some(r) => Self {
                 docking_enabled: r.docking_enabled,
                 mirror_audio: r.mirror_audio,
+                docked_mode: convert_docked_mode(r.docked_mode),
             },
             None => Self::default(),
         }
@@ -962,6 +968,14 @@ fn convert_hud_orientation(raw: RawHudOrientation) -> HudOrientation {
         RawHudOrientation::Top => HudOrientation::Top,
         RawHudOrientation::Bottom => HudOrientation::Bottom,
         RawHudOrientation::Left => HudOrientation::Left,
+    }
+}
+
+/// Map the config spelling of a docked mode onto the wire type (issue #233).
+fn convert_docked_mode(raw: RawDockedMode) -> DisplayMode {
+    match raw {
+        RawDockedMode::Mirror => DisplayMode::Mirror,
+        RawDockedMode::ExternalOnly => DisplayMode::ExternalOnly,
     }
 }
 
@@ -1644,6 +1658,27 @@ mod tests {
 
         let dt = lunchbox_util::now();
         assert!(policy.is_available(&dt));
+    }
+
+    #[test]
+    fn docked_mode_defaults_to_external_only() {
+        // Issue #233: a docked device drives only the external display unless
+        // the config asks for mirroring, whether or not the table is present.
+        assert_eq!(
+            DisplayConfig::from_raw(None).docked_mode,
+            DisplayMode::ExternalOnly
+        );
+        let raw: crate::schema::RawDisplayConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            DisplayConfig::from_raw(Some(&raw)).docked_mode,
+            DisplayMode::ExternalOnly
+        );
+        let raw: crate::schema::RawDisplayConfig =
+            toml::from_str(r#"docked_mode = "mirror""#).unwrap();
+        assert_eq!(
+            DisplayConfig::from_raw(Some(&raw)).docked_mode,
+            DisplayMode::Mirror
+        );
     }
 
     #[test]

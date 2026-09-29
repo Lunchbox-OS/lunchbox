@@ -91,13 +91,16 @@ enabled = false             # Start with auto brightness on?
 
 # External monitor / docking (optional, issue #87)
 # When a handheld or laptop is docked to an external monitor or TV, lunchboxd
-# mirrors the primary panel onto it by default (via `wl-mirror`) and offers a
-# HUD toggle to switch to "external only" at the TV's native resolution. Exactly
+# either mirrors the primary panel onto it (via `wl-mirror`) or switches to
+# "external only" at the TV's native resolution, as `docked_mode` says, and
+# offers a HUD toggle to switch to the other. Exactly
 # one logical output is ever active, so the one-activity-at-a-time rule holds.
 # Requires the `wl-mirror` runtime dependency for mirroring.
 [service.display]
 docking_enabled = true   # Master switch for external-monitor support
 mirror_audio = true      # Route audio to the external video device while docked
+docked_mode = "external_only" # or "mirror", when a display is plugged in;
+                              # the HUD's display button switches to the other
 
 # Internet connectivity check (optional)
 # Entries can require internet and will be hidden when offline.

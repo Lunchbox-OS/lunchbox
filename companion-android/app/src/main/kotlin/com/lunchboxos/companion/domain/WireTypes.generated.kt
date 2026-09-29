@@ -894,8 +894,7 @@ enum class DisplayMode(val wire: String) {
      */
     SINGLE_INTERNAL("single_internal"),
     /**
-     * The external display mirrors the primary. Default whenever an external
-     * display connects.
+     * The external display mirrors the primary.
      */
     MIRROR("mirror"),
     /**

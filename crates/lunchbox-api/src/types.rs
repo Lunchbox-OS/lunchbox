@@ -1452,8 +1452,7 @@ pub enum DisplayMode {
     /// Only the internal/primary panel is active — the state when no external
     /// display is connected.
     SingleInternal,
-    /// The external display mirrors the primary. Default whenever an external
-    /// display connects.
+    /// The external display mirrors the primary.
     Mirror,
     /// The primary panel is disabled and the external display drives the
     /// session at its native resolution.
