@@ -60,6 +60,7 @@ const JOINING_REFRESH_MS = 2_000;
 const MANUAL_SECURITY: { value: WifiSecurity; label: string }[] = [
   { value: "wpa_psk", label: "WPA/WPA2 Personal" },
   { value: "sae", label: "WPA3 Personal" },
+  { value: "wep", label: "WEP (older routers)" },
   { value: "open", label: "None (open network)" },
 ];
 
@@ -74,11 +75,35 @@ const SECURITY_LABEL: Record<WifiSecurity, string> = {
 
 /** Whether this kind of network can be joined from here at all. */
 function joinable(security: WifiSecurity): boolean {
-  return security !== "enterprise" && security !== "wep";
+  return security !== "enterprise";
 }
 
 function needsPassword(security: WifiSecurity): boolean {
-  return security === "wpa_psk" || security === "sae";
+  return security === "wpa_psk" || security === "sae" || security === "wep";
+}
+
+/**
+ * The forms a key may take. A WEP key's form is worked out from its length on
+ * the device, the way NetworkManager does, so nobody is asked to pick one.
+ */
+function passwordHint(security: WifiSecurity): string {
+  return security === "wep"
+    ? "5 or 13 characters, 10 or 26 hexadecimal digits, or a passphrase."
+    : "8 to 63 characters, or 64 hexadecimal digits.";
+}
+
+/**
+ * Said before a WEP join rather than refusing one. Joining it knowingly is no
+ * worse than an open network, which is joined without a word; the point is the
+ * "knowingly".
+ */
+function WepNote() {
+  return (
+    <Typography variant="body2" color="text.secondary">
+      WEP is old and easily broken: anyone nearby can read this network's
+      traffic, as on an open network.
+    </Typography>
+  );
 }
 
 /** Four bars, because a percentage means nothing to the person reading it. */
@@ -170,7 +195,7 @@ function JoinDialog({
               label="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              helperText="8 to 63 characters, or 64 hexadecimal digits."
+              helperText={passwordHint(network.security)}
               slotProps={{
                 htmlInput: {
                   "aria-label": "Network password",
@@ -179,6 +204,7 @@ function JoinDialog({
               }}
             />
           )}
+          {network.security === "wep" && <WepNote />}
           {confirmingConnect ? (
             <Alert severity="warning">
               <AlertTitle>This page may stop responding</AlertTitle>
@@ -298,6 +324,9 @@ function ManualDialog({
               label="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              helperText={
+                security === "wep" ? passwordHint(security) : undefined
+              }
               slotProps={{
                 htmlInput: {
                   "aria-label": "Network password",
@@ -306,6 +335,7 @@ function ManualDialog({
               }}
             />
           )}
+          {security === "wep" && <WepNote />}
           <FormControlLabel
             control={
               <Checkbox
@@ -637,13 +667,7 @@ export function WifiPanel() {
                       ) : (
                         // Shown rather than hidden: a network missing from the
                         // list reads as a device that cannot see it.
-                        <Tooltip
-                          title={
-                            network.security === "enterprise"
-                              ? "Enterprise networks need certificates; use administrator mode."
-                              : "WEP is not supported."
-                          }
-                        >
+                        <Tooltip title="Enterprise networks need certificates; use administrator mode.">
                           <Chip
                             size="small"
                             variant="outlined"

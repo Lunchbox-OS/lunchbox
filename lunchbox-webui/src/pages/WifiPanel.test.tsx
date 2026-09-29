@@ -289,6 +289,54 @@ describe("the Wi-Fi panel", () => {
     expect(screen.queryByRole("button", { name: "Join" })).toBeNull();
   });
 
+  it("joins a WEP network with a key, saying what WEP is", async () => {
+    // Refusing WEP protected nobody: an open network is joined without a
+    // word. What is owed instead is saying what it is before it is joined.
+    getWifiNetworks.mockResolvedValue(
+      aScan({
+        networks: [
+          {
+            ssid: "old-router",
+            security: "wep",
+            signal_percent: 60,
+            bands_ghz: [2],
+            saved: false,
+            active: false,
+          },
+        ],
+      }),
+    );
+    getSavedWifiNetworks.mockResolvedValue([]);
+    saveWifiNetwork.mockResolvedValue({
+      id: "uuid",
+      ssid: "old-router",
+      security: "wep",
+      hidden: false,
+      autoconnect: true,
+      active: false,
+    });
+    const user = userEvent.setup();
+
+    renderPanel();
+    expect(await screen.findByText("old-router")).toBeTruthy();
+    expect(screen.queryByText(/Not supported/i)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Join" }));
+    expect(screen.getByText(/10 or 26 hexadecimal digits/)).toBeTruthy();
+    expect(screen.getByText(/anyone nearby can read/)).toBeTruthy();
+    await user.type(screen.getByLabelText("Network password"), "abcde");
+    await user.click(screen.getByRole("button", { name: /Save for later/i }));
+
+    await waitFor(() =>
+      expect(saveWifiNetwork).toHaveBeenCalledWith({
+        ssid: "old-router",
+        security: "wep",
+        password: "abcde",
+        hidden: false,
+        connect: false,
+      }),
+    );
+  });
+
   it("disables the forms on a device that cannot save a network", async () => {
     // The device can still list and still join what it knows; what it cannot
     // do is remember something new. Saying so up front beats a form that
