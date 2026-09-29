@@ -273,10 +273,18 @@ impl WifiController for LinuxWifiReader {
     async fn scan(&self) -> WifiResult<()> {
         match tokio::time::timeout(DBUS_TIMEOUT, request_scan()).await {
             Ok(Ok(())) => Ok(()),
+            // polkit's refusal is reported. Swallowed, it read as success: the
+            // UI said "Scanning…" and nothing ever scanned. `wifi.scan` is
+            // granted to an active local session, so this is what a daemon
+            // outside one -- started from SSH, or in a session that is not
+            // active -- runs into.
+            Ok(Err(e)) if is_permission_denied(&e.to_string()) => Err(WifiError::NotAuthorized),
             Ok(Err(e)) => {
-                // A refusal here is usually "a scan is already running", which
-                // is what the caller wanted anyway. Logged, not surfaced: the
-                // UI's next poll gets fresh results either way.
+                // Anything else -- a radio that is off, a device not yet
+                // ready -- is logged, not surfaced: the scan list the UI
+                // polls already says what state the radio is in. (A scan
+                // requested while one runs is *not* refused on 1.54.3;
+                // measured back to back.)
                 debug!(error = %e, "NetworkManager refused a scan request");
                 Ok(())
             }
@@ -432,11 +440,21 @@ async fn activate(uuid: &str) -> WifiResult<()> {
 /// it must not arrive as "internal error".
 fn activation_error(error: zbus::Error) -> WifiError {
     let message = error.to_string();
-    if message.contains("PermissionDenied") || message.contains("Not authorized") {
+    if is_permission_denied(&message) {
         WifiError::NotAuthorized
     } else {
         WifiError::Backend(message)
     }
+}
+
+/// Whether a NetworkManager error is polkit saying no.
+///
+/// Matched on the text because zbus folds the D-Bus error name into it. A
+/// refused scan, measured on 1.54.3, reads
+/// `org.freedesktop.NetworkManager.PermissionDenied: org.freedesktop.
+/// NetworkManager.wifi.scan request failed: not authorized`.
+fn is_permission_denied(message: &str) -> bool {
+    message.contains("PermissionDenied") || message.contains("Not authorized")
 }
 
 /// The object path of the wireless profile with this UUID.
@@ -979,6 +997,19 @@ mod tests {
         // Open is the one whose `key_mgmt` is None by design.
         assert!(WifiSecurity::Open.key_mgmt().is_none());
         assert_eq!(security_from_key_mgmt(None, false), WifiSecurity::Open);
+    }
+
+    #[test]
+    fn a_refused_scan_is_recognised_as_polkit_saying_no() {
+        // Verbatim from a scan requested outside an active session.
+        assert!(is_permission_denied(
+            "org.freedesktop.NetworkManager.PermissionDenied: \
+             org.freedesktop.NetworkManager.wifi.scan request failed: not authorized"
+        ));
+        assert!(!is_permission_denied(
+            "org.freedesktop.NetworkManager.Device.NotAllowed: \
+             Scanning not allowed while unavailable"
+        ));
     }
 
     #[test]

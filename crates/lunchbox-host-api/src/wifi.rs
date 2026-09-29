@@ -27,7 +27,8 @@ pub enum WifiError {
     #[error("This device has no Wi-Fi adapter")]
     NoAdapter,
 
-    /// The device may not write a profile.
+    /// The device may not write a profile, or — for a scan — may not ask for
+    /// one.
     ///
     /// On an installed device this means the custodian holds no
     /// NetworkManager grant — the polkit rule is missing, or `lunchboxd` is
@@ -35,7 +36,10 @@ pub enum WifiError {
     /// there is nothing a caller can do differently, and a UI that says
     /// "failed" here sends somebody looking for a network problem that does
     /// not exist.
-    #[error("This device is not allowed to change Wi-Fi settings")]
+    ///
+    /// A refused scan is `lunchboxd` itself outside an active local session,
+    /// which is where polkit grants `wifi.scan`.
+    #[error("This device is not allowed to manage Wi-Fi")]
     NotAuthorized,
 
     /// No saved profile with that id. Usually a stale list in a UI that has
