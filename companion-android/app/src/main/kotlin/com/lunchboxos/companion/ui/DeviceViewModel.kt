@@ -2,6 +2,7 @@ package com.lunchboxos.companion.ui
 
 import android.app.Application
 import android.os.Build
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lunchboxos.companion.appContainer
@@ -209,10 +210,19 @@ data class WifiUiState(
     /** True while a save, join or forget is in flight, to keep buttons still. */
     val busy: Boolean = false,
     val error: String? = null,
+    /**
+     * When a scan was last asked for ([SystemClock.elapsedRealtime]), while its
+     * results have not arrived yet. Cleared by [DeviceViewModel.refreshWifi].
+     */
+    val scanRequestedAt: Long? = null,
 ) {
     /** Whether a join is still running, which is what tightens the poll. */
     val joining: Boolean
         get() = scan?.join is WifiJoinState.Connecting
+
+    /** Whether a scan's results are still on their way, which also tightens it. */
+    val awaitingScan: Boolean
+        get() = scanRequestedAt != null
 
     /** Networks worth offering, strongest first — the device already sorted them. */
     val networks: List<WifiNetwork>
@@ -949,13 +959,24 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
         _wifi.update { it.copy(loading = true) }
         wifiJob = viewModelScope.launch {
             try {
+                // Taken before the call, so a read that was already under way
+                // when a scan was requested cannot pass for that scan's result.
+                val startedAt = SystemClock.elapsedRealtime()
                 val scan = c.wifiNetworks()
                 // Only asked for when the device has a radio: a device without
                 // one answers this with an error, and there is nothing useful
                 // to show from it.
                 val saved = if (scan.supported) c.wifiSavedNetworks() else emptyList()
                 _wifi.update {
-                    it.copy(scan = scan, saved = saved, loading = false, error = null)
+                    it.copy(
+                        scan = scan,
+                        saved = saved,
+                        loading = false,
+                        error = null,
+                        scanRequestedAt = it.scanRequestedAt?.takeUnless { at ->
+                            scanLanded(scan, startedAt, at)
+                        },
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -968,10 +989,21 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Ask the device to scan again. The results arrive on the next poll. */
-    fun scanWifi() = action { c ->
+    /**
+     * Ask the device to scan again.
+     *
+     * The call returns at once and NetworkManager scans for about 3.5 seconds
+     * (3.0 to 3.9 measured on the dev box). Rather than leave the results to
+     * the next ordinary poll, up to six seconds later, this marks a scan as
+     * awaited, which tightens the poll until one lands.
+     *
+     * [announce] is false for the scan the Wi-Fi screen starts on its own when
+     * it opens, which nobody asked to be told about.
+     */
+    fun scanWifi(announce: Boolean = true) = action { c ->
         c.wifiScan()
-        _message.value = "Scanning\u2026"
+        _wifi.update { it.copy(scanRequestedAt = SystemClock.elapsedRealtime()) }
+        if (announce) _message.value = "Scanning\u2026"
     }
 
     /**
@@ -1700,3 +1732,27 @@ private fun AdminRecord.toDeviceRecord(
     role = role.name.lowercase(),
     androidIdentifier = androidIdentifier,
 )
+
+/**
+ * How long to keep polling fast for a scan's results before giving up on
+ * seeing them land. Measured scans take under four seconds; this is room for a
+ * slow radio and a slow BLE round trip, not a figure anything waits out.
+ */
+private const val SCAN_FOLLOW_MS = 15_000L
+
+/**
+ * Whether [scan], asked for at [readStartedAt], holds a scan that finished
+ * after the request made at [requestedAt] -- or the wait for one has gone on
+ * long enough.
+ *
+ * The device reports how old its last scan was when it answered, not when it
+ * happened, since its clock means nothing here. It answered after
+ * [readStartedAt], so the scan finished no earlier than
+ * `readStartedAt - age`; if that is after the request, so was the scan. A read
+ * begun before the request therefore never counts.
+ */
+private fun scanLanded(scan: WifiScanView, readStartedAt: Long, requestedAt: Long): Boolean {
+    if (SystemClock.elapsedRealtime() - requestedAt > SCAN_FOLLOW_MS) return true
+    val age = scan.lastScanAgeS ?: return false
+    return readStartedAt - age * 1000 >= requestedAt
+}

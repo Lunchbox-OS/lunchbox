@@ -348,7 +348,7 @@ fun WifiSection(vm: DeviceViewModel, wifi: WifiUiState) {
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f),
                 )
-                IconButton(onClick = vm::scanWifi, enabled = !wifi.busy) {
+                IconButton(onClick = { vm.scanWifi() }, enabled = !wifi.busy) {
                     if (wifi.loading) {
                         CircularProgressIndicator(
                             strokeWidth = 2.dp,
