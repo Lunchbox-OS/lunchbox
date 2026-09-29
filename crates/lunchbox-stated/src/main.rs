@@ -42,6 +42,7 @@ mod guard;
 mod polkit;
 mod session;
 mod watch;
+mod wifi;
 
 use std::os::fd::{AsFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
@@ -209,6 +210,11 @@ async fn main() -> Result<()> {
         }
     };
     let guard_handle = guard::Handle::new(guard_tx.clone(), armed, caveat, guard::BEAT_DEADLINE);
+    // The wireless grant is settled here too, and for the same reason as the
+    // watchdog's: a device that offers a Wi-Fi form it cannot act on is worse
+    // than one that says up front it cannot. The answer travels to lunchboxd
+    // on request, and reaches the Health page from there (issue #194).
+    let wifi = Arc::new(wifi::WifiCustodian::new(conn.clone()).await);
     // A sleeping machine is not a wedged one. Failing to subscribe is not fatal
     // — it costs the watchdog the ability to tell those apart, and that is
     // worth a loud line rather than a refusal to start.
@@ -263,7 +269,7 @@ async fn main() -> Result<()> {
     let watch = session::watch_for_loss(&conn, trusted.clone()).await?;
 
     tokio::select! {
-        r = serve(listener, policy, store, files, config_changes, guard_handle) => r,
+        r = serve(listener, policy, store, files, config_changes, guard_handle, wifi) => r,
         r = watch => r,
     }
 }
@@ -381,6 +387,7 @@ async fn serve(
     files: Arc<dyn ProtectedFiles>,
     config_changes: tokio::sync::broadcast::Sender<()>,
     guard: guard::Handle,
+    wifi: Arc<wifi::WifiCustodian>,
 ) -> Result<()> {
     loop {
         let (stream, _) = match listener.accept().await {
@@ -402,13 +409,14 @@ async fn serve(
                 let files = Arc::clone(&files);
                 let changes = config_changes.subscribe();
                 let guard = guard.clone();
+                let wifi = Arc::clone(&wifi);
                 // One task per connection. In practice there are two — a
                 // request connection and a config watch — but a task keeps a
                 // slow or wedged peer from stalling the accept loop, which is
                 // what would turn a hung client into a device that cannot
                 // reconnect.
                 tokio::spawn(async move {
-                    if let Err(e) = session_loop(stream, store, files, changes, guard).await {
+                    if let Err(e) = session_loop(stream, store, files, changes, guard, wifi).await {
                         debug!(error = %e, "A state connection ended");
                     }
                 });
@@ -435,6 +443,7 @@ async fn session_loop(
     files: Arc<dyn ProtectedFiles>,
     mut changes: tokio::sync::broadcast::Receiver<()>,
     guard: guard::Handle,
+    wifi: Arc<wifi::WifiCustodian>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -514,6 +523,13 @@ async fn session_loop(
             }
         }
         let reply = match serde_json::from_str::<StateRequest>(&line) {
+            // The wireless requests (issue #194) are intercepted here rather
+            // than dispatched, for the same reason `WatchConfig` and
+            // `Supervise` are: they do not belong to the store. Specifically,
+            // they talk to NetworkManager over async D-Bus, so they cannot
+            // ride the `spawn_blocking` the synchronous store needs -- and
+            // `server::handle` stays sync, which keeps its 30-odd arms simple.
+            Ok(request) if is_wifi(&request) => serve_wifi(wifi.as_ref(), request).await,
             Ok(request) => {
                 let store = Arc::clone(&store);
                 let files = Arc::clone(&files);
@@ -539,4 +555,98 @@ async fn session_loop(
         write_half.flush().await?;
     }
     Ok(())
+}
+
+/// Whether this request is one the wireless custodian answers.
+///
+/// Spelled out rather than inferred so that adding a variant to the protocol
+/// without deciding where it is served is a compile error in
+/// `serve_wifi`'s match, not a request that silently reaches the store
+/// dispatcher and comes back as "unknown request".
+fn is_wifi(request: &StateRequest) -> bool {
+    matches!(
+        request,
+        StateRequest::WifiSave { .. }
+            | StateRequest::WifiConnect { .. }
+            | StateRequest::WifiForget { .. }
+            | StateRequest::WifiJoinProgress
+            | StateRequest::WifiAuthority
+    )
+}
+
+/// Serve one wireless request.
+///
+/// Errors travel as `WireErrorKind::Io`, which the client rebuilds as an
+/// `io::Error` carrying the message. That is the one kind in the enum whose
+/// meaning is "here is what went wrong, in words" rather than a `StoreError`
+/// flavour, and this is not a store call.
+///
+/// The exception is polkit refusing NetworkManager's call, which travels as
+/// `WireErrorKind::Refused`. It is the one failure a person can act on --
+/// install or update the rule -- and without its own kind it reached the
+/// management API as an HTTP 500 reading "IO error: asking NetworkManager to
+/// join the network".
+///
+/// Telling a stale id apart from a real failure is left to lunchboxd, which
+/// holds the saved list and can see that the id is simply gone. Encoding that
+/// distinction here would mean matching on error strings.
+async fn serve_wifi(wifi: &wifi::WifiCustodian, request: StateRequest) -> String {
+    use lunchbox_state_proto::{WireErrorKind, WireResult};
+
+    fn ok<T: serde::Serialize>(value: T) -> String {
+        serde_json::to_string(&WireResult::Ok { value })
+            .unwrap_or_else(|e| failed(&format!("could not encode the reply: {e}")))
+    }
+    fn failed(message: &str) -> String {
+        serde_json::to_string(&WireResult::<()>::Err {
+            kind: WireErrorKind::Io,
+            message: message.to_string(),
+        })
+        .expect("an error reply always encodes")
+    }
+    fn failed_with(error: &anyhow::Error) -> String {
+        if !wifi::is_polkit_refusal(error) {
+            return failed(&error.to_string());
+        }
+        serde_json::to_string(&WireResult::<()>::Err {
+            kind: WireErrorKind::Refused,
+            message: format!("{error:#}"),
+        })
+        .expect("an error reply always encodes")
+    }
+
+    match request {
+        StateRequest::WifiSave { request } => match wifi.save(&request).await {
+            Ok(saved) => ok(saved),
+            // `request` is never logged: its Debug redacts the password, but
+            // the message here is built from the error alone.
+            Err(e) => {
+                warn!(ssid = %request.ssid, error = %e, "Could not save a Wi-Fi network");
+                failed_with(&e)
+            }
+        },
+        StateRequest::WifiConnect { id } => match wifi.connect(&id).await {
+            Ok(()) => ok(()),
+            Err(e) => {
+                warn!(%id, error = %e, "Could not join a saved Wi-Fi network");
+                failed_with(&e)
+            }
+        },
+        StateRequest::WifiForget { id } => match wifi.forget(&id).await {
+            Ok(removed) => ok(removed),
+            Err(e) => {
+                warn!(%id, error = %e, "Could not forget a Wi-Fi network");
+                failed_with(&e)
+            }
+        },
+        StateRequest::WifiJoinProgress => ok(wifi.join_progress()),
+        StateRequest::WifiAuthority => ok(wifi.authority()),
+        // `is_wifi` is the only gate on this function, so anything else here
+        // means the two have drifted. Answered rather than panicked: with
+        // socket activation a panic would take the daemon down, and down again
+        // on the next connection.
+        other => failed(&format!(
+            "{other:?} is not a wireless request; is_wifi and serve_wifi disagree"
+        )),
+    }
 }

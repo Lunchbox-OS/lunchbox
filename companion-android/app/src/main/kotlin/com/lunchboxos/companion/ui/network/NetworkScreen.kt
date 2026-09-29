@@ -64,6 +64,17 @@ import kotlinx.coroutines.delay
  */
 private const val POLL_INTERVAL_MS = 10_000L
 
+/**
+ * How often the scan list refreshes, and how often while a join is running or
+ * a scan's results are on their way.
+ *
+ * Faster than the address poll because this is also how a join reports its
+ * outcome: the device accepts the request and answers immediately, and the
+ * result lands on a later read.
+ */
+private const val WIFI_POLL_INTERVAL_MS = 6_000L
+private const val WIFI_FAST_POLL_MS = 2_000L
+
 private fun connectivityLabel(c: Connectivity): String = when (c) {
     Connectivity.FULL -> "Online"
     // The one that looks connected and is not. Named in its own words rather
@@ -157,6 +168,7 @@ private fun CopyableRow(value: String, label: String, emphasis: Boolean = false)
 fun NetworkScreen(vm: DeviceViewModel, onBack: () -> Unit) {
     val state by vm.state.collectAsState()
     val net by vm.network.collectAsState()
+    val wifi by vm.wifi.collectAsState()
     var showOther by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.link) {
@@ -164,6 +176,38 @@ fun NetworkScreen(vm: DeviceViewModel, onBack: () -> Unit) {
         while (true) {
             vm.refreshNetwork()
             delay(POLL_INTERVAL_MS)
+        }
+    }
+
+    // Scan when the screen opens. NetworkManager scans rarely on its own while
+    // connected -- its last one was four minutes old on the dev box -- and a
+    // single scan misses networks the next one finds, so the list a parent
+    // first sees should not be whatever happened to be lying around.
+    //
+    // Only once the first read has shown there is a radio: on a device without
+    // one, the scan's answer is an error, and opening the screen would say so
+    // every time.
+    val hasRadio = wifi.scan?.supported == true
+    LaunchedEffect(state.link, hasRadio) {
+        if (state.link == LinkStatus.Connected && hasRadio) vm.scanWifi(announce = false)
+    }
+
+    // A separate loop on a separate clock (issue #194). The scan refreshes
+    // faster than the addresses, and faster again while a join is in flight,
+    // because polling is the only way a join's outcome ever arrives — the
+    // device cannot return it from the call that started it — and while a
+    // scan's results are due.
+    LaunchedEffect(state.link, wifi.joining, wifi.awaitingScan) {
+        if (state.link != LinkStatus.Connected) return@LaunchedEffect
+        while (true) {
+            vm.refreshWifi()
+            delay(
+                if (wifi.joining || wifi.awaitingScan) {
+                    WIFI_FAST_POLL_MS
+                } else {
+                    WIFI_POLL_INTERVAL_MS
+                }
+            )
         }
     }
 
@@ -252,6 +296,12 @@ fun NetworkScreen(vm: DeviceViewModel, onBack: () -> Unit) {
             // wire type would give one fact two sources that drift apart
             // between polls.
             ChecksCard(state.snapshot?.internetStatus.orEmpty())
+
+            // Above the addresses on purpose (issue #194): somebody who opens
+            // this screen because the device is on the wrong network — or on
+            // none — is here to change it, not to read an address. This is the
+            // one transport that still works in that state.
+            WifiSection(vm, wifi)
 
             Text(
                 if (net.reachable.isEmpty()) {

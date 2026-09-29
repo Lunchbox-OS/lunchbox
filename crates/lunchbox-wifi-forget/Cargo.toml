@@ -1,0 +1,20 @@
+[package]
+name = "lunchbox-wifi-forget"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Root oneshot that forgets a saved Wi-Fi network without letting netplan rewrite /etc/netplan (issue #194)"
+
+[[bin]]
+name = "lunchbox-wifi-forget"
+path = "src/main.rs"
+
+# Two YAML parsers on purpose: `yaml-edit` makes the edit losslessly, and
+# `yaml-rust2`, written independently, decides whether the edit means what it
+# should. See src/lib.rs. Nothing else beyond std: this runs as root.
+[dependencies]
+yaml-edit = { workspace = true }
+yaml-rust2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

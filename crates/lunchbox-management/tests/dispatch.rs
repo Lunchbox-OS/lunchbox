@@ -12,7 +12,8 @@
 use async_trait::async_trait;
 use lunchbox_api::{
     AddressFamily, Connectivity, EntryKind, Event, NetworkAddressView, NetworkInterfaceKind,
-    NetworkInterfaceView, NetworkSource, WifiView,
+    NetworkInterfaceView, NetworkSource, SavedWifiNetwork, WifiJoinRequest, WifiJoinState,
+    WifiNetwork, WifiSecurity, WifiView,
 };
 use lunchbox_config::{
     AutoBrightnessPolicy, AvailabilityPolicy, BrightnessPolicy, Entry, LimitsPolicy, Policy,
@@ -24,6 +25,7 @@ use lunchbox_host_api::{
     HostCapabilities, LightSensor, LightSensorCapabilities, LightSensorResult, MockHost,
     NetworkSnapshot, NoOpDisplayController, NoOpHidpiController, NoOpHudLayoutController,
     StaticNetworkInfo, VolumeCapabilities, VolumeController, VolumeResult, VolumeStatus,
+    WifiController, WifiError, WifiResult, WifiSnapshot,
 };
 use lunchbox_management::{
     AUTO_BRIGHTNESS_SETTING_KEY, AutoBrightnessState, DefaultManagementService, ManagementError,
@@ -385,6 +387,9 @@ fn make_svc_full(
         // provider; the rest get a host that cannot look, which is a real
         // shape a device can be in and must not panic.
         network: None,
+        // Likewise: most of these tests run on a device with no wireless
+        // backend, which is the shape a desktop dev box is really in.
+        wifi: None,
         web_listener: WebListenerHandle::default(),
         web_auth: None,
         admins: Default::default(),
@@ -2184,4 +2189,389 @@ async fn a_host_that_cannot_look_says_unavailable_rather_than_offline() {
     assert_eq!(status["connectivity"], "unknown");
     assert_eq!(status["interfaces"], json!([]));
     assert_eq!(status["management_api"]["state"], "disabled");
+}
+
+// ---------------------------------------------------------------------------
+// Wi-Fi configuration (issue #194)
+// ---------------------------------------------------------------------------
+
+/// A wireless backend that records what reached it and answers from a script.
+///
+/// The point of most of these tests is *what the service did before calling
+/// the backend* — validated the request, aggregated the scan, wrote an audit
+/// row without the password — so the interesting assertions are on `saved`
+/// and `forgotten` rather than on the reply.
+struct FakeWifi {
+    snapshot: WifiSnapshot,
+    saved_profiles: std::sync::Mutex<Vec<SavedWifiNetwork>>,
+    /// Every request that got past validation, in order.
+    saved: std::sync::Mutex<Vec<WifiJoinRequest>>,
+    forgotten: std::sync::Mutex<Vec<String>>,
+    join: WifiJoinState,
+    authorized: bool,
+}
+
+impl FakeWifi {
+    fn new(snapshot: WifiSnapshot) -> Self {
+        Self {
+            snapshot,
+            saved_profiles: std::sync::Mutex::new(Vec::new()),
+            saved: std::sync::Mutex::new(Vec::new()),
+            forgotten: std::sync::Mutex::new(Vec::new()),
+            join: WifiJoinState::Idle,
+            authorized: true,
+        }
+    }
+
+    fn with_saved(mut self, profiles: Vec<SavedWifiNetwork>) -> Self {
+        self.saved_profiles = std::sync::Mutex::new(profiles);
+        self
+    }
+
+    fn unauthorized(mut self) -> Self {
+        self.authorized = false;
+        self
+    }
+}
+
+#[async_trait]
+impl WifiController for FakeWifi {
+    async fn scan(&self) -> WifiResult<()> {
+        Ok(())
+    }
+
+    async fn networks(&self) -> WifiSnapshot {
+        self.snapshot.clone()
+    }
+
+    async fn saved(&self) -> WifiResult<Vec<SavedWifiNetwork>> {
+        Ok(self.saved_profiles.lock().unwrap().clone())
+    }
+
+    async fn save(&self, request: &WifiJoinRequest) -> WifiResult<SavedWifiNetwork> {
+        if !self.authorized {
+            return Err(WifiError::NotAuthorized);
+        }
+        self.saved.lock().unwrap().push(request.clone());
+        Ok(SavedWifiNetwork {
+            id: "fake-uuid".into(),
+            ssid: request.ssid.clone(),
+            security: request.security,
+            hidden: request.hidden,
+            autoconnect: true,
+            active: request.connect,
+        })
+    }
+
+    async fn connect(&self, id: &str) -> WifiResult<()> {
+        if self
+            .saved_profiles
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n.id == id)
+        {
+            Ok(())
+        } else {
+            Err(WifiError::UnknownNetwork)
+        }
+    }
+
+    async fn forget(&self, id: &str) -> WifiResult<bool> {
+        self.forgotten.lock().unwrap().push(id.to_string());
+        let mut profiles = self.saved_profiles.lock().unwrap();
+        let before = profiles.len();
+        profiles.retain(|n| n.id != id);
+        Ok(profiles.len() != before)
+    }
+
+    async fn join_state(&self) -> WifiJoinState {
+        self.join.clone()
+    }
+
+    async fn can_configure(&self) -> bool {
+        self.authorized
+    }
+}
+
+fn ap(ssid: &str, security: WifiSecurity, signal: u8, band: u8) -> WifiNetwork {
+    WifiNetwork {
+        ssid: ssid.into(),
+        security,
+        signal_percent: signal,
+        bands_ghz: vec![band],
+        saved: false,
+        active: false,
+    }
+}
+
+fn wifi_svc(wifi: Arc<FakeWifi>, config_path: PathBuf) -> DefaultManagementService {
+    DefaultManagementService {
+        wifi: Some(wifi),
+        ..make_svc(test_policy(), config_path)
+    }
+}
+
+#[tokio::test]
+async fn a_device_with_no_wireless_backend_says_unsupported_not_empty() {
+    // "This device has no Wi-Fi" and "no networks are in range" are different
+    // answers, and a UI that shows the second for the first sends somebody
+    // walking around the house with a laptop.
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+
+    let view = ok(&svc, "wifi_networks", json!({})).await;
+
+    assert_eq!(view["supported"], false);
+    assert_eq!(view["can_configure"], false);
+    assert_eq!(view["networks"], json!([]));
+    assert_eq!(view["join"]["state"], "idle");
+}
+
+#[tokio::test]
+async fn the_methods_that_change_something_refuse_a_device_with_no_adapter() {
+    let cfg = temp_config();
+    let svc = make_svc(test_policy(), cfg.path().to_path_buf());
+
+    for (method, params) in [
+        ("wifi_scan", json!({})),
+        ("wifi_saved_networks", json!({})),
+        ("wifi_connect", json!({ "id": "anything" })),
+        ("wifi_forget", json!({ "id": "anything" })),
+    ] {
+        let err = rpc(&svc, method, params).await.expect_err("{method}");
+        assert!(
+            matches!(
+                err,
+                RpcDispatchError::Management(ManagementError::Unprocessable(_))
+            ),
+            "{method} answered {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_mesh_on_two_radios_reaches_the_ui_as_one_row() {
+    // The service aggregates, not the backend, so a second backend cannot
+    // disagree about what a picker shows.
+    let cfg = temp_config();
+    let wifi = Arc::new(FakeWifi::new(WifiSnapshot {
+        supported: true,
+        radio_enabled: true,
+        networks: vec![
+            ap("home", WifiSecurity::WpaPsk, 40, 2),
+            ap("home", WifiSecurity::WpaPsk, 85, 5),
+            ap("neighbour", WifiSecurity::Sae, 60, 5),
+        ],
+        last_scan_age_s: Some(7),
+    }));
+    let svc = wifi_svc(wifi, cfg.path().to_path_buf());
+
+    let view = ok(&svc, "wifi_networks", json!({})).await;
+
+    let networks = view["networks"].as_array().unwrap();
+    assert_eq!(networks.len(), 2, "{networks:#?}");
+    assert_eq!(networks[0]["ssid"], "home");
+    assert_eq!(networks[0]["signal_percent"], 85);
+    assert_eq!(networks[0]["bands_ghz"], json!([2, 5]));
+    assert_eq!(view["last_scan_age_s"], 7);
+}
+
+#[tokio::test]
+async fn a_bad_password_is_refused_before_the_backend_sees_it() {
+    // Validation belongs on the daemon because there are two UIs and a third
+    // caller is a curl. The assertion that matters is the empty `saved` list:
+    // nothing reached NetworkManager to fail twenty seconds later.
+    let cfg = temp_config();
+    let wifi = Arc::new(FakeWifi::new(WifiSnapshot::unsupported()));
+    let svc = wifi_svc(wifi.clone(), cfg.path().to_path_buf());
+
+    let err = rpc(
+        &svc,
+        "wifi_save",
+        json!({ "request": {
+            "ssid": "home",
+            "security": "wpa_psk",
+            "password": "short",
+            "connect": true,
+        }}),
+    )
+    .await
+    .expect_err("a five-character PSK is not valid");
+
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::BadRequest(_))
+        ),
+        "{err:?}"
+    );
+    assert!(
+        wifi.saved.lock().unwrap().is_empty(),
+        "a rejected request must not reach the backend"
+    );
+}
+
+#[tokio::test]
+async fn saving_a_network_audits_the_name_and_never_the_password() {
+    // An audit row outlives the profile and is the first thing copied into a
+    // support request, so the secret must not be in it. The SSID is, because
+    // every device in range already hears it announced.
+    let cfg = temp_config();
+    let wifi = Arc::new(FakeWifi::new(WifiSnapshot::unsupported()));
+    let svc = wifi_svc(wifi.clone(), cfg.path().to_path_buf());
+
+    let saved = ok(
+        &svc,
+        "wifi_save",
+        json!({ "request": {
+            "ssid": "home-network",
+            "security": "wpa_psk",
+            "password": "correcthorsebattery",
+            "connect": false,
+        }}),
+    )
+    .await;
+
+    assert_eq!(saved["ssid"], "home-network");
+    assert!(
+        saved.get("password").is_none(),
+        "a saved profile must not carry a secret back: {saved}"
+    );
+
+    let audit = svc.store.get_recent_audits(20).expect("audit readable");
+    let rendered = format!("{audit:?}");
+    assert!(
+        rendered.contains("home-network"),
+        "the network's name belongs in the audit trail: {rendered}"
+    );
+    assert!(
+        !rendered.contains("correcthorsebattery"),
+        "the password must never reach the audit trail: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn forgetting_a_network_records_the_name_it_had() {
+    // Read before delete: afterwards there is nothing to look the name up
+    // from, and a row saying only a UUID answers nobody's question about why
+    // the device fell off the network.
+    let cfg = temp_config();
+    let wifi =
+        Arc::new(
+            FakeWifi::new(WifiSnapshot::unsupported()).with_saved(vec![SavedWifiNetwork {
+                id: "uuid-1".into(),
+                ssid: "the-old-network".into(),
+                security: WifiSecurity::WpaPsk,
+                hidden: false,
+                autoconnect: true,
+                active: false,
+            }]),
+        );
+    let svc = wifi_svc(wifi.clone(), cfg.path().to_path_buf());
+
+    let removed = ok(&svc, "wifi_forget", json!({ "id": "uuid-1" })).await;
+    assert_eq!(removed, json!(true));
+
+    let audit = svc.store.get_recent_audits(20).expect("audit readable");
+    assert!(
+        format!("{audit:?}").contains("the-old-network"),
+        "{audit:?}"
+    );
+}
+
+#[tokio::test]
+async fn forgetting_something_that_was_not_there_is_false_and_not_audited() {
+    let cfg = temp_config();
+    let wifi = Arc::new(FakeWifi::new(WifiSnapshot::unsupported()));
+    let svc = wifi_svc(wifi.clone(), cfg.path().to_path_buf());
+
+    let removed = ok(&svc, "wifi_forget", json!({ "id": "never-existed" })).await;
+
+    assert_eq!(removed, json!(false));
+    let audit = svc.store.get_recent_audits(20).expect("audit readable");
+    assert!(
+        !format!("{audit:?}").contains("WifiNetworkForgotten"),
+        "nothing was forgotten, so nothing should be recorded: {audit:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_device_with_no_grant_reports_forbidden_not_internal() {
+    // The one failure here a person can actually fix. It has to reach a UI as
+    // something other than "something went wrong".
+    let cfg = temp_config();
+    let wifi = Arc::new(FakeWifi::new(WifiSnapshot::unsupported()).unauthorized());
+    let svc = wifi_svc(wifi, cfg.path().to_path_buf());
+
+    let err = rpc(
+        &svc,
+        "wifi_save",
+        json!({ "request": {
+            "ssid": "home",
+            "security": "wpa_psk",
+            "password": "12345678",
+            "connect": true,
+        }}),
+    )
+    .await
+    .expect_err("no grant means no write");
+
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::Forbidden(_))
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn connecting_to_a_profile_that_is_gone_is_not_found() {
+    // A UI left open while somebody else forgot the network.
+    let cfg = temp_config();
+    let wifi = Arc::new(FakeWifi::new(WifiSnapshot::unsupported()));
+    let svc = wifi_svc(wifi, cfg.path().to_path_buf());
+
+    let err = rpc(&svc, "wifi_connect", json!({ "id": "stale" }))
+        .await
+        .expect_err("a stale id cannot be joined");
+
+    assert!(
+        matches!(
+            err,
+            RpcDispatchError::Management(ManagementError::NotFound(_))
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_saved_network_list_carries_no_secret_field() {
+    let cfg = temp_config();
+    let wifi =
+        Arc::new(
+            FakeWifi::new(WifiSnapshot::unsupported()).with_saved(vec![SavedWifiNetwork {
+                id: "uuid-1".into(),
+                ssid: "home".into(),
+                security: WifiSecurity::Sae,
+                hidden: true,
+                autoconnect: true,
+                active: true,
+            }]),
+        );
+    let svc = wifi_svc(wifi, cfg.path().to_path_buf());
+
+    let saved = ok(&svc, "wifi_saved_networks", json!({})).await;
+
+    let first = &saved.as_array().unwrap()[0];
+    assert_eq!(first["ssid"], "home");
+    assert_eq!(first["security"], "sae");
+    assert_eq!(first["hidden"], true);
+    for forbidden in ["password", "psk", "secret"] {
+        assert!(
+            first.get(forbidden).is_none(),
+            "a saved network must not expose {forbidden}: {first}"
+        );
+    }
 }

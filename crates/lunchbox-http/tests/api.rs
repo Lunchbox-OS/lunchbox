@@ -307,6 +307,7 @@ fn make_state_full(
         // transport-free in `lunchbox-management/tests/dispatch.rs`, so this
         // fixture is a host that cannot look.
         network: None,
+        wifi: None,
         web_listener: WebListenerHandle::default(),
         web_auth: web,
         admins: Default::default(),

@@ -505,7 +505,8 @@ EOF
     #       copy, without anyone having edited anything.
     #
     # /etc/systemd/system/lunchbox-stated@.{service,socket} were never in the
-    # list and stay out of it for the same reason: they are lunchbox's units,
+    # list and stay out of it for the same reason, as does
+    # lunchbox-wifi-forget@.service beside them: they are lunchbox's units,
     # `crates/lunchbox-state-proto/tests/units_match_the_constants.rs` pins
     # their contents against the Rust constants, and a locally-edited copy
     # surviving an upgrade would break the custodian quietly.

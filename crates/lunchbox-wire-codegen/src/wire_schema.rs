@@ -57,6 +57,17 @@ struct WireTypes {
     network_source: lunchbox_api::NetworkSource,
     web_listener_view: lunchbox_api::WebListenerView,
     web_listener_state: lunchbox_api::WebListenerState,
+    // Choosing a network (issue #194). Rooted here for the same reason as the
+    // status types above: `wifi_networks` and `wifi_saved_networks` are the
+    // only ways in, and nothing else nests them.
+    wifi_scan_view: lunchbox_api::WifiScanView,
+    wifi_network: lunchbox_api::WifiNetwork,
+    saved_wifi_network: lunchbox_api::SavedWifiNetwork,
+    wifi_security: lunchbox_api::WifiSecurity,
+    wifi_join_state: lunchbox_api::WifiJoinState,
+    wifi_join_failure: lunchbox_api::WifiJoinFailure,
+    wifi_join_failure_kind: lunchbox_api::WifiJoinFailureKind,
+    wifi_join_request: lunchbox_api::WifiJoinRequest,
     desktop_app: lunchbox_api::DesktopApp,
     window_info: lunchbox_api::WindowInfo,
     window_action: lunchbox_api::WindowAction,

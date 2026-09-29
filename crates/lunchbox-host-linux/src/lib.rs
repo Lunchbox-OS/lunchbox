@@ -26,6 +26,7 @@ mod steam_interstitial;
 mod sway;
 pub mod sway_ipc;
 mod volume;
+mod wifi;
 
 pub use adapter::*;
 pub use audio::{AudioOutput, AudioOutputKind, AudioTopology, SinkNode};
@@ -46,3 +47,4 @@ pub use sway::{
     select_primary, set_output_mode, set_output_scale,
 };
 pub use volume::*;
+pub use wifi::LinuxWifiReader;

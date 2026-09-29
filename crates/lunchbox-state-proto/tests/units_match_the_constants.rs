@@ -127,15 +127,7 @@ fn the_service_unit_owns_the_directory_the_client_stats() {
 /// to catch a rename.
 #[test]
 fn the_polkit_rule_names_the_user_the_daemon_runs_as() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dist/polkit/50-lunchbox-session-guard.rules")
-        .canonicalize()
-        .expect("dist/polkit/50-lunchbox-session-guard.rules is where packaging expects it");
-    let rule = std::fs::read_to_string(&path).expect("reading the polkit rule");
-    let granting: String = rule
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect();
+    let granting = granting_lines("50-lunchbox-session-guard.rules");
 
     assert!(
         granting.contains("org.freedesktop.login1.manage"),
@@ -154,5 +146,111 @@ fn the_polkit_rule_names_the_user_the_daemon_runs_as() {
         directive(&service, "User"),
         STATE_USER,
         "the unit runs as a user the polkit rule does not grant"
+    );
+}
+
+/// A polkit rule with its comments stripped, so an assertion cannot pass on
+/// the strength of prose that merely *mentions* the action.
+fn granting_lines(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dist/polkit")
+        .join(name)
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("dist/polkit/{name} is where packaging expects it: {e}"));
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {name}: {e}"))
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect()
+}
+
+#[test]
+fn the_wifi_rule_grants_the_write_action_to_the_custodian() {
+    // Issue #194. Two ways this drifts and both are quiet: the action is
+    // renamed and every save is refused with the UI still offering the form,
+    // or the user is renamed and the grant applies to nobody at all.
+    let granting = granting_lines("50-lunchbox-network.rules");
+
+    assert!(
+        granting.contains("org.freedesktop.NetworkManager.settings.modify.system"),
+        "the Wi-Fi rule no longer grants the action that writes a profile, so saving a \
+         network would be refused while both UIs still offer the form"
+    );
+    // Granted to any active local session, so its absence passes every test
+    // run from a logged-in shell -- and on a device, where the custodian has
+    // no session, a network can then be saved but never joined.
+    assert!(
+        granting.contains("org.freedesktop.NetworkManager.network-control"),
+        "the Wi-Fi rule no longer grants the action that activates a profile, so joining a \
+         network would be refused by NetworkManager with \"Not authorized to control \
+         networking\""
+    );
+    assert!(
+        granting.contains(&format!("\"{STATE_USER}\"")),
+        "the Wi-Fi rule does not name {STATE_USER}, which is the user \
+         lunchbox-stated@.service runs as -- so the grant applies to nobody"
+    );
+}
+
+#[test]
+fn the_wifi_rule_lets_the_custodian_start_the_forget_unit_and_nothing_else() {
+    // Issue #194. `manage-units` is systemd's whole unit API: unconditioned,
+    // this grant would let the custodian stop the firewall or start a shell.
+    // What makes it acceptable is the three conditions beside it.
+    let granting = granting_lines("50-lunchbox-network.rules");
+    let clause = &granting[granting
+        .find("org.freedesktop.systemd1.manage-units")
+        .expect("the Wi-Fi rule no longer lets the custodian forget a network without netplan")..];
+    let clause = &clause[..clause.find("polkit.Result.YES").expect("the clause grants")];
+
+    assert!(
+        clause.contains(&format!("subject.user === \"{STATE_USER}\"")),
+        "the unit grant does not name {STATE_USER}"
+    );
+    assert!(
+        clause.contains("action.lookup(\"verb\") === \"start\""),
+        "the unit grant is not limited to starting a unit"
+    );
+    let unit = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dist/systemd/lunchbox-wifi-forget@.service");
+    assert!(
+        unit.exists(),
+        "the unit the rule names is not in dist/systemd"
+    );
+    assert!(
+        clause.contains("/^lunchbox-wifi-forget@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.service$/"),
+        "the unit grant no longer pins the unit name to lunchbox-wifi-forget@<uuid>.service, \
+         anchored at both ends"
+    );
+}
+
+#[test]
+fn the_wifi_rule_does_not_grant_the_kiosk_user() {
+    // The whole reason this rule exists rather than adding the kiosk user to
+    // netdev: every activity runs as the kiosk user, and this action was
+    // measured to be sufficient on its own for GetSecrets -- so granting it
+    // there hands every game the house WiFi password. A rule naming any user
+    // but the custodian's is that mistake, written down.
+    let granting = granting_lines("50-lunchbox-network.rules");
+    let users: Vec<&str> = granting
+        .match_indices("subject.user")
+        .map(|(i, _)| &granting[i..])
+        .collect();
+    assert!(!users.is_empty(), "the rule no longer tests subject.user");
+    for clause in users {
+        let quoted = clause
+            .split('"')
+            .nth(1)
+            .expect("subject.user is compared against a quoted name");
+        assert_eq!(
+            quoted, STATE_USER,
+            "the Wi-Fi rule grants {quoted}, not {STATE_USER}. If that is the kiosk user, \
+             every activity can now read every saved network password"
+        );
+    }
+    assert!(
+        !granting.contains("isInGroup"),
+        "a group grant admits every member, and on this device that means every activity \
+         -- the rule has to name the custodian's user"
     );
 }

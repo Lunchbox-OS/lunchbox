@@ -2,6 +2,7 @@ package com.lunchboxos.companion.ui
 
 import android.app.Application
 import android.os.Build
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lunchboxos.companion.appContainer
@@ -27,12 +28,18 @@ import com.lunchboxos.companion.domain.LoginRequestInfo
 import com.lunchboxos.companion.domain.ManagementClient
 import com.lunchboxos.companion.domain.NetworkInterfaceView
 import com.lunchboxos.companion.domain.NetworkStatusView
+import com.lunchboxos.companion.domain.SavedWifiNetwork
 import com.lunchboxos.companion.domain.ServiceStateSnapshot
 import com.lunchboxos.companion.domain.SessionInfo
 import com.lunchboxos.companion.domain.DeviceRecord
 import com.lunchboxos.companion.domain.UsageStat
 import com.lunchboxos.companion.domain.VolumeInfo
 import com.lunchboxos.companion.domain.WebAuthStatus
+import com.lunchboxos.companion.domain.WifiJoinRequest
+import com.lunchboxos.companion.domain.WifiJoinState
+import com.lunchboxos.companion.domain.WifiNetwork
+import com.lunchboxos.companion.domain.WifiScanView
+import com.lunchboxos.companion.domain.WifiSecurity
 import com.lunchboxos.companion.domain.WindowAction
 import com.lunchboxos.companion.domain.WindowInfo
 import com.lunchboxos.companion.ui.windows.WindowPresentation
@@ -187,6 +194,41 @@ data class DiagnosticsUiState(
  * needs it unless somebody has the network screen open, and the addresses on a
  * device are not worth an RPC on every connect.
  */
+/**
+ * Choosing a wireless network (issue #194).
+ *
+ * Its own state rather than part of [NetworkUiState] because it polls on a
+ * different clock: the scan list refreshes faster, and faster again while a
+ * join is in flight, since polling is the only way a join's outcome arrives.
+ * The device cannot return it from the call that started it — association plus
+ * DHCP was measured at 3 to 45 seconds against this app's 15-second timeout.
+ */
+data class WifiUiState(
+    val scan: WifiScanView? = null,
+    val saved: List<SavedWifiNetwork> = emptyList(),
+    val loading: Boolean = false,
+    /** True while a save, join or forget is in flight, to keep buttons still. */
+    val busy: Boolean = false,
+    val error: String? = null,
+    /**
+     * When a scan was last asked for ([SystemClock.elapsedRealtime]), while its
+     * results have not arrived yet. Cleared by [DeviceViewModel.refreshWifi].
+     */
+    val scanRequestedAt: Long? = null,
+) {
+    /** Whether a join is still running, which is what tightens the poll. */
+    val joining: Boolean
+        get() = scan?.join is WifiJoinState.Connecting
+
+    /** Whether a scan's results are still on their way, which also tightens it. */
+    val awaitingScan: Boolean
+        get() = scanRequestedAt != null
+
+    /** Networks worth offering, strongest first — the device already sorted them. */
+    val networks: List<WifiNetwork>
+        get() = scan?.networks.orEmpty()
+}
+
 data class NetworkUiState(
     val status: NetworkStatusView? = null,
     val loading: Boolean = false,
@@ -302,6 +344,9 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _network = MutableStateFlow(NetworkUiState())
     val network: StateFlow<NetworkUiState> = _network
+
+    private val _wifi = MutableStateFlow(WifiUiState())
+    val wifi: StateFlow<WifiUiState> = _wifi
     private val _webAuth = MutableStateFlow(WebAuthUiState())
     val webAuth: StateFlow<WebAuthUiState> = _webAuth
 
@@ -319,6 +364,7 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
     private var windowsJob: Job? = null
     private var diagnosticsJob: Job? = null
     private var networkJob: Job? = null
+    private var wifiJob: Job? = null
     private var webAuthJob: Job? = null
     private var adminsJob: Job? = null
     private var bound = false
@@ -392,6 +438,7 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
         // Another box's addresses are actively misleading: they would send
         // somebody to SSH into the device they just switched away from.
         if (!sameDevice) _network.value = NetworkUiState()
+        if (!sameDevice) _wifi.value = WifiUiState()
         if (!sameDevice) _webAuth.value = WebAuthUiState()
         if (!sameDevice) _admins.value = AdminsUiState()
         conn.start()
@@ -892,6 +939,137 @@ class DeviceViewModel(app: Application) : AndroidViewModel(app) {
                 _network.update {
                     it.copy(loading = false, error = why ?: "Couldn't read the network status.")
                 }
+            }
+        }
+    }
+
+    /**
+     * Re-read what is in range, and how a join is going (issue #194).
+     *
+     * Both in one call because the device returns them together: a join takes
+     * 3 to 45 seconds, well past this app's RPC timeout, so polling is the
+     * only way its outcome ever arrives.
+     */
+    fun refreshWifi() {
+        if (wifiJob?.isActive == true) return
+        val c = client ?: run {
+            _wifi.update { it.copy(loading = false, error = "Not connected.") }
+            return
+        }
+        _wifi.update { it.copy(loading = true) }
+        wifiJob = viewModelScope.launch {
+            try {
+                // Taken before the call, so a read that was already under way
+                // when a scan was requested cannot pass for that scan's result.
+                val startedAt = SystemClock.elapsedRealtime()
+                val scan = c.wifiNetworks()
+                // Only asked for when the device has a radio: a device without
+                // one answers this with an error, and there is nothing useful
+                // to show from it.
+                val saved = if (scan.supported) c.wifiSavedNetworks() else emptyList()
+                _wifi.update {
+                    it.copy(
+                        scan = scan,
+                        saved = saved,
+                        loading = false,
+                        error = null,
+                        scanRequestedAt = it.scanRequestedAt?.takeUnless { at ->
+                            scanLanded(scan, startedAt, at)
+                        },
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _wifi.update {
+                    it.copy(loading = false, error = why ?: "Couldn't read Wi-Fi.")
+                }
+            }
+        }
+    }
+
+    /**
+     * Ask the device to scan again.
+     *
+     * The call returns at once and NetworkManager scans for about 3.5 seconds
+     * (3.0 to 3.9 measured on the dev box). Rather than leave the results to
+     * the next ordinary poll, up to six seconds later, this marks a scan as
+     * awaited, which tightens the poll until one lands.
+     *
+     * [announce] is false for the scan the Wi-Fi screen starts on its own when
+     * it opens, which nobody asked to be told about.
+     */
+    fun scanWifi(announce: Boolean = true) = action { c ->
+        c.wifiScan()
+        _wifi.update { it.copy(scanRequestedAt = SystemClock.elapsedRealtime()) }
+        if (announce) _message.value = "Scanning\u2026"
+    }
+
+    /**
+     * Remember a network, and join it when [connect] is set.
+     *
+     * The reply says the profile was written, not that the device is on the
+     * network — that arrives later on [refreshWifi]. So the message here is
+     * deliberately about what was saved rather than about being connected.
+     */
+    fun saveWifi(
+        ssid: String,
+        security: WifiSecurity,
+        password: String?,
+        hidden: Boolean,
+        connect: Boolean,
+    ) = wifiAction { c ->
+        c.wifiSave(
+            WifiJoinRequest(
+                ssid = ssid,
+                security = security,
+                password = password,
+                hidden = hidden,
+                connect = connect,
+            )
+        )
+        _message.value = if (connect) "Connecting to $ssid\u2026" else "Saved $ssid."
+    }
+
+    /** Join a network the device already knows. */
+    fun connectWifi(id: String) = wifiAction { c -> c.wifiConnect(id) }
+
+    /** Delete a saved profile. */
+    fun forgetWifi(id: String) = wifiAction { c ->
+        _message.value =
+            if (c.wifiForget(id)) "Network forgotten." else "That network was already gone."
+    }
+
+    /**
+     * Run a wireless write, holding the screen's buttons still while it is in
+     * flight and re-reading afterwards.
+     *
+     * Separate from [action] because these three share a busy flag and a
+     * refresh, and because a failure here has to land on the Wi-Fi card rather
+     * than in the app-wide message — somebody looking at a password box needs
+     * to be told about the password, not somewhere else.
+     */
+    private inline fun wifiAction(crossinline block: suspend (ManagementClient) -> Unit) {
+        val c = client ?: run {
+            _wifi.update { it.copy(error = "Not connected.") }
+            return
+        }
+        _wifi.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                block(c)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val why = if (e is RpcException) ReasonText.describe(e) else e.message
+                _wifi.update { it.copy(error = why ?: "Something went wrong.") }
+            } finally {
+                _wifi.update { it.copy(busy = false) }
+                // Cancel any in-flight read so the refresh reflects the write
+                // rather than a snapshot taken before it.
+                wifiJob?.cancel()
+                refreshWifi()
             }
         }
     }
@@ -1554,3 +1732,27 @@ private fun AdminRecord.toDeviceRecord(
     role = role.name.lowercase(),
     androidIdentifier = androidIdentifier,
 )
+
+/**
+ * How long to keep polling fast for a scan's results before giving up on
+ * seeing them land. Measured scans take under four seconds; this is room for a
+ * slow radio and a slow BLE round trip, not a figure anything waits out.
+ */
+private const val SCAN_FOLLOW_MS = 15_000L
+
+/**
+ * Whether [scan], asked for at [readStartedAt], holds a scan that finished
+ * after the request made at [requestedAt] -- or the wait for one has gone on
+ * long enough.
+ *
+ * The device reports how old its last scan was when it answered, not when it
+ * happened, since its clock means nothing here. It answered after
+ * [readStartedAt], so the scan finished no earlier than
+ * `readStartedAt - age`; if that is after the request, so was the scan. A read
+ * begun before the request therefore never counts.
+ */
+private fun scanLanded(scan: WifiScanView, readStartedAt: Long, requestedAt: Long): Boolean {
+    if (SystemClock.elapsedRealtime() - requestedAt > SCAN_FOLLOW_MS) return true
+    val age = scan.lastScanAgeS ?: return false
+    return readStartedAt - age * 1000 >= requestedAt
+}
