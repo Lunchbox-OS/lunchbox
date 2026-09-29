@@ -46,6 +46,17 @@ pub const MIN_PSK_CHARS: usize = 8;
 pub const MAX_PSK_CHARS: usize = 63;
 pub const PMK_HEX_CHARS: usize = 64;
 
+/// Longest WEP passphrase NetworkManager accepts. A passphrase is hashed into
+/// the key, so anything that is not a raw key of one of the four exact
+/// lengths is taken as one.
+pub const MAX_WEP_PASSPHRASE_CHARS: usize = 64;
+
+/// NetworkManager's `wep-key-type` for a key typed as the raw key itself:
+/// 5 or 13 characters, or 10 or 26 hexadecimal digits.
+pub const WEP_KEY_TYPE_KEY: u32 = 1;
+/// NetworkManager's `wep-key-type` for a passphrase to be hashed into a key.
+pub const WEP_KEY_TYPE_PASSPHRASE: u32 = 2;
+
 /// How a network is protected.
 ///
 /// Derived from an access point's beacon flags, which is the only thing a scan
@@ -67,7 +78,10 @@ pub enum WifiSecurity {
     /// 802.1X. Recognised so it can be shown as unsupported; see
     /// [`WifiSecurity::joinable`].
     Enterprise,
-    /// WEP. Recognised for the same reason, and it is not coming back.
+    /// WEP. Cryptographically broken, and joinable anyway: someone joining
+    /// it knowingly is no worse off than on an open network, and an old WEP
+    /// network is sometimes the only one within reach of the TV. See
+    /// [`WifiSecurity::wep_key_type`] for how the key is interpreted.
     Wep,
 }
 
@@ -75,28 +89,53 @@ impl WifiSecurity {
     /// Whether this device can join such a network from these UIs.
     ///
     /// Enterprise needs identity, certificates and phase-2 auth — a form of
-    /// its own, deliberately out of scope for v1 — and WEP is long broken.
-    /// Both are still *shown*, marked unsupported, because a network missing
-    /// from the list looks like a device that cannot see it. Admin mode
-    /// (#154) is the way in for both.
+    /// its own, deliberately out of scope for v1. It is still *shown*, marked
+    /// unsupported, because a network missing from the list looks like a
+    /// device that cannot see it. Admin mode (#154) is the way in.
     pub fn joinable(self) -> bool {
-        !matches!(self, Self::Enterprise | Self::Wep)
+        !matches!(self, Self::Enterprise)
     }
 
     /// Whether joining needs a password.
     pub fn needs_password(self) -> bool {
-        matches!(self, Self::WpaPsk | Self::Sae)
+        matches!(self, Self::WpaPsk | Self::Sae | Self::Wep)
+    }
+
+    /// NetworkManager's `wep-key-type` for this WEP key.
+    ///
+    /// A WEP key is typed one of three ways, and nothing on the air says
+    /// which: the raw key as 5 or 13 characters, the raw key as 10 or 26
+    /// hexadecimal digits, or a passphrase hashed into a key. The UIs do not
+    /// ask. This guesses the way NetworkManager's own `nmcli` does, measured
+    /// on 1.54.3 — one of those four exact lengths is a key, anything else is
+    /// a passphrase — so a key reads the same here as it would to GNOME.
+    ///
+    /// The cost is that a passphrase that happens to be 5 or 13 characters is
+    /// taken as a key. Such a network cannot be joined from here; admin mode
+    /// can.
+    pub fn wep_key_type(key: &str) -> u32 {
+        let printable = key.chars().all(|c| (' '..='~').contains(&c));
+        let hex = key.chars().all(|c| c.is_ascii_hexdigit());
+        match key.len() {
+            5 | 13 if printable => WEP_KEY_TYPE_KEY,
+            10 | 26 if hex => WEP_KEY_TYPE_KEY,
+            _ => WEP_KEY_TYPE_PASSPHRASE,
+        }
     }
 
     /// NetworkManager's `key-mgmt` for a profile of this kind, or `None` for
-    /// the kinds we refuse to write.
+    /// an open network, which has no security section, and for the kind we
+    /// refuse to write.
+    ///
+    /// WEP's is `none`: static WEP has no key management, only a key.
     pub fn key_mgmt(self) -> Option<&'static str> {
         match self {
             Self::Open => None,
             Self::Owe => Some("owe"),
             Self::WpaPsk => Some("wpa-psk"),
             Self::Sae => Some("sae"),
-            Self::Enterprise | Self::Wep => None,
+            Self::Wep => Some("none"),
+            Self::Enterprise => None,
         }
     }
 
@@ -433,11 +472,15 @@ pub enum WifiRequestError {
     /// A passphrase with something other than printable ASCII in it. 802.11i
     /// allows no more, and a key with a smart quote in it — which is what a
     /// phone keyboard produces — fails at association with a reason that
-    /// looks exactly like a wrong password.
+    /// looks exactly like a wrong password. Also used for a WEP key, which
+    /// has the same rule and the same failure.
     PskCharacters,
     /// Empty SAE password.
     SaePasswordEmpty,
-    /// Enterprise or WEP, neither of which these UIs write.
+    /// An empty WEP key, or a passphrase longer than
+    /// [`MAX_WEP_PASSPHRASE_CHARS`].
+    WepKeyLength,
+    /// Enterprise, which these UIs do not write.
     SecurityUnsupported,
 }
 
@@ -455,6 +498,10 @@ impl WifiRequestError {
                 "A Wi-Fi password may only contain ordinary keyboard characters."
             }
             Self::SaePasswordEmpty => "This network needs a password.",
+            Self::WepKeyLength => {
+                "A WEP key must be 5 or 13 characters, 10 or 26 hexadecimal digits, \
+                 or a passphrase of up to 64 characters."
+            }
             Self::SecurityUnsupported => {
                 "This device cannot join that kind of network. Use admin mode to set it up."
             }
@@ -505,6 +552,7 @@ impl WifiJoinRequest {
                     Ok(())
                 }
             }
+            WifiSecurity::Wep => validate_wep(password),
             _ => Ok(()),
         }
     }
@@ -522,6 +570,18 @@ fn validate_psk(password: &str) -> Result<(), WifiRequestError> {
     // apostrophe is not, and the association failure it causes is reported as
     // a wrong password — so it is caught here, where we can say what is wrong.
     if !password.chars().all(|c| (' '..='~').contains(&c)) {
+        return Err(WifiRequestError::PskCharacters);
+    }
+    Ok(())
+}
+
+/// A WEP key: any of the four raw-key shapes, or a passphrase of 1–64
+/// printable ASCII characters. See [`WifiSecurity::wep_key_type`].
+fn validate_wep(key: &str) -> Result<(), WifiRequestError> {
+    if key.is_empty() || key.len() > MAX_WEP_PASSPHRASE_CHARS {
+        return Err(WifiRequestError::WepKeyLength);
+    }
+    if !key.chars().all(|c| (' '..='~').contains(&c)) {
         return Err(WifiRequestError::PskCharacters);
     }
     Ok(())
@@ -611,7 +671,6 @@ mod tests {
         // neither WPA nor RSN. Shown as unsupported; never as a free network.
         let wep = WifiSecurity::from_ap_flags(0x0001, 0x0000, 0x0000);
         assert_eq!(wep, WifiSecurity::Wep);
-        assert!(!wep.joinable());
     }
 
     #[test]
@@ -705,6 +764,73 @@ mod tests {
             connect: true,
         };
         assert!(request.validate().is_ok());
+    }
+
+    fn wep(key: Option<&str>) -> WifiJoinRequest {
+        WifiJoinRequest {
+            ssid: "old-router".into(),
+            security: WifiSecurity::Wep,
+            password: key.map(Into::into),
+            hidden: false,
+            connect: true,
+        }
+    }
+
+    #[test]
+    fn wep_is_joined_with_a_key() {
+        assert!(WifiSecurity::Wep.joinable());
+        assert!(WifiSecurity::Wep.needs_password());
+        assert_eq!(WifiSecurity::Wep.key_mgmt(), Some("none"));
+        assert_eq!(wep(None).validate(), Err(WifiRequestError::PasswordMissing));
+    }
+
+    #[test]
+    fn a_wep_key_is_any_raw_key_or_a_passphrase_up_to_64() {
+        for key in [
+            "abcde",
+            "abcdefghijklm",
+            "0123456789",
+            "0123456789abcdef0123456789",
+        ] {
+            assert!(wep(Some(key)).validate().is_ok(), "{key} is a raw key");
+        }
+        assert!(wep(Some("correct horse battery")).validate().is_ok());
+        assert!(wep(Some(&"p".repeat(64))).validate().is_ok());
+        assert_eq!(
+            wep(Some(&"p".repeat(65))).validate(),
+            Err(WifiRequestError::WepKeyLength)
+        );
+        assert_eq!(
+            wep(Some("")).validate(),
+            Err(WifiRequestError::WepKeyLength)
+        );
+        assert_eq!(
+            wep(Some("it\u{2019}s old")).validate(),
+            Err(WifiRequestError::PskCharacters)
+        );
+    }
+
+    /// The guesses `nmcli --offline` made on 1.54.3 for the same keys, so a
+    /// profile written here means what GNOME would take it to mean.
+    #[test]
+    fn a_wep_key_type_is_guessed_the_way_nmcli_guesses_it() {
+        assert_eq!(WifiSecurity::wep_key_type("abcde"), WEP_KEY_TYPE_KEY);
+        assert_eq!(WifiSecurity::wep_key_type("0123456789"), WEP_KEY_TYPE_KEY);
+        assert_eq!(
+            WifiSecurity::wep_key_type("abcdef"),
+            WEP_KEY_TYPE_PASSPHRASE
+        );
+        // 13 characters is a 104-bit key, even when somebody meant it as a
+        // passphrase. nmcli guesses the same; see `wep_key_type`.
+        assert_eq!(
+            WifiSecurity::wep_key_type("correct-horse"),
+            WEP_KEY_TYPE_KEY
+        );
+        // Ten characters that are not all hex are not a 40-bit hex key.
+        assert_eq!(
+            WifiSecurity::wep_key_type("letmein-ok"),
+            WEP_KEY_TYPE_PASSPHRASE
+        );
     }
 
     #[test]

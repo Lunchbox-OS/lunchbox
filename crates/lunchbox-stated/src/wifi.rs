@@ -73,6 +73,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use lunchbox_api::{
     SavedWifiNetwork, WifiJoinFailure, WifiJoinFailureKind, WifiJoinRequest, WifiJoinState,
+    WifiSecurity,
 };
 use lunchbox_state_proto::WifiAuthorityReply;
 use tracing::{debug, info, warn};
@@ -854,13 +855,30 @@ fn profile_settings(
     if let Some(key_mgmt) = request.security.key_mgmt() {
         let mut security: HashMap<String, OwnedValue> = HashMap::new();
         security.insert("key-mgmt".into(), own(Value::from(key_mgmt)));
-        if let Some(password) = &request.password {
-            security.insert("psk".into(), own(Value::from(password.clone())));
-            // 0 is NM_SETTING_SECRET_FLAG_NONE: NetworkManager keeps the
-            // secret. Any other flag means "ask an agent", and the kiosk
-            // session has none — the association would fail with a reason that
-            // reads exactly like a wrong password.
-            security.insert("psk-flags".into(), own(Value::from(0u32)));
+        match (&request.password, request.security) {
+            // WEP's key goes in the first of its four slots, which is the one
+            // transmitted with unless `wep-tx-keyidx` says otherwise, and
+            // `auth-alg` is left at its default, open system. Nearly every WEP
+            // network is set up that way; one using shared-key authentication
+            // or a key in another slot needs admin mode.
+            (Some(key), WifiSecurity::Wep) => {
+                security.insert("wep-key0".into(), own(Value::from(key.clone())));
+                security.insert(
+                    "wep-key-type".into(),
+                    own(Value::from(WifiSecurity::wep_key_type(key))),
+                );
+                // The same reason as `psk-flags` below.
+                security.insert("wep-key-flags".into(), own(Value::from(0u32)));
+            }
+            (Some(password), _) => {
+                security.insert("psk".into(), own(Value::from(password.clone())));
+                // 0 is NM_SETTING_SECRET_FLAG_NONE: NetworkManager keeps the
+                // secret. Any other flag means "ask an agent", and the kiosk
+                // session has none — the association would fail with a reason
+                // that reads exactly like a wrong password.
+                security.insert("psk-flags".into(), own(Value::from(0u32)));
+            }
+            (None, _) => {}
         }
         settings.insert("802-11-wireless-security".to_string(), security);
     }
@@ -969,7 +987,6 @@ async fn check_authority(conn: &zbus::Connection) -> Result<Vec<&'static str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lunchbox_api::WifiSecurity;
 
     fn request(security: WifiSecurity, password: Option<&str>) -> WifiJoinRequest {
         WifiJoinRequest {
@@ -1060,6 +1077,33 @@ mod tests {
         assert_eq!(
             owned_str(&settings["802-11-wireless-security"]["key-mgmt"]).unwrap(),
             "sae"
+        );
+    }
+
+    #[test]
+    fn wep_writes_the_key_nmcli_would_and_no_psk() {
+        // `nmcli --offline` on 1.54.3 writes key-mgmt=none, wep-key-type and
+        // wep-key0 for these keys; the flag is ours, for the reason psk-flags
+        // is.
+        let settings = profile_settings(&request(WifiSecurity::Wep, Some("abcde")), "u-1");
+        let security = &settings["802-11-wireless-security"];
+        assert_eq!(owned_str(&security["key-mgmt"]).unwrap(), "none");
+        assert_eq!(owned_str(&security["wep-key0"]).unwrap(), "abcde");
+        assert_eq!(u32::try_from(&security["wep-key-type"]).unwrap(), 1);
+        assert_eq!(u32::try_from(&security["wep-key-flags"]).unwrap(), 0);
+        assert!(
+            !security.contains_key("psk"),
+            "a WEP key in `psk` is ignored, and the join fails as a wrong password"
+        );
+
+        let settings = profile_settings(
+            &request(WifiSecurity::Wep, Some("an old passphrase")),
+            "u-1",
+        );
+        assert_eq!(
+            u32::try_from(&settings["802-11-wireless-security"]["wep-key-type"]).unwrap(),
+            2,
+            "anything but a raw key's exact length is a passphrase"
         );
     }
 

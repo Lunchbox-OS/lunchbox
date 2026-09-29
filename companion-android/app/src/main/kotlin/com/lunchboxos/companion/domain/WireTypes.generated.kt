@@ -3182,7 +3182,10 @@ enum class WifiSecurity(val wire: String) {
      */
     ENTERPRISE("enterprise"),
     /**
-     * WEP. Recognised for the same reason, and it is not coming back.
+     * WEP. Cryptographically broken, and joinable anyway: someone joining
+     * it knowingly is no worse off than on an open network, and an old WEP
+     * network is sometimes the only one within reach of the TV. See
+     * [`WifiSecurity::wep_key_type`] for how the key is interpreted.
      */
     WEP("wep"),
     /**
