@@ -70,15 +70,33 @@ private fun securityLabel(security: WifiSecurity): String = when (security) {
 
 /** Whether this kind of network can be joined from here. */
 private fun joinable(security: WifiSecurity): Boolean =
-    security != WifiSecurity.ENTERPRISE && security != WifiSecurity.WEP
+    security != WifiSecurity.ENTERPRISE
 
 private fun needsPassword(security: WifiSecurity): Boolean =
-    security == WifiSecurity.WPA_PSK || security == WifiSecurity.SAE
+    security == WifiSecurity.WPA_PSK || security == WifiSecurity.SAE ||
+        security == WifiSecurity.WEP
 
-/** What a manual entry may choose. Enterprise and WEP are not written here. */
+/**
+ * The forms a WEP key may take. The device works out which from its length,
+ * the way NetworkManager does, so nobody is asked to pick one.
+ */
+private const val WEP_KEY_HINT =
+    "5 or 13 characters, 10 or 26 hexadecimal digits, or a passphrase."
+
+/**
+ * Said before a WEP join rather than refusing one. Joining it knowingly is no
+ * worse than an open network, which is joined without a word; the point is
+ * the "knowingly".
+ */
+private const val WEP_NOTE =
+    "WEP is old and easily broken: anyone nearby can read this network's traffic, " +
+        "as on an open network."
+
+/** What a manual entry may choose. Enterprise is not written here. */
 private val MANUAL_SECURITY = listOf(
     WifiSecurity.WPA_PSK to "WPA/WPA2 Personal",
     WifiSecurity.SAE to "WPA3 Personal",
+    WifiSecurity.WEP to "WEP (older routers)",
     WifiSecurity.OPEN to "None (open network)",
 )
 
@@ -104,6 +122,14 @@ private fun joinFailureText(state: WifiJoinState.Failed): String = when (state.r
     else -> state.reason.detail?.let { "Couldn't join ${state.ssid}: $it" }
         ?: "Couldn't join ${state.ssid}."
 }
+
+/** Under a WEP key field, the forms it may take; nothing for any other kind. */
+private fun wepKeyHint(security: WifiSecurity): (@Composable () -> Unit)? =
+    if (security == WifiSecurity.WEP) {
+        { Text(WEP_KEY_HINT) }
+    } else {
+        null
+    }
 
 /** The sheet for joining one network picked out of the scan. */
 @Composable
@@ -131,7 +157,15 @@ private fun JoinDialog(
                         value = password,
                         onValueChange = { password = it },
                         label = "Password",
+                        supportingText = wepKeyHint(network.security),
                         modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (network.security == WifiSecurity.WEP) {
+                    Text(
+                        WEP_NOTE,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Text(
@@ -212,7 +246,15 @@ private fun ManualDialog(
                         value = password,
                         onValueChange = { password = it },
                         label = "Password",
+                        supportingText = wepKeyHint(security),
                         modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (security == WifiSecurity.WEP) {
+                    Text(
+                        WEP_NOTE,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Row(
