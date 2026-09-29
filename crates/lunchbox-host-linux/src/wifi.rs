@@ -692,16 +692,15 @@ fn saved_from_settings(
         .and_then(|b| decode_ssid(&b))
         .or_else(|| as_str(connection.get("id")?))?;
 
-    let key_mgmt = config
-        .get("802-11-wireless-security")
-        .and_then(|s| s.get("key-mgmt"))
-        .and_then(as_str);
+    let security = config.get("802-11-wireless-security");
+    let key_mgmt = security.and_then(|s| s.get("key-mgmt")).and_then(as_str);
+    let has_wep_key = security.is_some_and(|s| s.keys().any(|k| k.starts_with("wep-")));
 
     Some(SavedWifiNetwork {
         active: active.contains(&uuid),
         id: uuid,
         ssid,
-        security: security_from_key_mgmt(key_mgmt.as_deref()),
+        security: security_from_key_mgmt(key_mgmt.as_deref(), has_wep_key),
         hidden: wireless.get("hidden").and_then(as_bool).unwrap_or(false),
         // Absent means true: NetworkManager's default, and netplan omits the
         // key entirely on Ubuntu rather than writing `autoconnect=true`.
@@ -717,8 +716,16 @@ fn saved_from_settings(
 /// The inverse of [`WifiSecurity::key_mgmt`], and deliberately not derived
 /// from it: `wpa-eap` and `wpa-eap-suite-b-192` map onto `Enterprise`, which
 /// has no `key_mgmt` of its own because these UIs will not write one.
-fn security_from_key_mgmt(key_mgmt: Option<&str>) -> WifiSecurity {
+///
+/// `none` is the one spelling `key-mgmt` alone cannot settle. It is how
+/// NetworkManager stores static WEP, and it is also legal with no key at all,
+/// which is an open network. `has_wep_key` is whether the section carries any
+/// `wep-*` property: GNOME, `nmcli` and the custodian all write
+/// `wep-key-type` alongside the key, and `GetSettings` returns it even though
+/// it withholds the key itself.
+fn security_from_key_mgmt(key_mgmt: Option<&str>, has_wep_key: bool) -> WifiSecurity {
     match key_mgmt {
+        Some("none") if has_wep_key => WifiSecurity::Wep,
         None | Some("none") => WifiSecurity::Open,
         Some("owe") => WifiSecurity::Owe,
         Some("wpa-psk") => WifiSecurity::WpaPsk,
@@ -726,8 +733,6 @@ fn security_from_key_mgmt(key_mgmt: Option<&str>) -> WifiSecurity {
         Some("wpa-eap") | Some("wpa-eap-suite-b-192") | Some("ieee8021x") => {
             WifiSecurity::Enterprise
         }
-        // A profile with a `wep-key0` and no key-mgmt reads as Open above;
-        // this arm catches the explicit spelling.
         Some(_) => WifiSecurity::Wep,
     }
 }
@@ -906,18 +911,57 @@ mod tests {
 
     #[test]
     fn stored_key_management_maps_back_to_a_security_kind() {
-        assert_eq!(security_from_key_mgmt(None), WifiSecurity::Open);
-        assert_eq!(security_from_key_mgmt(Some("none")), WifiSecurity::Open);
-        assert_eq!(security_from_key_mgmt(Some("owe")), WifiSecurity::Owe);
+        assert_eq!(security_from_key_mgmt(None, false), WifiSecurity::Open);
         assert_eq!(
-            security_from_key_mgmt(Some("wpa-psk")),
+            security_from_key_mgmt(Some("none"), false),
+            WifiSecurity::Open
+        );
+        assert_eq!(
+            security_from_key_mgmt(Some("owe"), false),
+            WifiSecurity::Owe
+        );
+        assert_eq!(
+            security_from_key_mgmt(Some("wpa-psk"), false),
             WifiSecurity::WpaPsk
         );
-        assert_eq!(security_from_key_mgmt(Some("sae")), WifiSecurity::Sae);
         assert_eq!(
-            security_from_key_mgmt(Some("wpa-eap")),
+            security_from_key_mgmt(Some("sae"), false),
+            WifiSecurity::Sae
+        );
+        assert_eq!(
+            security_from_key_mgmt(Some("wpa-eap"), false),
             WifiSecurity::Enterprise
         );
+    }
+
+    #[test]
+    fn a_wep_profile_is_not_mistaken_for_an_open_one() {
+        // The shape `nmcli --offline` writes for a WEP network on 1.54.3, as
+        // GetSettings returns it: the key itself is a secret and withheld,
+        // `wep-key-type` is not. Read on `key-mgmt` alone, this was Open.
+        let config = profile(&[
+            (
+                "connection",
+                &[
+                    ("type", owned(Value::from("802-11-wireless"))),
+                    ("uuid", owned(Value::from("u-wep"))),
+                    ("id", owned(Value::from("old-router"))),
+                ],
+            ),
+            (
+                "802-11-wireless",
+                &[("ssid", owned(Value::from(&b"old-router"[..])))],
+            ),
+            (
+                "802-11-wireless-security",
+                &[
+                    ("key-mgmt", owned(Value::from("none"))),
+                    ("wep-key-type", owned(Value::from(1u32))),
+                ],
+            ),
+        ]);
+        let saved = saved_from_settings(&config, &no_active()).expect("wireless");
+        assert_eq!(saved.security, WifiSecurity::Wep);
     }
 
     /// Every kind we will write must survive the round trip, or a saved
@@ -927,14 +971,14 @@ mod tests {
         for security in [WifiSecurity::Owe, WifiSecurity::WpaPsk, WifiSecurity::Sae] {
             let key_mgmt = security.key_mgmt().expect("writable kinds have a key-mgmt");
             assert_eq!(
-                security_from_key_mgmt(Some(key_mgmt)),
+                security_from_key_mgmt(Some(key_mgmt), false),
                 security,
                 "{security:?} did not survive the round trip"
             );
         }
         // Open is the one whose `key_mgmt` is None by design.
         assert!(WifiSecurity::Open.key_mgmt().is_none());
-        assert_eq!(security_from_key_mgmt(None), WifiSecurity::Open);
+        assert_eq!(security_from_key_mgmt(None, false), WifiSecurity::Open);
     }
 
     #[test]
