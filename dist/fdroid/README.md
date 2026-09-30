@@ -42,6 +42,11 @@ for the server side.
   ```
 
 - **One file per `applicationId`**, named exactly after it.
+- **Each listing's icon is `<applicationId>/en-US/icon.png`**, a symlink to the
+  app's artwork in [`assets/branding/icon/apps/`](../../assets/branding/icon/apps/).
+  fdroidserver 2.x no longer extracts icons from the APK, so without it the
+  client shows a placeholder. The repository's own icon is
+  `assets/branding/icon/lunchbox-256.png`.
 
 ## Testing changes locally
 

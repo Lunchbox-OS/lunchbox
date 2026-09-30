@@ -10,7 +10,9 @@
 # DIR becomes fdroidserver's working directory:
 #
 #   DIR/config.yml      generated here
-#   DIR/metadata/       copied from --metadata
+#   DIR/icon.png        the repository's icon, from --icon
+#   DIR/metadata/       copied from --metadata: <appId>.yml per app, and
+#                       <appId>/en-US/icon.png for its listing's icon
 #   DIR/repo/           the APKs, and the repository fdroid update writes
 #
 # `fdroid update` reports an APK rejected by AllowedAPKSigningKeys as a warning,
@@ -25,7 +27,8 @@
 #
 # Usage:
 #   fdroid-update.sh --out DIR --url URL --name NAME --description TEXT
-#                    [--metadata DIR] [--debug-keys] FILE.apk [...]
+#                    [--icon FILE.png] [--metadata DIR] [--debug-keys]
+#                    FILE.apk [...]
 
 set -euo pipefail
 
@@ -45,6 +48,7 @@ url=""
 name=""
 description=""
 metadata="$repo_root/dist/fdroid/metadata"
+icon="$repo_root/assets/branding/icon/lunchbox-256.png"
 debug_keys=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -52,6 +56,7 @@ while [[ $# -gt 0 ]]; do
         --url) url="$2"; shift 2 ;;
         --name) name="$2"; shift 2 ;;
         --description) description="$2"; shift 2 ;;
+        --icon) icon="$2"; shift 2 ;;
         --metadata) metadata="$2"; shift 2 ;;
         --debug-keys) debug_keys=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -72,6 +77,7 @@ done
 : "${FDROID_KEYSTORE_PASSWORD:?FDROID_KEYSTORE_PASSWORD is required}"
 [[ -f "$FDROID_KEYSTORE" ]] || die "keystore not found: $FDROID_KEYSTORE"
 [[ -d "$metadata" ]] || die "metadata directory not found: $metadata"
+[[ -f "$icon" ]] || die "icon not found: $icon"
 
 command -v fdroid >/dev/null \
     || die "fdroid is required: sudo apt install --no-install-recommends fdroidserver default-jdk-headless"
@@ -111,6 +117,19 @@ for meta in "$metadata"/*.yml; do
 done
 [[ "$debug_keys" == true ]] && echo "::warning::--debug-keys: signing-key pin NOT enforced" >&2
 
+# Listing icons. fdroidserver 2.x no longer extracts them from the APK; it
+# takes metadata/<appId>/en-US/icon.png, and a listing without one shows a
+# placeholder. -L because those are symlinks into assets/branding, so the
+# artwork has one copy in the tree.
+for dir in "$metadata"/*/; do
+    [[ -d "$dir" ]] && cp -RL "${dir%/}" "$out/metadata/"
+done
+
+# repo_icon is resolved against the working directory, and copied into
+# repo/icons/ under its basename. It is also written into the index as given,
+# so it has to be a bare file name: an absolute path would be published.
+cp "$icon" "$out/icon.png"
+
 # Absolute, because fdroid update runs from $out.
 keystore="$(realpath "$FDROID_KEYSTORE")"
 config="$out/config.yml"
@@ -126,6 +145,7 @@ q() { python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"; }
 repo_url: $(q "$url")
 repo_name: $(q "$name")
 repo_description: $(q "$description")
+repo_icon: icon.png
 # 0 = never archive: every version stays in repo/, so every version the index
 # was built from stays installable.
 archive_older: 0
