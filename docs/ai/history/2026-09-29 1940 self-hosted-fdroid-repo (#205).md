@@ -367,3 +367,92 @@ R2 as well. Doing this first lets #253 reuse the setup.
   keep working, which is why the test runs it.
 * **Losing the index key** means every device removes and re-adds the repo.
   Back it up offline, as with the APK key.
+
+## As built
+
+> how far can you go without additional input from me
+
+> go ahead
+
+Everything in *Work* except the pieces that wait on the index key, on branch
+`fdroid-r2`: `fdroid-update.sh` split out of `package_fdroid`; listing and
+repository icons; `publish-fdroid.sh`, `upload-fdroid.sh`,
+`fetch-fdroid-index.sh`, `fetch-release-apks.sh`; `test-publish-fdroid.sh` and
+CI's *F-Droid repository* job; the `publish` job's steps; and the runbook in
+`docs/release-signing.md`.
+
+### Where it departs from the scope above
+
+* **Uploads are signed by curl (`--aws-sigv4`), not the `aws` CLI.** That
+  needs nothing on either the runner or the Android image, and the test's
+  stand-in for R2 can verify the signatures. It found the one real pitfall:
+  curl signs the path as given, and fdroidserver names listing icons like
+  `icon_tfm-…=.png`. An unencoded `=` is signed as `=` and checked by S3 as
+  `%3D`, so the script percent-encodes keys itself. With that encoding
+  removed, the stand-in rejects the upload, which is what shows the check
+  works. The `aws` CLI checksum question goes away.
+* **The published index is verified by fdroidserver's own
+  `download_repo_index_v2`**, not by hand with `jarsigner`. `jarsigner
+  -verify` passes an unsigned jar, and fdroidserver's check (`-strict`,
+  expecting exit 4 for a self-signed certificate, then the single signer's
+  fingerprint, then the index hash against `entry.json`) is the one written
+  to match the client.
+* **An APK already in the bucket is recognised by `x-amz-meta-sha256`**, set
+  on upload. An `ETag` is not a usable content hash once an upload is
+  multipart.
+* **`status/` is not uploaded.** It is fdroidserver's report on the run (the
+  runner's OS, tool paths), and nothing a client reads.
+* **The fdroidserver steps run in the Android image through `docker
+  exec`**, one container for all of them. It has fdroidserver 2.4.3, which is
+  what CI tests with; the upload and the `gh` downloads stay on the runner.
+* **Publishing is switched on by committing
+  `dist/fdroid/index-key.fingerprint`.** Until then the steps warn and skip,
+  so this can merge before the key ceremony without breaking the next
+  release. After that, a missing secret fails the release like any other.
+
+### Found on the way
+
+* **Listing icons have never worked**, on fahrengit-451 either. fdroidserver
+  2.x stopped extracting them from APKs and reads
+  `metadata/<appId>/en-US/icon.png`, which never existed here. Each is now a
+  symlink to the #217 artwork. `repo_icon` has to be a bare file name in the
+  working directory: fdroidserver writes the value into the index as given.
+* **`config.yml` values were written unquoted.** That was harmless with the
+  fixed strings the local check used, but the real description has a colon.
+  They are JSON-quoted now, which also protects the keystore password.
+* **An empty `repo_description` crashes `fdroid update`** with a bare
+  `TypeError` while writing `index.xml`, so `--description` is required.
+
+### Checked, and not
+
+Checked here:
+
+* `test-publish-fdroid.sh`, 17 checks, including the refusals;
+* the real v0.6.1 APKs through `--rebuild` and `--previous` against a local
+  server, with a throwaway index key;
+* `fetch-release-apks.sh` against the live GitHub releases;
+* `release.yml` and `ci.yml` with actionlint. The three shellcheck findings it
+  reports in `ci.yml` are already on `main`.
+
+**Not run:** anything against R2 or Cloudflare, the `docker exec` steps, or
+the live smoke test. Nothing can be until the bucket and key exist. The two
+specific uncertainties:
+
+* whether R2 accepts curl's SigV4 as the stand-in does, in particular the
+  explicitly supplied `x-amz-content-sha256`;
+* whether the custom domain's cache honours the per-object `Cache-Control`
+  for `no-cache` index files.
+
+The first release after the fingerprint lands exercises both. If a dry run is
+wanted before that, running `upload-fdroid.sh` against the real bucket from a
+workstation checks the first.
+
+### Left for a human
+
+1. The bucket, domain, rewrite rule and token (`docs/release-signing.md`,
+   *The bucket*).
+2. The index key ceremony and its secrets (*Making it*).
+3. One commit with `dist/fdroid/index-key.fingerprint`, the new URL and
+   fingerprint in `docs/INSTALL.md`, and `scripts/lib/admin.sh:739`.
+4. The next release, then the phone check.
+5. Removing this source from fahrengit-451, and retitling #205.
