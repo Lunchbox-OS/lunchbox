@@ -1141,6 +1141,35 @@ jobs:
       - name: Test publish-apt.sh
         run: ./scripts/ci/test-publish-apt.sh
 
+  fdroid-repository:
+    name: F-Droid repository
+    # The F-Droid counterpart of the job above. release.yml publishes the
+    # repository to R2 only on a release tag; this runs the whole path
+    # offline -- throwaway keys, small APKs built with aapt2, and a local
+    # server standing in for R2's S3 API (checking each request's signature)
+    # and its public domain -- including the refusals. On the Android image
+    # for the SDK, and because it is the fdroidserver release.yml runs.
+    needs: image-android
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.image-android.outputs.ref }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --no-install-recommends: matplotlib and tk arrive as Recommends of
+      # androguard. default-jdk-headless because fdroidserver signs the index
+      # with /usr/lib/jvm/default-java/bin/jarsigner. See dist/fdroid/README.md.
+      - name: Install fdroidserver
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends fdroidserver default-jdk-headless
+
+      - name: Test publish-fdroid.sh and upload-fdroid.sh
+        run: ./scripts/ci/test-publish-fdroid.sh
+
   workflows:
     name: Workflow syntax
     # Static guard: fails if two jobs in one workflow file share a name. Forgejo
@@ -1168,7 +1197,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [image-base, image-android, image-cross, warmup, build, build-arm64, test, e2e, fmt, webui, package, versions, firewall, android-companion, android-media, config-editor, shellcheck, arch-neutral, apt-repository, workflows]
+    needs: [image-base, image-android, image-cross, warmup, build, build-arm64, test, e2e, fmt, webui, package, versions, firewall, android-companion, android-media, config-editor, shellcheck, arch-neutral, apt-repository, fdroid-repository, workflows]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded or was skipped

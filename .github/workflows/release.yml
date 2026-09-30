@@ -3,7 +3,8 @@ name: Release
 # Tag-driven release pipeline. Pushing a `vX.Y.Z` tag builds a `.deb` per
 # architecture and a signed `.apk` per Android module, then -- after a human
 # approves the `release` environment -- signs and attests them, publishes the
-# GitHub release, and publishes the apt repository at apt.lunchbox-os.com.
+# GitHub release, and publishes the apt repository at apt.lunchbox-os.com and
+# the F-Droid repository at fdroid.lunchbox-os.com.
 #
 # Release flow:
 #   ./scripts/lunchbox version set X.Y.Z
@@ -19,7 +20,8 @@ name: Release
 # See docs/ai/history/2026-07-04 003 binary-releases.md for the build half,
 # docs/release-signing.md for the keys, and
 # docs/ai/history/2026-09-19 005 self-hosted-apt-repo (#204).md for the apt
-# repository.
+# repository, and docs/ai/history/2026-09-29 1940 self-hosted-fdroid-repo
+# (#205).md for the F-Droid one.
 #
 # Shape: every build leg (`deb` per arch, `apk` per module) uploads its package
 # as an artifact, and a single `publish` job at the end signs, creates the
@@ -38,6 +40,10 @@ name: Release
 # In the `release` environment only, so no other job can read them:
 #   LUNCHBOX_APT_KEY_B64        base64 of the archive signing *subkey* export
 #   LUNCHBOX_APT_KEY_PASSPHRASE its passphrase
+#   LUNCHBOX_FDROID_KEYSTORE_B64       base64 of the F-Droid index keystore
+#   LUNCHBOX_FDROID_KEYSTORE_PASSWORD  its password
+#   LUNCHBOX_R2_ACCESS_KEY_ID          an R2 API token with Object Read & Write
+#   LUNCHBOX_R2_SECRET_ACCESS_KEY      on the lunchbox-fdroid bucket only
 # The release itself is created with the job's own GITHUB_TOKEN; there is no
 # PAT any more.
 
@@ -60,6 +66,10 @@ on:
         default: false
       apt_rebuild:
         description: "Regenerate the apt index from every release's assets instead of appending to the published one"
+        type: boolean
+        default: false
+      fdroid_rebuild:
+        description: "Regenerate the F-Droid repository from every release's APKs instead of the ones already in the bucket"
         type: boolean
         default: false
 
@@ -407,16 +417,14 @@ jobs:
           mkdir -p dist/pkg
           cp "$apk" "dist/pkg/${{ matrix.module.artifact }}_${version}.apk"
 
-      # Validate dist/fdroid/metadata against the APK we just signed. The
-      # published F-Droid repository is generated on the server that hosts
-      # git.armeafamily.com, which downloads these release assets and this
-      # repo's metadata at the release tag and runs `fdroid update` with nobody
-      # watching — so this is the last place a bad metadata file or a
-      # wrongly-signed APK can surface. `package fdroid` fails if the APK does
-      # not reach the generated index, which is what a mismatched
-      # AllowedAPKSigningKeys looks like (fdroid update warns, drops the APK,
-      # and still exits 0). Runs on dry runs too — that is the point of them.
-      # See dist/fdroid/README.md and docs/ai/history/2026-07-26 003 …spec.md.
+      # Validate dist/fdroid/metadata against the APK we just signed, with the
+      # same generation step the publish job runs (scripts/ci/fdroid-update.sh)
+      # and a throwaway index key. It catches a bad metadata file or a
+      # wrongly-signed APK before anyone has approved anything. `package
+      # fdroid` fails if the APK does not reach the generated index, which is
+      # what a mismatched AllowedAPKSigningKeys looks like (fdroid update
+      # warns, drops the APK, and still exits 0). Runs on dry runs too, which
+      # never reach the publish job. See dist/fdroid/README.md.
       - name: Validate the F-Droid metadata
         run: |
           apt-get update
@@ -456,9 +464,13 @@ jobs:
   #   4. build + deploy apt index   only now: the index points at step 3's
   #                                 assets, which 404 until the release is public
   #   5. smoke-test the live repo   apt-get download through the redirect
+  #   6. build + upload the F-Droid the APKs, then the index, then entry.jar;
+  #      repository                 see upload-fdroid.sh for why that order
+  #   7. smoke-test it              what a phone checks, and the APKs' bytes
   #
   # Re-running the job is safe: publish-release.sh completes a draft or adds
-  # only missing assets, and publish-apt.sh skips what is already indexed.
+  # only missing assets, publish-apt.sh skips what is already indexed, and
+  # upload-fdroid.sh skips APKs already in the bucket.
   #
   # It also reverses a deliberate decision recorded on the `deb` matrix --
   # "publish whichever architecture succeeded rather than losing both to one
@@ -469,11 +481,12 @@ jobs:
   # broken leg still reports alongside the others rather than cancelling them.
   #
   # One job rather than a release job and an apt job: both need the key, and
-  # each job that names the environment asks for its own approval.
+  # each job that names the environment asks for its own approval. The F-Droid
+  # steps are in it for the same reason.
   # --------------------------------------------------------------------------
   publish:
     name: Publish release
-    needs: [guard, deb, apk]
+    needs: [guard, image-android, deb, apk]
     if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
     runs-on: ubuntu-latest
     environment: release
@@ -481,6 +494,7 @@ jobs:
       contents: write      # create the release and upload its assets
       id-token: write      # the Sigstore certificate behind the attestation
       attestations: write  # store the attestation
+      packages: read       # pull the Android CI image for the F-Droid steps
     env:
       REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
@@ -489,6 +503,11 @@ jobs:
       # as for the config editor.
       APT_PAGES_PROJECT: lunchbox-apt
       WRANGLER_VERSION: "4.125.0"
+      # The F-Droid repository: an R2 bucket with fdroid.lunchbox-os.com as its
+      # custom domain. The URL is also what publish-fdroid.sh writes into the
+      # index, and the bucket keys follow its path.
+      FDROID_URL: https://fdroid.lunchbox-os.com/fdroid/repo
+      FDROID_BUCKET: lunchbox-fdroid
     steps:
       - uses: actions/checkout@v4
 
@@ -631,6 +650,120 @@ jobs:
             cmp "$got" "$deb" || { echo "::error::$got from $APT_URL differs from the built $deb"; exit 1; }
             echo "OK: lunchbox:$arch=$version from $APT_URL matches the release asset"
           done
+
+      # Everything from here is the F-Droid repository, which prereleases skip
+      # for the same reason as apt. Committing the index key's fingerprint
+      # (dist/fdroid/index-key.fingerprint) is what switches it on: until the
+      # key exists these steps say so and publish nothing, so a release cut
+      # before then still publishes everything else. Once the fingerprint is
+      # committed, a missing secret fails the release like any other.
+      - name: Check whether the F-Droid repository is set up
+        id: fdroid
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          if [ -f dist/fdroid/index-key.fingerprint ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::dist/fdroid/index-key.fingerprint is not committed, so the F-Droid repository was not published. See docs/release-signing.md."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The F-Droid steps run in the Android image: fdroidserver 2.4.3 on
+      # Ubuntu 26.04, which is what the apk job's validation and CI's
+      # fdroid-repository job run. The runner's own Ubuntu ships an older one.
+      # One container for all of them, so fdroidserver is installed once.
+      - name: Start the Android image for the F-Droid steps
+        if: steps.fdroid.outputs.enabled == 'true'
+        env:
+          IMAGE: ${{ needs.image-android.outputs.ref }}
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker run -d --name fdroid \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
+            -w "$GITHUB_WORKSPACE" "$IMAGE" sleep infinity
+          docker exec fdroid sh -c 'apt-get update -q && apt-get install -y -q --no-install-recommends fdroidserver default-jdk-headless' >/dev/null
+          docker exec fdroid fdroid --version
+
+      # Builds on the APKs already in the bucket -- after checking the
+      # published index against the key devices trust -- unless a rebuild was
+      # asked for, or there is no published index yet (the first release).
+      # Only a 404 means "none yet": any other failure to fetch entry.jar fails
+      # the step rather than quietly rebuilding.
+      - name: Build the F-Droid repository
+        if: steps.fdroid.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEYSTORE_B64: ${{ secrets.LUNCHBOX_FDROID_KEYSTORE_B64 }}
+          FDROID_KEYSTORE_PASSWORD: ${{ secrets.LUNCHBOX_FDROID_KEYSTORE_PASSWORD }}
+          REBUILD: ${{ github.event.inputs.fdroid_rebuild == 'true' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$FDROID_KEYSTORE_PASSWORD" ]; then
+            echo "::error::LUNCHBOX_FDROID_KEYSTORE_B64 and LUNCHBOX_FDROID_KEYSTORE_PASSWORD must be set in the release environment. See docs/release-signing.md."
+            exit 1
+          fi
+          keystore="$RUNNER_TEMP/fdroid-index.p12"
+          trap 'rm -f "$keystore"' EXIT
+          (umask 077 && echo "$KEYSTORE_B64" | base64 -d > "$keystore")
+          code="$(curl -sS -o /dev/null -w '%{http_code}' "$FDROID_URL/entry.jar" || true)"
+          if [ "$REBUILD" = true ] || [ "$code" = 404 ]; then
+            echo "Regenerating the repository from every release's APKs (asked for: $REBUILD; published entry.jar: HTTP $code)"
+            ./scripts/ci/fetch-release-apks.sh dist/fdroid-releases
+            mode=(--rebuild dist/fdroid-releases)
+          else
+            mode=(--previous "$FDROID_URL")
+          fi
+          docker exec -e FDROID_URL -e FDROID_KEYSTORE="$keystore" -e FDROID_KEYSTORE_PASSWORD fdroid \
+            ./scripts/ci/publish-fdroid.sh --out dist/fdroid-site "${mode[@]}" dist/pkg/*.apk
+
+      # Order stands in for an atomic deploy, which R2 does not have: see
+      # upload-fdroid.sh. On the runner, since it needs only curl.
+      - name: Upload the F-Droid repository to R2
+        if: steps.fdroid.outputs.enabled == 'true'
+        env:
+          FDROID_S3_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          FDROID_S3_ACCESS_KEY_ID: ${{ secrets.LUNCHBOX_R2_ACCESS_KEY_ID }}
+          FDROID_S3_SECRET_ACCESS_KEY: ${{ secrets.LUNCHBOX_R2_SECRET_ACCESS_KEY }}
+        run: ./scripts/ci/upload-fdroid.sh dist/fdroid-site
+
+      # What a phone does: verify entry.jar against the fingerprint in
+      # docs/INSTALL.md and the index against entry.jar, then find this
+      # release's APKs listed, and download each to compare with what was
+      # built. The landing page only warns: it depends on a rewrite rule in
+      # the zone, not on anything this job publishes.
+      - name: Smoke-test the live F-Droid repository
+        if: steps.fdroid.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist/fdroid-smoke
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if docker exec fdroid ./scripts/ci/fetch-fdroid-index.sh "$FDROID_URL" dist/fdroid-smoke/index-v2.json \
+              && python3 - dist/fdroid-smoke/index-v2.json dist/pkg/*.apk <<'PY'
+          import json, os, sys
+          d = json.load(open(sys.argv[1]))
+          listed = {v["file"]["name"].lstrip("/") for p in d["packages"].values() for v in p["versions"].values()}
+          missing = [os.path.basename(a) for a in sys.argv[2:] if os.path.basename(a) not in listed]
+          if missing:
+              sys.exit("not listed yet: " + ", ".join(missing))
+          PY
+            then
+              break
+            fi
+            [ "$attempt" -lt 10 ] || { echo "::error::$FDROID_URL does not list this release's APKs"; exit 1; }
+            sleep 15
+          done
+          for apk in dist/pkg/*.apk; do
+            name="$(basename "$apk")"
+            curl -fsSL -o "dist/fdroid-smoke/$name" "$FDROID_URL/$name"
+            cmp "dist/fdroid-smoke/$name" "$apk" || { echo "::error::$name from $FDROID_URL differs from the built $apk"; exit 1; }
+            echo "OK: $name from $FDROID_URL matches the release asset"
+          done
+          if ! curl -fsSL "$FDROID_URL/" | grep -q 'index.png'; then
+            echo "::warning::$FDROID_URL/ does not serve the landing page. Add the zone rewrite rule for /fdroid/repo/ -> /fdroid/repo/index.html (see docs/release-signing.md)."
+          fi
 
   # --------------------------------------------------------------------------
   # dry-run-note: says, on a manual run with `publish` off, that the builds all

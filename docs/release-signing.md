@@ -14,8 +14,9 @@ A third guarantee needs no key at all: each `.deb` also carries a
 Sigstore with a short-lived certificate issued to the workflow run.
 
 The **Android release keystore**, which signs the APKs, is a separate key with
-its own lifetime. It has [its own section](#the-android-release-keystore) at
-the end.
+its own lifetime. It has [its own section](#the-android-release-keystore)
+near the end, and so does the [F-Droid index key](#the-f-droid-index-key),
+which signs the F-Droid repository those APKs are published through.
 
 ## The key
 
@@ -423,3 +424,121 @@ shred -u lunchbox-release.p12; unset KS_PASS
 Then update both `AllowedAPKSigningKeys` pins and the table above in the same
 commit. The release's `apk` job runs `lunchbox package fdroid` against every
 APK it signs, so a pin that does not match the secret fails the release.
+
+## The F-Droid index key
+
+The F-Droid repository at <https://fdroid.lunchbox-os.com/fdroid/repo> is
+signed by a third key: an RSA key in a PKCS12 keystore that signs the index
+(`entry.jar`, `index-v1.jar`). The APKs inside are still signed by the Android
+release keystore above. The index key's fingerprint is part of the repository
+URL every phone is configured with, and a client rejects an index signed by
+anything else. So, like the other two, **it is permanent**: replacing it means
+every device removes the repository and adds it again.
+
+| | |
+|---|---|
+| Certificate | `CN=Lunchbox F-Droid Repository, O=Lunchbox OS, C=US`, RSA 4096, 100-year validity |
+| SHA-256 | `dist/fdroid/index-key.fingerprint`, and in the URL in [docs/INSTALL.md](INSTALL.md) |
+| Offline copy | password manager: the `.p12`, its password |
+| CI copy | `release` environment secrets |
+
+Where the repository is hosted, and why, is in
+[`docs/ai/history/2026-09-29 1940 self-hosted-fdroid-repo (#205).md`](ai/history/2026-09-29%201940%20self-hosted-fdroid-repo%20(%23205).md).
+
+### Making it
+
+It replaced the Shepherd-era key behind `b3dc61…b422`, which lived on the
+Forgejo host and only ever signed the `com.armeafamily.shepherd.*` apps.
+
+```sh
+umask 077
+read -rsp 'keystore password: ' KS_PASS; echo; export KS_PASS
+
+keytool -genkeypair \
+  -keystore lunchbox-fdroid-index.p12 -storetype PKCS12 -storepass:env KS_PASS \
+  -alias fdroid-index \
+  -keyalg RSA -keysize 4096 -sigalg SHA256withRSA \
+  -validity 36500 \
+  -dname 'CN=Lunchbox F-Droid Repository, O=Lunchbox OS, C=US'
+
+# The fingerprint devices pin: the certificate's SHA-256, as the F-Droid
+# client and fdroidserver compute it.
+keytool -list -v -keystore lunchbox-fdroid-index.p12 -storepass:env KS_PASS \
+  | awk '/SHA256:/{gsub(":","",$2); print tolower($2); exit}' \
+  > dist/fdroid/index-key.fingerprint
+
+R=Lunchbox-OS/lunchbox
+base64 -w0 lunchbox-fdroid-index.p12 \
+  | gh secret set LUNCHBOX_FDROID_KEYSTORE_B64 --env release --repo $R
+printf %s "$KS_PASS" | gh secret set LUNCHBOX_FDROID_KEYSTORE_PASSWORD --env release --repo $R
+
+# After the .p12 and its password are in the password manager:
+shred -u lunchbox-fdroid-index.p12; unset KS_PASS
+```
+
+The alias must be `fdroid-index`, which is what `fdroid-update.sh` asks
+fdroidserver for.
+
+### The bucket
+
+1. **R2**, which needs a payment method on the Cloudflare account even on the
+   free tier.
+2. A bucket named **`lunchbox-fdroid`**, with **`fdroid.lunchbox-os.com`** as
+   its custom domain, and public `r2.dev` access left **off**.
+3. A zone **Rewrite Rule** (Rules → Transform Rules → Rewrite URL) so the
+   landing page answers at the repository's own address, which R2 does not
+   do for a directory: when the URI path equals `/fdroid/repo/`, rewrite the
+   path to `/fdroid/repo/index.html`. Without it, `/fdroid/repo/` is a 404;
+   the release's smoke test warns about exactly this.
+4. An **R2 API token** with *Object Read & Write* on that bucket only. Its
+   S3 credentials go in the environment:
+
+   ```sh
+   gh secret set LUNCHBOX_R2_ACCESS_KEY_ID --env release --repo Lunchbox-OS/lunchbox
+   gh secret set LUNCHBOX_R2_SECRET_ACCESS_KEY --env release --repo Lunchbox-OS/lunchbox
+   ```
+
+   The endpoint is built from the existing `CLOUDFLARE_ACCOUNT_ID`.
+
+### Switching it on
+
+The release job publishes the F-Droid repository only once
+`dist/fdroid/index-key.fingerprint` is committed; until then it warns and
+skips it. Commit the fingerprint in the same change that puts the new URL and
+fingerprint in `docs/INSTALL.md` and `scripts/lib/admin.sh`, **after** the
+secrets and the bucket exist, since from that commit on a missing secret fails
+the release.
+
+The first release after that finds no `entry.jar` (a 404) and builds the
+repository from the APKs of every release since v0.6.0, rather than from the
+bucket. Before relying on it, check on a phone: add the repository from the
+QR code at `/fdroid/repo/`, install both apps, and interrupt one download to
+see it resume.
+
+### What a release does with it
+
+After the apt repository, and for non-prerelease tags only:
+
+| Step | Script | Fails closed on |
+|---|---|---|
+| gather every published APK and add this release's | `scripts/ci/publish-fdroid.sh` | a published index that does not verify against the fingerprint, an APK whose bytes differ from what the index signed |
+| generate and sign the index | `scripts/ci/fdroid-update.sh` | a keystore that is not the pinned index key, an APK the signing pin in `dist/fdroid/metadata` rejects |
+| upload: APKs, then the index, then `entry.jar` | `scripts/ci/upload-fdroid.sh` | an APK already in the bucket with different bytes |
+| verify the live index the way a phone does, and download each new APK | inline | an APK that differs from the one built |
+
+To test a change to any of it without a release, run
+`./scripts/ci/test-publish-fdroid.sh` (it needs fdroidserver and the Android
+SDK). It runs the whole path offline against a stand-in for R2 that checks
+request signatures. CI runs it as the *F-Droid repository* job.
+
+### Recovering the bucket
+
+The bucket is the only copy of the published repository, but everything in
+it can be rebuilt from release assets: *Actions → Release → Run workflow*,
+**from the latest release tag**, with both `publish` and `fdroid_rebuild`
+ticked. It downloads the APKs of every release since v0.6.0, checks each
+against its `.sha256`, and republishes. The signing pin refuses anything not
+signed by the Android release key.
+
+Nothing ever deletes from the bucket, and an APK there is never replaced.
+Rolling back an index means re-running an earlier tag's publish.
