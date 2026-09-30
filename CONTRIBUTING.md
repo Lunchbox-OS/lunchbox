@@ -546,8 +546,8 @@ its Rust cdylib against (via `cargo-ndk`); see that crate's README for its build
 
 Both apps are published to an F-Droid repository, whose listings live in
 [`dist/fdroid/`](dist/fdroid/README.md). If you change them, validate against
-real APKs before pushing a tag — `release.yml` runs the same command, and the
-server that publishes the repository does not:
+real APKs before pushing a tag. This runs the same generation step the release
+does, with a throwaway index key:
 
 ```sh
 sudo apt install --no-install-recommends fdroidserver default-jdk-headless
@@ -730,12 +730,15 @@ fail the build if any literal is edited by hand and drifts out of sync.
 
 ### Release signing
 
-Two separate keys sign what a release publishes. The **Android release
+Three separate keys sign what a release publishes. The **Android release
 keystore** signs the APKs (`LUNCHBOX_KEYSTORE_B64` and the three secrets beside
 it, used by the `apk` job). The **archive signing key** signs the apt
 repository index at <https://apt.lunchbox-os.com> and the detached `.asc`
 beside each `.deb`; it is an Ed25519 key whose signing subkey — and only its
-signing subkey — lives in the `release` environment's secrets.
+signing subkey — lives in the `release` environment's secrets. The **F-Droid
+index key** signs the F-Droid repository at
+<https://fdroid.lunchbox-os.com/fdroid/repo>, which lives in an R2 bucket; it
+and the bucket's credentials are in the `release` environment too.
 
 [docs/release-signing.md](./docs/release-signing.md) is the runbook: the
 one-time key ceremony with exact `gpg` commands, the `gh` calls that create the
@@ -751,6 +754,18 @@ only on a release tag, so test a change to it with
 
 which publishes two synthetic releases under a throwaway key and runs a real
 `apt-get update` and `apt-get download` against them. CI runs it too.
+
+`scripts/ci/publish-fdroid.sh` and `scripts/ci/upload-fdroid.sh` build the
+F-Droid repository and upload it. Test a change to either with
+
+```sh
+./scripts/ci/test-publish-fdroid.sh   # needs fdroidserver and the Android SDK; no root, no network
+```
+
+which builds small APKs for two releases with `aapt2`, publishes them under
+throwaway keys to a local stand-in for R2 that checks request signatures, and
+verifies the result the way the F-Droid client does. CI runs it too, on the
+Android image.
 
 ## Contribution guidelines
 

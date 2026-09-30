@@ -182,14 +182,13 @@ package_deb() {
 # Generate an F-Droid repository from built APKs.
 #
 # This is a *validation and local-testing* tool, not a publish step: the real
-# repository is generated on the server that hosts the F-Droid repository, by a
-# service that downloads each release's APK assets and this repo's
-# dist/fdroid/metadata/ at the release tag. See dist/fdroid/README.md.
+# repository is built by release.yml's publish job (scripts/ci/publish-fdroid.sh)
+# with the permanent index key. See dist/fdroid/README.md.
 #
-# Running it in release.yml is what keeps that server-side generation from being
-# the first thing to notice a broken metadata file or a wrongly-signed APK.
-# The generation itself, and the check that every APK reached the index, are
-# scripts/ci/fdroid-update.sh; this adds a throwaway index key.
+# Both run the same generation step, scripts/ci/fdroid-update.sh, including the
+# check that every APK reached the index; this adds a throwaway index key.
+# release.yml's apk job runs it on each signed APK, so a broken metadata file
+# or a wrongly-signed APK fails before anyone approves the release.
 package_fdroid() {
     local out_dir="dist/fdroid-repo"
     local apk_dir="dist/pkg"
@@ -685,8 +684,9 @@ package_fdroid_usage() {
 Usage: lunchbox package fdroid [OPTIONS]
 
 Generates an F-Droid repository from built APKs and asserts that every one of
-them reached the index. Validation and local testing only — the published
-repository is generated on the server (see dist/fdroid/README.md).
+them reached the index. Validation and local testing only, with a throwaway
+index key — the published repository is built by release.yml (see
+dist/fdroid/README.md).
 
 Options:
     --apks DIR     Directory holding the .apk files (default: dist/pkg)
